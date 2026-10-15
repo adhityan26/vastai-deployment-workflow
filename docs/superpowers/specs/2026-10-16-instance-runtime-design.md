@@ -200,20 +200,59 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 - Setiap baris di bagian 10 punya tes.
 - S1–S4 lulus atau cadangannya terpilih dan tercatat.
 
-## 13. Struktur repo
+## 13. Struktur repo (monorepo, publik)
 
 ```
-instance/
+instance/               # sub-proyek 1: jalan di Vast
   bootstrap.sh
   failsafe.sh
   supervisord.conf
   agent/                # Python/FastAPI
   profiles/image.yaml
   workflows/
-docs/superpowers/specs/
+apps/                   # sub-proyek 2-3: jalan di homelab
+  core/                 #   modul generate bersama (workflow + submit + hasil + mode)
+  watchdog/             #   proses kecil, berdiri sendiri
+  bot/                  #   bot Discord
+  web/                  #   halaman generate untuk HP
+contracts/              # skema /status dan API agent (satu sumber kebenaran)
+docs/superpowers/       # spec dan plan per sub-proyek
 ```
 
-## 14. Pertanyaan terbuka
+Aturan repo publik: **tidak ada rahasia di repo**. Token Discord, API key Vast, auth key Tailscale,
+token agent, ID user/role, dan alamat homelab hanya ada di `.env` atau file konfigurasi lokal yang
+di-`.gitignore`. Yang di-commit hanya `*.example` berisi placeholder. `.env` di-ignore sejak commit pertama
+dan dipasang pemeriksaan rahasia sebelum commit (lihat `scripts/check-secrets.sh`).
+
+## 14. Konfigurasi dan rahasia
+
+Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan mudah merawatnya.
+
+1. **Satu skema config**: `contracts/config-schema.yaml`. Tiap key punya: `name`, `component` (instance/agent, instance/failsafe, apps/watchdog, apps/bot, ...), `secret` (ya/tidak), `required`, `default`, `description`. Skema adalah satu-satunya daftar key yang sah.
+2. **Satu loader per komponen** (mis. `instance/agent/config.py`, `apps/core/config.py`). Kode tidak membaca `os.environ` langsung; semua lewat loader.
+3. **Loader membaca dari file config**, bukan dari environment proses.
+   - Homelab: `config.env` lokal, di-`.gitignore`.
+   - Instance: Vast hanya meneruskan konfigurasi lewat env var saat instance dibuat, jadi `bootstrap.sh` menulis env itu ke satu file config **root-only (mode 600)** pada langkah pertama boot. Agent dan failsafe membaca dari file itu.
+4. **Fail fast**: key wajib kosong atau key di luar skema menghentikan program saat start dengan pesan yang menyebut nama key. Nilai `secret: true` tidak pernah dicetak di log (ditampilkan sebagai `***`).
+5. **`config.example` dihasilkan dari skema** dan satu-satunya yang di-commit. Perintah `--list-config` (atau skrip) mencetak semua key, pemakainya, dan mana yang rahasia.
+6. **Pemeriksaan rahasia**: `.gitignore` mencakup `.env`, `.env.*`, `config.env`, `*.key`, `*.pem`; hook `pre-commit` (`.githooks/`, `scripts/check-secrets.sh`) menolak file config/rahasia yang ter-stage dan menjalankan `gitleaks protect --staged`.
+
+### Daftar awal key (diperbarui di skema, bukan di sini)
+
+| Key | Pemakai | Rahasia |
+|---|---|---|
+| `VAST_API_KEY` (key utama) | apps/watchdog, apps/bot | ya |
+| `CONTAINER_ID`, `CONTAINER_API_KEY` | instance/failsafe, instance/agent (disuntik Vast) | ya |
+| `AGENT_TOKEN` | instance/agent, apps (dibuat per instance) | ya |
+| `TS_AUTHKEY` | instance/bootstrap (sekali pakai) | ya |
+| `TS_API_CREDENTIAL` | apps (membuat auth key) | ya |
+| `HF_TOKEN` | instance/bootstrap (opsional) | ya |
+| `DISCORD_BOT_TOKEN` | apps/bot, apps/watchdog | ya |
+| `DISCORD_ADMIN_USER_IDS`, `DISCORD_ALERT_TARGET` | apps | tidak |
+| `PROFILE`, `IDLE_MINUTES`, `IDLE_WARN_MINUTES`, `FAILSAFE_HOURS`, `HARD_CAP_HOURS`, `BOOT_TIMEOUT_MIN` | instance dan apps | tidak |
+| `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S` | apps | tidak |
+
+## 15. Pertanyaan terbuka
 
 - Nilai pasti batas boot (default 25 menit) dan apakah perlu bergantung pada kecepatan host.
 - Strategi menjalankan `onstart` (batas panjang dan perilaku run-ulang belum terverifikasi); alternatif `PROVISIONING_SCRIPT`. Ditentukan setelah S1.
