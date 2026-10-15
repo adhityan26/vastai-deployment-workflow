@@ -220,8 +220,8 @@ docs/superpowers/       # spec dan plan per sub-proyek
 ```
 
 Aturan repo publik: **tidak ada rahasia di repo**. Token Discord, API key Vast, auth key Tailscale,
-token agent, ID user/role, dan alamat homelab hanya ada di `.env` atau file konfigurasi lokal yang
-di-`.gitignore`. Yang di-commit hanya `*.example` berisi placeholder. `.env` di-ignore sejak commit pertama
+token agent, ID user/role, dan alamat homelab hanya ada di `.env` lokal yang
+di-`.gitignore`. `.env` di-ignore sejak commit pertama
 dan dipasang pemeriksaan rahasia sebelum commit (lihat `scripts/check-secrets.sh`).
 
 ## 14. Konfigurasi dan rahasia
@@ -229,13 +229,13 @@ dan dipasang pemeriksaan rahasia sebelum commit (lihat `scripts/check-secrets.sh
 Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan mudah merawatnya.
 
 1. **Satu skema config**: `contracts/config-schema.yaml`. Tiap key punya: `name`, `component` (instance/agent, instance/failsafe, apps/watchdog, apps/bot, ...), `secret` (ya/tidak), `required`, `default`, `description`. Skema adalah satu-satunya daftar key yang sah.
-2. **Satu loader per komponen** (mis. `instance/agent/config.py`, `apps/core/config.py`). Kode tidak membaca `os.environ` langsung; semua lewat loader.
-3. **Loader membaca dari file config**, bukan dari environment proses.
-   - Homelab: `config.env` lokal, di-`.gitignore`.
-   - Instance: Vast hanya meneruskan konfigurasi lewat env var saat instance dibuat, jadi `bootstrap.sh` menulis env itu ke satu file config **root-only (mode 600)** pada langkah pertama boot. Agent dan failsafe membaca dari file itu.
+2. **Satu modul `config` per komponen** (pola `config.js` yang memetakan `process.env` ke objek bernama, mis. `instance/agent/config.py`, `apps/core/config.*`). Hanya modul ini yang membaca env; kode lain mengimpor dari sana.
+3. **Sumbernya file `.env`** (standar), dimuat saat start (dotenv / python-dotenv).
+   - Homelab: `.env` lokal, di-`.gitignore`.
+   - Instance: Vast hanya meneruskan konfigurasi lewat env var saat instance dibuat, dan env var bisa hilang di sesi tertentu, jadi `bootstrap.sh` menulis env itu ke `.env` **root-only (mode 600)** pada langkah pertama boot. Agent dan failsafe memuat `.env` itu.
 4. **Fail fast**: key wajib kosong atau key di luar skema menghentikan program saat start dengan pesan yang menyebut nama key. Nilai `secret: true` tidak pernah dicetak di log (ditampilkan sebagai `***`).
-5. **`config.example` dihasilkan dari skema** dan satu-satunya yang di-commit. Perintah `--list-config` (atau skrip) mencetak semua key, pemakainya, dan mana yang rahasia.
-6. **Pemeriksaan rahasia**: `.gitignore` mencakup `.env`, `.env.*`, `config.env`, `*.key`, `*.pem`; hook `pre-commit` (`.githooks/`, `scripts/check-secrets.sh`) menolak file config/rahasia yang ter-stage dan menjalankan `gitleaks protect --staged`.
+5. **Tidak ada file example di repo.** Perintah `config init` membuat `.env` kosong dari skema (tidak menimpa yang sudah ada), dan `config list` mencetak semua key, pemakainya, dan mana yang rahasia.
+6. **Pemeriksaan rahasia**: `.gitignore` mencakup `.env`, `.env.*`, `*.key`, `*.pem`; hook `pre-commit` (`.githooks/`, `scripts/check-secrets.sh`) menolak file config/rahasia yang ter-stage dan menjalankan `gitleaks protect --staged`.
 
 ### Daftar awal key (diperbarui di skema, bukan di sini)
 

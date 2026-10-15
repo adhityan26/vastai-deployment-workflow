@@ -1,10 +1,6 @@
 # secrets and local config: never commit
 .env
 .env.*
-!.env.example
-config.env
-*.local.env
-config/*.local.*
 *.key
 *.pem
 secrets/
