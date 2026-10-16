@@ -37,6 +37,7 @@ Urutan 1 → 2 → 3 → 4. Sub-proyek 2 dan 3 bergantung pada kontrak API di ba
 | Hasil gambar | Tidak ada API output di agent. Bot homelab membaca dari ComfyUI (`/history`, `/view`) lewat Tailscale. Generate dari browser **tidak disimpan**. |
 | Workflow | Template bawaan dari repo. Workflow buatan pengguna disinkron lewat `PUT /workflows/{nama}`, **timpa saja** (tanpa `.bak`). |
 | Extend | Idle dan failsafe, dibatasi `hard_cap`. |
+| Bahasa | `instance/`: **Python** (agent FastAPI) + shell (bootstrap, failsafe), dekat dengan ekosistem ComfyUI. `apps/`: **Node.js/TypeScript** (bahasa yang paling dikuasai pemilik; discord.js). Kontrak di `contracts/` menjaga keduanya sinkron. Tiap sisi punya modul `config` sendiri. |
 
 ## 3. Non-goals (v1)
 
