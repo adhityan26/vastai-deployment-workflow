@@ -77,7 +77,7 @@ Tiga lapisan pengaman independen: **failsafe** (lokal), **idle watcher** (di age
 
 Urutan sengaja menempatkan pengaman sebelum hal yang bisa gagal.
 
-1. Simpan `CONTAINER_ID` dan `CONTAINER_API_KEY` ke file root-only (mode 600) karena variabel bisa hilang di sesi lain.
+1. Simpan `CONTAINER_ID` dan `CONTAINER_API_KEY` ke file root-only (mode 600) karena variabel bisa hilang di sesi lain. **Jika salah satunya kosong atau tidak ada, boot berhenti** (state `failed`, alasan `missing_container_credentials`): tanpa key itu failsafe tidak bisa destroy, jadi instance tidak boleh lanjut. Watchdog (aturan "tidak `ready` dalam 25 menit" dan state `failed`) yang menghancurkannya.
 2. Tulis `deadline` (boot+3 jam) dan `hard_cap` (boot+6 jam) **hanya jika file belum ada** (tahan restart container). Penulisan atomik: tulis ke file sementara, lalu `rename`.
 3. Jalankan `failsafe.sh`.
 4. Jalankan `supervisord` (disesuaikan dengan hasil S1).
@@ -92,7 +92,7 @@ State: `booting → downloading → ready → idle-warning → stopping`; `faile
 
 ### 5.3 `failsafe.sh`
 
-- Loop tiap 30 detik. Membaca `deadline`; **`hard_cap` dibaca sekali saat mulai dan disimpan di memori** (file tidak dipercaya setelahnya).
+- Loop tiap 30 detik. Membaca `deadline`; **`hard_cap` dibaca sekali saat mulai dan disimpan di memori** (file tidak dipercaya setelahnya). Jika file `hard_cap` tidak ada saat failsafe mulai, failsafe menghitungnya sendiri (waktu mulai + `HARD_CAP_HOURS`).
 - Jika `min(deadline, hard_cap)` terlewati → destroy, **tanpa memedulikan job aktif**.
 - File `deadline` tidak terbaca/korup → jatuh ke `hard_cap`, bukan "tidak pernah".
 - API Vast tidak terjangkau → coba lagi tiap 30 detik terus-menerus, buat penanda `destroy_pending`, matikan ComfyUI.
@@ -129,7 +129,7 @@ Tidak lewat agent. Bot membaca dari ComfyUI (`/history`, `/view`) di port 8188 l
 Instance **tidak** mengirim apa pun ke homelab. Watchdog wajib:
 
 1. Memanggil `/status` tiap 3 menit.
-2. Menghancurkan instance (dengan key utama) bila: `/status` tidak terjangkau 15 menit berturut-turut padahal Vast `running`; state `failed`; `failsafe_alive` = false; **tidak `ready` dalam 25 menit sejak dibuat** (batas boot, bisa dikonfigurasi); umur instance melewati **6 jam menurut `start_date` Vast** (penegakan batas mutlak oleh sumber waktu independen).
+2. Mengirim **peringatan Discord di menit ke-10** bila `/status` tidak terjangkau (instance mungkin masih mengerjakan job; agent bisa saja yang mati), lalu menghancurkan instance (dengan key utama) bila: `/status` tidak terjangkau 15 menit berturut-turut padahal Vast `running`; state `failed`; `failsafe_alive` = false; **tidak `ready` dalam 25 menit sejak dibuat** (batas boot, bisa dikonfigurasi); umur instance melewati **6 jam menurut `start_date` Vast** (penegakan batas mutlak oleh sumber waktu independen).
 3. Alert mendesak ke Discord bila destroy gagal, diulang tiap 5 menit sampai instance hilang dari daftar. Isi alert: ID instance, penyebab, `vastai destroy instance <id>`, link konsol.
 4. Menarik/memulihkan workflow lewat `GET`/`PUT /workflows`.
 5. Menganggap instance yang tidak dikenal (dibuat manual) sebagai anomali.
@@ -186,6 +186,9 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 - `bootstrap.sh` di Docker lokal dengan profil dummy.
 - Destroy bersamaan dari tiga pelaku.
 - Timeout boot saat download.
+- `CONTAINER_ID`/`CONTAINER_API_KEY` kosong di langkah 1: boot berhenti dengan `failed`, failsafe tidak dijalankan tanpa kredensial.
+- `file hard_cap` tidak ada saat failsafe mulai: dihitung sendiri.
+- Agent mati tetapi ComfyUI masih menjalankan job (watchdog): peringatan di menit ke-10, destroy di menit ke-15.
 
 **Nyata di Vast (kecil dan murah), setelah S1–S4 lulus:**
 1. Boot penuh profil `image`: waktu sampai `ready` tercatat, ComfyUI dibuka dari laptop lewat Tailscale, satu gambar dihasilkan.
@@ -253,7 +256,14 @@ Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan
 | `PROFILE`, `IDLE_MINUTES`, `IDLE_WARN_MINUTES`, `FAILSAFE_HOURS`, `HARD_CAP_HOURS`, `BOOT_TIMEOUT_MIN` | instance dan apps | tidak |
 | `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S` | apps | tidak |
 
-## 15. Pertanyaan terbuka
+## 15. Risiko sisa (diterima secara sadar)
+
+- **Homelab mati (watchdog dan bot ikut mati) bersamaan dengan failsafe yang mati.** Tidak ada pihak yang menghentikan instance. Batas terakhir hanya saldo Vast yang habis. Mitigasi: saldo prabayar kecil, auto top-up dimatikan, `failsafe_alive` dipantau, failsafe sengaja dibuat sekecil mungkin.
+- **Watchdog bisa menghancurkan instance yang sedang mengerjakan job** bila hanya agent yang mati. Biaya didahulukan di atas kelangsungan job; ada peringatan di menit ke-10.
+- **Rahasia di env Vast terlihat di UI/API Vast** (token agent, auth key Tailscale). Dibatasi oleh sifat sekali pakai dan umur instance.
+- **Custom node berjalan sebagai root** dan dapat membaca rahasia instance. Dibatasi dengan commit yang dipin dan tanpa ComfyUI-Manager.
+
+## 16. Pertanyaan terbuka
 
 - Nilai pasti batas boot (default 25 menit) dan apakah perlu bergantung pada kecepatan host.
 - Strategi menjalankan `onstart` (batas panjang dan perilaku run-ulang belum terverifikasi); alternatif `PROVISIONING_SCRIPT`. Ditentukan setelah S1.
