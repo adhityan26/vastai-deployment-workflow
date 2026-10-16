@@ -312,7 +312,14 @@ Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan
 6. **Pemeriksaan rahasia (berlapis):**
    - `.gitignore` mencakup `.env`, `.env.*`, `*.key`, `*.pem`, `node_modules/`, `dist/`.
    - Hook `pre-commit` (`.githooks/`, `scripts/check-secrets.sh`): menolak file config/kredensial (termasuk rename), menjalankan `gitleaks git --staged`, dan **gagal bila gitleaks tidak terpasang** (kecuali `SKIP_GITLEAKS=1`).
-   - Hook hanya lokal dan bisa dilewati (`--no-verify`). **Cadangan di sisi server:** aktifkan GitHub secret scanning + push protection (gratis untuk repo publik) dan job gitleaks di CI saat repo di-push.
+   - Hook hanya lokal dan bisa dilewati (`--no-verify`); ini risiko yang diterima (bagian 16). Tidak memakai GitHub secret scanning.
+7. **Tidak ada hardcoded config (aturan utama).** Semua nilai yang bisa berubah atau bergantung lingkungan berada di skema config, dengan default di skema, dan dibaca hanya lewat modul `config`:
+   - angka dan ambang: port (8188, 8189), interval polling, timeout, batas per panggilan `/extend`, ukuran maksimum workflow, jumlah retry, durasi peringatan, `BOOT_TIMEOUT_MIN`;
+   - path: direktori state, lokasi `.env`, direktori ComfyUI, direktori output;
+   - alamat dan identitas: URL API Vast, URL repo, hostname, ID Discord, nama channel;
+   - semua key, token, dan kredensial.
+   Yang boleh berada di kode hanyalah konstanta protokol (nama field di kontrak, kode status HTTP, nama state). Profil model (`instance/profiles/*.yaml`) dan workflow adalah file data deklaratif dan menjadi satu-satunya tempat sumber model.
+   Penegakan (dibuat saat implementasi): (a) pembacaan env di luar modul `config` ditolak oleh lint; (b) pemeriksaan sederhana pada hook pre-commit mencari literal IP, URL, port, dan path absolut di luar modul `config` dan file data; (c) `config list` menunjukkan semua key beserta defaultnya.
 
 ### Daftar awal key (diperbarui di skema, bukan di sini)
 
@@ -328,7 +335,10 @@ Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan
 | `DISCORD_ADMIN_USER_IDS`, `DISCORD_ALERT_TARGET` | apps | tidak |
 | `TS_HOSTNAME`, `REPO_URL`, `REPO_COMMIT` | instance/bootstrap | tidak |
 | `PROFILE`, `IDLE_MINUTES`, `FAILSAFE_HOURS`, `HARD_CAP_HOURS`, `BOOT_TIMEOUT_MIN`, `KEEP_ON_FAILURE` | instance dan apps | tidak |
-| `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S` | apps | tidak |
+| `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S`, `VAST_API_URL` | apps | tidak |
+| `COMFY_PORT`, `AGENT_PORT`, `COMFY_DIR`, `STATE_DIR`, `ENV_FILE_PATH` | instance | tidak |
+| `FAILSAFE_POLL_S`, `IDLE_WARN_MINUTES`, `EXTEND_MAX_IDLE_MIN`, `EXTEND_MAX_FAILSAFE_MIN`, `WORKFLOW_MAX_BYTES`, `DESTROY_RETRIES`, `DOWNLOAD_RETRIES` | instance | tidak |
+| `UNREACHABLE_WARN_MIN`, `UNREACHABLE_DESTROY_MIN`, `ALERT_REPEAT_MIN` | apps/watchdog | tidak |
 
 ## 15. `contracts/`
 
@@ -350,7 +360,7 @@ Sisi agent (Python) memakai model pydantic yang divalidasi terhadap skema; sisi 
 - **Watchdog bisa menghancurkan instance yang sedang mengerjakan job** bila hanya agent yang mati. Biaya didahulukan; ada peringatan di menit ke-10.
 - **Rahasia di env Vast terlihat di UI/API Vast.** Dibatasi oleh sifat sekali pakai dan umur instance.
 - **Custom node berjalan sebagai root** dan dapat membaca rahasia instance. Dibatasi dengan commit yang dipin dan tanpa ComfyUI-Manager.
-- **Hook pre-commit bisa dilewati.** Dicadangkan oleh push protection dan CI di GitHub.
+- **Hook pre-commit bisa dilewati** (`--no-verify`, atau clone tanpa hook). Tidak ada cadangan di sisi server; pemilik menerima risiko ini.
 
 ## 17. Pertanyaan terbuka
 
