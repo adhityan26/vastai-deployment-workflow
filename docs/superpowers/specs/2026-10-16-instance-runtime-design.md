@@ -136,10 +136,11 @@ Pengaman dipasang sebelum hal yang bisa gagal.
 | Dari | Ke | Pemicu | Reason |
 |---|---|---|---|
 | `booting` | `downloading` | langkah 8 mulai | - |
-| `booting`/`downloading` | `failed` | kegagalan boot | `missing_container_credentials`, `hard_cap_missing`, `tailscale_failed`, `node_install_failed`, `download_failed`, `disk_insufficient`, `comfyui_start_failed` |
+| `booting`/`downloading` | `failed` | kegagalan boot | `missing_container_credentials`, `hard_cap_missing`, `tailscale_failed`, `node_install_failed`, `download_failed`, `disk_insufficient`, `comfyui_start_failed`, `config_invalid`, `failsafe_failed`, `supervisor_failed`, `agent_start_failed` |
 | `downloading` | `ready` | ComfyUI menjawab | - |
 | `ready` | `idle-warning` | antrean kosong sampai `idle_destroy_at − 10 menit` | - |
 | `idle-warning` | `ready` | antrean berisi atau `/extend idle` | - |
+| `booting`/`downloading` | `stopping` | destroy diminta (sebelum `ready`) | `manual`, `watchdog` |
 | `ready`/`idle-warning` | `stopping` | destroy dimulai | `idle_timeout`, `failsafe_deadline`, `manual`, `watchdog` |
 | `failed` | `stopping` | self-destroy (kecuali `KEEP_ON_FAILURE=1`) | alasan asal |
 | `stopping` | `destroy_failed` | percobaan destroy habis | - |
@@ -174,7 +175,7 @@ Halaman panel: satu file HTML statis yang membaca `/status`, dengan tombol Exten
 | `uptime_s` | int, detik | |
 | `idle_destroy_at` | int \| null | **waktu destroy karena idle**, bukan "idle sejak" |
 | `failsafe_at`, `hard_cap_at` | int, epoch UTC detik | |
-| `queue` | `{running: int, pending: int}` | dari ComfyUI `/queue` |
+| `queue` | `{running: int, pending: int}` \| null | dari ComfyUI `/queue`; `null` bila ComfyUI tidak terjangkau |
 | `gpu` | `{util_percent: int\|null, vram_used_mb: int\|null, vram_total_mb: int\|null}` | |
 | `profile`, `commit` | string | |
 | `failsafe_alive` | bool | cek pid di `failsafe.pid` |
@@ -323,6 +324,8 @@ Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan
 
 ### Daftar awal key (diperbarui di skema, bukan di sini)
 
+Daftar otoritatif ada di `contracts/config-schema.yaml` (dibuat di Task 1); tabel ini hanya ringkasan awal.
+
 | Key | Pemakai | Rahasia |
 |---|---|---|
 | `VAST_API_KEY` (key utama) | apps/watchdog, apps/bot (**tidak pernah di instance**) | ya |
@@ -338,6 +341,7 @@ Tujuan: pemilik selalu tahu **config apa** dan **API key apa** yang dipakai, dan
 | `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S`, `VAST_API_URL` | apps | tidak |
 | `COMFY_PORT`, `AGENT_PORT`, `COMFY_DIR`, `STATE_DIR`, `ENV_FILE_PATH` | instance | tidak |
 | `FAILSAFE_POLL_S`, `IDLE_WARN_MINUTES`, `EXTEND_MAX_IDLE_MIN`, `EXTEND_MAX_FAILSAFE_MIN`, `WORKFLOW_MAX_BYTES`, `DESTROY_RETRIES`, `DOWNLOAD_RETRIES` | instance | tidak |
+| `TAILSCALED_BIN`, `COMFY_PYTHON`, `REPO_DIR`, `SUPERVISOR_CONF`, `COMFY_PROGRAM`, `DESTROY_TIMEOUT_S`, `DESTROY_BACKOFF_S`, `DESTROY_GONE_MARKERS`, `HF_BASE_URL`, `GIT_HOST_URL`, `COMFY_START_TIMEOUT_S`, `AGENT_START_TIMEOUT_S` | instance, non-secret (`ENV_FILE_PATH` dan `DESTROY_RETRIES` sudah terdaftar di atas) | tidak |
 | `UNREACHABLE_WARN_MIN`, `UNREACHABLE_DESTROY_MIN`, `ALERT_REPEAT_MIN` | apps/watchdog | tidak |
 
 ## 15. `contracts/`
@@ -346,7 +350,7 @@ Format: **OpenAPI 3.1 + JSON Schema**. Isi:
 
 | File | Isi |
 |---|---|
-| `agent.openapi.yaml` | Semua endpoint di bagian 6 |
+| `agent.openapi.json` | Semua endpoint di bagian 6 (dihasilkan dari aplikasi FastAPI) |
 | `status.schema.json` | Skema `/status` (6.1), `schema_version` |
 | `instance-registry.schema.json` | Record registri (7.1) |
 | `config-schema.yaml` | Daftar key config (bagian 14) |
