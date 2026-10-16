@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Block commits that contain secrets or ignored config files.
+# Pre-commit guard: block secret/config files and scan staged content.
+# Set SKIP_GITLEAKS=1 only if gitleaks is genuinely unavailable.
 set -euo pipefail
 
-staged_files=$(git diff --cached --name-only --diff-filter=ACM)
+# ACMR includes renames, so `git mv x .env` cannot slip through.
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
 
-# 1. Refuse real config/secret files even if someone force-added them.
-if echo "$staged_files" | grep -E '(^|/)(\.env(\..*)?|.*\.(key|pem))$' \
-   | grep -q .; then
-  echo "ERROR: a config/secret file is staged:" >&2
-  echo "$staged_files" | grep -E '(^|/)(\.env(\..*)?|.*\.(key|pem))$' >&2
+blocked=$(printf '%s\n' "$staged_files" | grep -E \
+  '(^|/)(\.env(\..*)?|\.npmrc|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|credentials.*\.json|secrets/.*)$|\.(key|pem|p12|pfx)$' \
+  || true)
+
+if [ -n "$blocked" ]; then
+  echo "ERROR: config/secret files are staged:" >&2
+  printf '%s\n' "$blocked" >&2
   exit 1
 fi
 
-# 2. Content scan with gitleaks when available.
 if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks protect --staged --redact --no-banner
+  gitleaks git --staged --redact --no-banner
+elif [ "${SKIP_GITLEAKS:-0}" = "1" ]; then
+  echo "WARNING: gitleaks missing, content scan skipped (SKIP_GITLEAKS=1)" >&2
 else
-  echo "WARNING: gitleaks not installed, content scan skipped" >&2
+  echo "ERROR: gitleaks is not installed; refusing to commit without a content scan." >&2
+  echo "Install it, or set SKIP_GITLEAKS=1 to bypass knowingly." >&2
+  exit 1
 fi
