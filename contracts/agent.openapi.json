@@ -499,6 +499,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "Not extendable: a destroy is underway or has failed (code not_extendable)"
+          },
           "422": {
             "content": {
               "application/json": {

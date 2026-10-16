@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from vastcomfy_agent.app import Deps, create_app
 from vastcomfy_agent.deadlines import DeadlineStore
+from vastcomfy_agent.files import write_json
 from vastcomfy_agent.state import State, StateStore
 from vastcomfy_agent.status import StatusBuilder
 from vastcomfy_agent.workflows import WorkflowStore
@@ -135,3 +136,43 @@ def test_workflow_round_trip_and_errors(env):
     assert client.put("/workflows/c.json", headers=AUTH, content=too_big).status_code == 413
     assert client.put("/workflows/caf%C3%A9.json", headers=AUTH, content=b"{}").status_code == 400
     assert client.put("/workflows/..%2Fevil.json", headers=AUTH, content=b"{}").status_code in (400, 404)
+
+
+def _set_state(deps, target):
+    deps.states.set(State.STOPPING, "manual")
+    if target == State.DESTROY_FAILED:
+        deps.states.set(State.DESTROY_FAILED)
+    if target == State.FAILED:
+        write_json(deps.states._path, {"state": "failed", "reason": "boot_failed", "updated_at": T0})
+
+
+@pytest.mark.parametrize("target", [State.STOPPING, State.DESTROY_FAILED, State.FAILED])
+@pytest.mark.parametrize("kind", ["idle", "failsafe"])
+def test_extend_is_409_while_stopping_destroy_failed_or_failed(env, target, kind):
+    client, deps, _ = env
+    _set_state(deps, target)
+    assert deps.states.get().state == target
+    res = client.post("/extend", headers=AUTH, json={"kind": kind, "minutes": 30})
+    assert res.status_code == 409 and res.json()["detail"]["code"] == "not_extendable"
+    assert res.json()["detail"]["message"]
+    assert deps.deadlines.deadline() == T0 + 3 * 3600 and deps.deadlines.idle_destroy_at() == T0 + 1800
+
+
+@pytest.mark.parametrize("kind", ["idle", "failsafe"])
+def test_extend_is_409_while_the_failsafe_destroy_is_pending(env, tmp_path, kind):
+    client, deps, _ = env
+    write_json(tmp_path / "state" / "destroy_failsafe.json", {"attempts": 1, "last_error": "x", "pending": True})
+    res = client.post("/extend", headers=AUTH, json={"kind": kind, "minutes": 30})
+    assert res.status_code == 409 and res.json()["detail"]["code"] == "not_extendable"
+    assert deps.deadlines.deadline() == T0 + 3 * 3600 and deps.deadlines.idle_destroy_at() == T0 + 1800
+
+
+def test_extend_is_allowed_when_the_failsafe_record_is_not_pending(env, tmp_path):
+    client, _, _ = env
+    write_json(tmp_path / "state" / "destroy_failsafe.json", {"attempts": 0, "last_error": None, "pending": False})
+    assert client.post("/extend", headers=AUTH, json={"kind": "idle", "minutes": 5}).status_code == 200
+
+
+def test_openapi_declares_the_409(env):
+    client, _, _ = env
+    assert "409" in client.get("/openapi.json").json()["paths"]["/extend"]["post"]["responses"]

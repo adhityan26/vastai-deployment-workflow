@@ -1,12 +1,15 @@
 import hmac
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
 from .config import Config
 from .deadlines import DeadlineStore, ExtendError
 from .destroy_flow import DestroyFlow
+from .files import read_json
 from .models import DestroyRequest, ExtendRequest, ExtendResponse, Status
+from .paths import StatePaths
 from .state import InvalidTransition, State, StateStore
 from .status import StatusBuilder
 from .workflows import WorkflowError, WorkflowStore
@@ -20,6 +23,10 @@ class Deps:
     status: StatusBuilder
     flow: DestroyFlow
     workflows: WorkflowStore
+
+
+# A destroy is underway or has failed: moving a deadline now could stop the failsafe from retrying.
+NOT_EXTENDABLE_STATES = frozenset({State.STOPPING, State.DESTROY_FAILED, State.FAILED})
 
 
 def create_app(deps: Deps) -> FastAPI:
@@ -40,8 +47,21 @@ def create_app(deps: Deps) -> FastAPI:
     def get_status() -> Status:
         return deps.status.build()
 
-    @app.post("/extend", response_model=ExtendResponse, dependencies=guarded)
+    def failsafe_pending() -> bool:
+        record = read_json(StatePaths(Path(deps.cfg.state_dir)).destroy_failsafe, {})
+        return isinstance(record, dict) and bool(record.get("pending"))
+
+    @app.post(
+        "/extend", response_model=ExtendResponse, dependencies=guarded,
+        responses={409: {"description": "Not extendable: a destroy is underway or has failed (code not_extendable)"}},
+    )
     def extend(body: ExtendRequest) -> ExtendResponse:
+        state = deps.states.get().state
+        if state in NOT_EXTENDABLE_STATES or failsafe_pending():
+            why = f"state is {state.value}" if state in NOT_EXTENDABLE_STATES else "the failsafe destroy is pending"
+            raise HTTPException(
+                status_code=409, detail={"code": "not_extendable", "message": f"cannot extend: {why}"}
+            )
         try:
             if body.kind == "failsafe":
                 new = deps.deadlines.extend_failsafe(body.minutes, deps.cfg.extend_max_failsafe_min)
