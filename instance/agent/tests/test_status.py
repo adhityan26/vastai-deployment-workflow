@@ -116,3 +116,37 @@ def test_status_before_first_boot_has_null_state_and_times(tmp_path):
     )
     status = builder.build()
     assert status.state is None and status.boot_at is None and status.uptime_s is None
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "failsafe, agent",
+    [
+        (["x"], ["y"]),
+        ("str", "str"),
+        ({"pending": "yes", "attempts": "abc", "last_error": 5}, {"attempts": [1], "last_error": {"a": 1}}),
+        ({"attempts": [1]}, {"attempts": "abc"}),
+        ({"pending": 1}, {"last_error": 7}),
+    ],
+)
+def test_malformed_destroy_files_fall_back_to_defaults(tmp_path, failsafe, agent):
+    _, _, _, builder = setup(tmp_path)
+    write_json(tmp_path / "destroy_failsafe.json", failsafe)
+    write_json(tmp_path / "destroy_agent.json", agent)
+    assert builder.build().destroy.model_dump() == {"pending": False, "attempts": 0, "last_error": None}
+
+
+def test_last_error_prefers_agent_over_failsafe(tmp_path):
+    _, _, _, builder = setup(tmp_path)
+    write_json(tmp_path / "destroy_failsafe.json", {"pending": True, "attempts": 1, "last_error": "failsafe err"})
+    write_json(tmp_path / "destroy_agent.json", {"attempts": 1, "last_error": "agent err"})
+    assert builder.build().destroy.last_error == "agent err"
+
+
+@pytest.mark.parametrize("pid", [0, -1, -12345])
+def test_non_positive_pid_is_not_alive(tmp_path, pid):
+    _, _, _, builder = setup(tmp_path)
+    write_int(tmp_path / "failsafe.pid", pid)
+    assert builder.build().failsafe_alive is False

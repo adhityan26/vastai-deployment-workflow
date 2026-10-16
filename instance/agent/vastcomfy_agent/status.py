@@ -15,7 +15,7 @@ from .state import State, StateStore
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if pid is None:
+    if pid is None or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -24,6 +24,20 @@ def _pid_alive(pid: int | None) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_int(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
+def _as_str(value) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 class StatusBuilder:
@@ -58,12 +72,13 @@ class StatusBuilder:
             return None
 
     def _destroy_info(self) -> DestroyInfo:
-        failsafe = read_json(self._p.destroy_failsafe, {}) or {}
-        agent = read_json(self._p.destroy_agent, {}) or {}
+        failsafe = _as_dict(read_json(self._p.destroy_failsafe, {}))
+        agent = _as_dict(read_json(self._p.destroy_agent, {}))
+        pending = failsafe.get("pending")
         return DestroyInfo(
-            pending=bool(failsafe.get("pending", False)),
-            attempts=max(int(failsafe.get("attempts", 0) or 0), int(agent.get("attempts", 0) or 0)),
-            last_error=agent.get("last_error") or failsafe.get("last_error"),
+            pending=pending if isinstance(pending, bool) else False,
+            attempts=max(_as_int(failsafe.get("attempts")), _as_int(agent.get("attempts"))),
+            last_error=_as_str(agent.get("last_error")) or _as_str(failsafe.get("last_error")),
         )
 
     def build(self) -> Status:
