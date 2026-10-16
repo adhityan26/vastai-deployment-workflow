@@ -1,0 +1,284 @@
+{
+  "$defs": {
+    "DestroyInfo": {
+      "properties": {
+        "attempts": {
+          "title": "Attempts",
+          "type": "integer"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Error"
+        },
+        "pending": {
+          "title": "Pending",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pending",
+        "attempts"
+      ],
+      "title": "DestroyInfo",
+      "type": "object"
+    },
+    "Gpu": {
+      "properties": {
+        "util_percent": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Util Percent"
+        },
+        "vram_total_mb": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vram Total Mb"
+        },
+        "vram_used_mb": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vram Used Mb"
+        }
+      },
+      "title": "Gpu",
+      "type": "object"
+    },
+    "Progress": {
+      "properties": {
+        "bytes_done": {
+          "title": "Bytes Done",
+          "type": "integer"
+        },
+        "bytes_total": {
+          "title": "Bytes Total",
+          "type": "integer"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "nodes",
+            "models"
+          ],
+          "title": "Phase",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "file",
+        "bytes_done",
+        "bytes_total"
+      ],
+      "title": "Progress",
+      "type": "object"
+    },
+    "QueueCounts": {
+      "properties": {
+        "pending": {
+          "title": "Pending",
+          "type": "integer"
+        },
+        "running": {
+          "title": "Running",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "running",
+        "pending"
+      ],
+      "title": "QueueCounts",
+      "type": "object"
+    },
+    "State": {
+      "enum": [
+        "booting",
+        "downloading",
+        "ready",
+        "idle-warning",
+        "stopping",
+        "failed",
+        "destroy_failed"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "boot_at": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Boot At"
+    },
+    "commit": {
+      "title": "Commit",
+      "type": "string"
+    },
+    "destroy": {
+      "$ref": "#/$defs/DestroyInfo"
+    },
+    "failsafe_alive": {
+      "title": "Failsafe Alive",
+      "type": "boolean"
+    },
+    "failsafe_at": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Failsafe At"
+    },
+    "gpu": {
+      "$ref": "#/$defs/Gpu"
+    },
+    "hard_cap_at": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Hard Cap At"
+    },
+    "idle_destroy_at": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Idle Destroy At"
+    },
+    "now": {
+      "title": "Now",
+      "type": "integer"
+    },
+    "profile": {
+      "title": "Profile",
+      "type": "string"
+    },
+    "progress": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Progress"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "queue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/QueueCounts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reason"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/State"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "uptime_s": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Uptime S"
+    }
+  },
+  "required": [
+    "state",
+    "reason",
+    "progress",
+    "now",
+    "boot_at",
+    "uptime_s",
+    "idle_destroy_at",
+    "failsafe_at",
+    "hard_cap_at",
+    "queue",
+    "gpu",
+    "profile",
+    "commit",
+    "failsafe_alive",
+    "destroy"
+  ],
+  "title": "Status",
+  "type": "object"
+}

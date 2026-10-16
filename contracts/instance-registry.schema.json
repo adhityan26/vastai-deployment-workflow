@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InstanceRegistryRecord",
+  "description": "One record per Vast instance, kept on the homelab by the bot and the watchdog (spec 7.1). Never committed with real data.",
+  "type": "object",
+  "required": ["vast_instance_id", "created_at", "profile", "agent_token", "tailnet_hostname", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "vast_instance_id": {"type": "integer"},
+    "created_at": {"type": "integer", "description": "epoch UTC seconds on the homelab clock"},
+    "vast_start_date": {"type": ["number", "null"], "description": "Vast's own start timestamp, the independent source for the hard cap"},
+    "profile": {"type": "string"},
+    "agent_token": {"type": "string", "minLength": 16},
+    "tailnet_hostname": {"type": "string"},
+    "status": {"enum": ["creating", "booting", "ready", "stopping", "gone", "anomaly"]},
+    "unreachable_since": {"type": ["integer", "null"]}
+  }
+}
