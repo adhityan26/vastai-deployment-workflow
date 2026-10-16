@@ -76,8 +76,25 @@ if ! is_int "$HARD_CAP"; then
 fi
 ELAPSED_LIMIT=$((HARD_CAP_HOURS * 3600))
 
-# The OK markers (destroy accepted) and the gone markers (404, already gone) both mean success.
-IFS=',' read -r -a MARKERS <<< "$(lower "$OK_MARKERS,$GONE_MARKERS")"
+trim() {  # strip leading and trailing whitespace (portable, no ${var,,})
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  printf '%s' "${v%"${v##*[![:space:]]}"}"
+}
+
+# csv -> lowercase, trimmed, non-empty entries; a blank entry must never become a marker that matches everything.
+# Sets the array named by $1.
+split_markers() {  # arrayname csv
+  local item trimmed raw
+  eval "$1=()"
+  IFS=',' read -r -a raw <<< "$(lower "$2")"
+  for item in "${raw[@]}"; do
+    trimmed="$(trim "$item")"
+    if [ -n "$trimmed" ]; then eval "$1+=(\"\$trimmed\")"; fi
+  done
+}
+split_markers OK_LIST "$OK_MARKERS"
+split_markers GONE_LIST "$GONE_MARKERS"
 OUT_FILE="$STATE_DIR/.failsafe_out"
 
 # Output goes to OUT_FILE; if that cannot be opened, fall back so the command ALWAYS runs.
@@ -102,11 +119,19 @@ run_with_timeout() {  # seconds outfile command...
   wait "$pid"
 }
 
+# Success rule (the CLI always exits 0, so only the text decides): trimmed, case-insensitive text that
+#  (1) contains a gone marker (404) -> success; (2) otherwise contains "failed with error" -> failure,
+#  even if it mentions an OK marker; (3) otherwise STARTS with an OK marker -> success (real output is
+#  exactly "destroying instance <id>."; a preamble line before it reads as a failure and is retried).
 is_success_text() {
-  local lowered marker
-  lowered="$(lower "$1")"
-  for marker in "${MARKERS[@]}"; do
-    case "$lowered" in *"$marker"*) [ -n "$marker" ] && return 0 ;; esac
+  local text marker
+  text="$(lower "$(trim "$1")")"
+  for marker in ${GONE_LIST[@]+"${GONE_LIST[@]}"}; do
+    case "$text" in *"$marker"*) return 0 ;; esac
+  done
+  case "$text" in *"failed with error"*) return 1 ;; esac
+  for marker in ${OK_LIST[@]+"${OK_LIST[@]}"}; do
+    case "$text" in "$marker"*) return 0 ;; esac
   done
   return 1
 }

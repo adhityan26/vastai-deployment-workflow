@@ -39,8 +39,8 @@ Destroy dari dalam instance **berfungsi** dan **terbatas ke instance sendiri**, 
 
 ## Decisions and config/spec changes
 1. **Perintah destroy yang benar:** `vastai destroy instance <id> -y --api-key <key>` (plain, tanpa `--raw`). `-y` **wajib**.
-2. **Sukses ditentukan dari teks, bukan rc.** Sukses = output diawali `destroying instance`. "Sudah hilang" (dianggap sukses) = output memuat `Failed with error 404`. Apa pun selain itu (termasuk `Failed with error 401/5xx`, output kosong, `Aborted`) = **gagal**. rc diabaikan.
-3. `DESTROY_GONE_MARKERS` default menjadi `Failed with error 404`; penanda sukses baru `DESTROY_OK_MARKERS` default `destroying instance` (kunci schema baru).
+2. **Sukses ditentukan dari teks, bukan rc.** Sukses = output (setelah id/key dibuang dan di-trim) diawali `destroying instance` dan tidak memuat `Failed with error`. "Sudah hilang" (dianggap sukses) = output memuat `Failed with error 404: Instance`. Apa pun selain itu (termasuk `Failed with error 401/5xx` walau menyebut `destroying instance`, output kosong, `Aborted`, baris peringatan sebelum teks sukses) = **gagal**. rc diabaikan.
+3. `DESTROY_GONE_MARKERS` default menjadi `Failed with error 404: Instance`; penanda sukses baru `DESTROY_OK_MARKERS` default `destroying instance` (kunci schema baru).
 4. Tetap melepas `CONTAINER_ID` dan key dari output sebelum mencocokkan (sudah ada).
 5. Variabel `CONTAINER_*` **tidak ada di sesi SSH tetapi ada di konteks onstart dan PID 1**: desain "bootstrap menulis `.env` root-only di langkah pertama" benar.
 6. **Restart container** menjalankan onstart lagi dan disk bertahan: desain `first_boot_at` / "tulis hanya jika belum ada" benar dan dibutuhkan.

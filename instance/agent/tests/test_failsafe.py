@@ -29,7 +29,7 @@ def write_exec(path: Path, text: str) -> None:
 
 def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_times=0,
           stub_out="Failed with error 401: Authorization Error. Your key lacks proper privileges",
-          stub_sleep=0, timeout_s=5, key=KEY, markers="Failed with error 404", ok_markers="destroying instance",
+          stub_sleep=0, timeout_s=5, key=KEY, markers="Failed with error 404: Instance", ok_markers="destroying instance",
           drop_key=None, stub_rc=0, sctl_sleep=0, overrides=None, stub_pre="", success_out="destroying instance $3."):
     """deadline/hard_cap: int offset in seconds from now, a raw str, or None for 'file missing'.
 
@@ -393,3 +393,35 @@ def test_a_missing_ok_markers_key_exits_2_and_names_it(tmp_path, procs):
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None, timeout=5)
     assert proc.returncode == 2 and "DESTROY_OK_MARKERS" in proc.stderr.read() and not log.exists()
+
+
+def test_a_failure_text_containing_the_ok_marker_is_a_failure(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
+                             stub_out="Failed with error 500: error destroying instance 42, retry later")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+
+
+def test_a_preamble_line_before_the_success_text_reads_as_failure(tmp_path, procs):
+    # Known limitation of the "OK marker must start the output" rule: the retry then finds a 404 (gone).
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre="warning: update available")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+
+
+def test_a_blank_marker_entry_does_not_match_everything(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, ok_markers="destroying instance, ")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+    assert "401" in record(state)["last_error"]
+
+
+def test_markers_are_trimmed_so_a_real_404_is_still_gone(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
+                           stub_out="Failed with error 404: Instance 42 not found.",
+                           ok_markers="destroying instance", markers="x,  Failed with error 404: Instance  ")
+    env.write_text(env.read_text().replace("DESTROY_OK_MARKERS=destroying instance\n",
+                                           "DESTROY_OK_MARKERS=destroying instance, Failed with error 404: Instance\n"))
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert len(log.read_text().strip().splitlines()) == 1

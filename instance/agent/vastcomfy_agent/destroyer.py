@@ -38,7 +38,8 @@ class Destroyer:
         self._retries = retries
         self._backoff = backoff_s
         self._timeout = timeout_s
-        self._markers = [m.lower() for m in (*ok_markers, *gone_markers) if m]
+        self._ok = [m.strip().lower() for m in ok_markers if m.strip()]
+        self._gone = [m.strip().lower() for m in gone_markers if m.strip()]
         self._record_path = StatePaths(state_dir).destroy_agent
         self._run = run
         self._sleep = sleep
@@ -66,9 +67,14 @@ class Destroyer:
             for value in (self._id, self._key):
                 if value:
                     scrubbed = scrubbed.replace(value, "")
-            lowered = scrubbed.lower()
+            lowered = scrubbed.strip().lower()
             # The exit status carries no information (the CLI always exits 0): only the text decides.
-            if any(marker in lowered for marker in self._markers):
+            if any(marker in lowered for marker in self._gone):
+                return True, None
+            # Any other "Failed with error" is a failure even if it mentions an OK marker; real success
+            # output is exactly "destroying instance <id>.", so an OK marker must START the output
+            # (a preamble line before it reads as a failure and is retried).
+            if "failed with error" not in lowered and any(lowered.startswith(m) for m in self._ok):
                 return True, None
         return False, self._redact(output)[:500] or "vastai failed without output"
 

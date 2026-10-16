@@ -217,3 +217,27 @@ def test_os_errors_from_the_call_are_failed_attempts_not_crashes(tmp_path):
     assert len(run.calls) == 2 and sleeps == [7]
     assert read_json(tmp_path / "destroy_agent.json")["attempts"] == 2
     assert "exec format error" in read_json(tmp_path / "destroy_agent.json")["last_error"]
+
+
+def test_a_failure_text_containing_an_ok_marker_is_a_failed_attempt(tmp_path):
+    text = "Failed with error 500: error destroying instance 42, retry later"
+    destroyer, run, _ = make(tmp_path, [proc(0, out=text)] * 2, retries=2)
+    assert destroyer.destroy() is False
+    assert len(run.calls) == 2
+
+
+def test_the_ok_marker_must_start_the_output_so_a_preamble_line_reads_as_failure(tmp_path):
+    # Known limitation: a warning line before the success text is treated as a failure (and retried; the
+    # next attempt finds the instance gone, a 404, which counts as success).
+    destroyer, _, _ = make(tmp_path, [proc(0, out="warning: update available\ndestroying instance 42.")], retries=1)
+    assert destroyer.destroy() is False
+
+
+def test_ok_marker_with_surrounding_whitespace_still_succeeds(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out="\n destroying instance 42.\n")], retries=1)
+    assert destroyer.destroy() is True
+
+
+def test_plain_404_still_counts_as_gone_with_the_new_default_marker(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out=GONE)], retries=1, markers=("Failed with error 404: Instance",))
+    assert destroyer.destroy() is True
