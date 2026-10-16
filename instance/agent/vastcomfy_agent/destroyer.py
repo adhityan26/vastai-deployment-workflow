@@ -56,7 +56,12 @@ class Destroyer:
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
         if proc.returncode == 0:
             return True, None
-        lowered = output.lower()
+        # Strip the id and key first so a bare marker such as "404" cannot match them.
+        scrubbed = output
+        for value in (self._id, self._key):
+            if value:
+                scrubbed = scrubbed.replace(value, "")
+        lowered = scrubbed.lower()
         if any(marker in lowered for marker in self._markers):
             return True, None
         return False, self._redact(output)[:500] or "vastai failed without output"

@@ -107,8 +107,11 @@ destroy_once() {
   local rc=$? out
   out="$(cat "$OUT_USED" 2>/dev/null)"
   case "$OUT_USED" in "$OUT_FILE"|/dev/null) ;; *) rm -f "$OUT_USED" ;; esac
-  # 126/127 = could not execute: never a success, whatever the output says
-  if [ "$rc" -eq 0 ] || { [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] && is_gone "$out"; }; then
+  # The id and key are stripped before matching so a bare marker such as "404" cannot match them.
+  local scrubbed="${out//"$CONTAINER_ID"/}"
+  scrubbed="${scrubbed//"$API_KEY"/}"
+  # 124 = killed by the timeout, 126/127 = could not execute: never a success, whatever the output says
+  if [ "$rc" -eq 0 ] || { [ "$rc" -ne 124 ] && [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] && is_gone "$scrubbed"; }; then
     write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": false}"
     exit 0
   fi

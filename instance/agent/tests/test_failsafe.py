@@ -29,7 +29,7 @@ def write_exec(path: Path, text: str) -> None:
 
 def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_times=0, stub_out="boom",
           stub_sleep=0, timeout_s=5, key=KEY, markers="404,not found", drop_key=None,
-          stub_rc=1, sctl_sleep=0, overrides=None):
+          stub_rc=1, sctl_sleep=0, overrides=None, stub_pre=""):
     """deadline/hard_cap: int offset in seconds from now, a raw str, or None for 'file missing'."""
     state = tmp_path / "state"
     state.mkdir()
@@ -41,7 +41,8 @@ def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_time
     write_exec(
         tmp_path / "vastai",
         f'#!/usr/bin/env bash\necho "$*" >> {log}\nn=$(cat {count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {count}\n'
-        f'sleep {stub_sleep}\nif [ "$n" -le {fail_times} ]; then echo "{stub_out}" >&2; exit {stub_rc}; fi\nexit 0\n',
+        + (f'echo "{stub_pre}"\n' if stub_pre else "")
+        + f'sleep {stub_sleep}\nif [ "$n" -le {fail_times} ]; then echo "{stub_out}" >&2; exit {stub_rc}; fi\nexit 0\n',
     )
     write_exec(tmp_path / "sctl", f'#!/usr/bin/env bash\necho "$*" >> {sctl_log}\nsleep {sctl_sleep}\nexit 0\n')
     values = {
@@ -250,3 +251,36 @@ def test_a_hung_supervisorctl_cannot_delay_the_destroy_beyond_the_timeout(tmp_pa
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None, timeout=10)
     assert proc.returncode == 0 and log.exists()
+
+
+def test_timeout_with_partial_gone_output_is_a_failure_not_a_success(tmp_path, procs):
+    # I1: a call killed by the timeout (rc 124) never counts as gone, whatever it printed first.
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre="Instance Not Found (404)",
+                             stub_sleep=30, timeout_s=2)
+    proc = start(env, procs)
+    assert wait_until(lambda: (state / "destroy_failsafe.json").exists()
+                      and "timed out" in (record(state)["last_error"] or ""), timeout=15)
+    assert proc.poll() is None
+    assert record(state)["pending"] is True
+
+
+@pytest.mark.parametrize("field", ["id", "key"])
+def test_output_echoing_the_instance_id_or_key_containing_404_is_a_failure(tmp_path, procs, field):
+    # I2: a bare "404" marker must not match the instance id or the API key echoed in an error.
+    ident, key = ("14040404", KEY) if field == "id" else ("42", "k404k")
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, key=key,
+                             stub_out=f"error: rate limited destroying {ident} with {key}",
+                             overrides={"CONTAINER_ID": ident})
+    proc = start(env, procs)
+    assert wait_until(lambda: (state / "destroy_failsafe.json").exists() and record(state)["attempts"] >= 2)
+    assert proc.poll() is None
+    assert wait_until(lambda: record(state)["last_error"] is not None)
+    assert record(state)["pending"] is True and key not in record(state)["last_error"]
+
+
+def test_genuine_not_found_still_counts_as_gone_when_the_id_contains_404(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
+                           stub_out="Instance Not Found (404)", overrides={"CONTAINER_ID": "14040404"})
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert len(log.read_text().strip().splitlines()) == 1

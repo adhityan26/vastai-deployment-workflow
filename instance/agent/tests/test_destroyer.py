@@ -25,11 +25,11 @@ class FakeRun:
         return result
 
 
-def make(tmp_path, results, retries=3, markers=("404", "not found")):
+def make(tmp_path, results, retries=3, markers=("404", "not found"), container_id="42", api_key=KEY):
     run = FakeRun(results)
     sleeps = []
     destroyer = Destroyer(
-        vastai_bin="vastai", container_id="42", api_key=KEY, retries=retries, backoff_s=7,
+        vastai_bin="vastai", container_id=container_id, api_key=api_key, retries=retries, backoff_s=7,
         timeout_s=9, gone_markers=list(markers), state_dir=tmp_path, run=run, sleep=sleeps.append,
     )
     return destroyer, run, sleeps
@@ -152,3 +152,21 @@ def test_destroy_flow_still_destroys_when_the_state_cannot_be_written():
         flow = DestroyFlow(_BrokenStates(), destroyer, lambda: None)
         assert flow.run("manual") is result
         assert destroyer.called == 1
+
+
+def test_output_echoing_an_instance_id_containing_404_is_not_gone(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(1, err="rate limited destroying instance 14040404")],
+                           retries=1, container_id="14040404")
+    assert destroyer.destroy() is False
+
+
+def test_output_echoing_a_key_containing_404_is_not_gone(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(1, err="bad key k404k")], retries=1, api_key="k404k")
+    assert destroyer.destroy() is False
+    assert "k404k" not in read_json(tmp_path / "destroy_agent.json")["last_error"]
+
+
+def test_genuine_not_found_is_gone_even_when_the_id_contains_404(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(1, out="Error: Instance Not Found (404)")], retries=1,
+                           container_id="14040404")
+    assert destroyer.destroy() is True
