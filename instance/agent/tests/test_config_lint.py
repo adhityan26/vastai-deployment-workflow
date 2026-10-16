@@ -73,3 +73,57 @@ def test_scan_paths_skips_tests_and_virtualenvs(tmp_path):
 def test_the_instance_tree_is_currently_clean():
     findings = lint.scan_paths([ROOT / "instance"])
     assert findings == [], "\n".join(f"{p}:{n}: [{r}] {t}" for p, n, r, t in findings)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "COMFY_PORT = 8188\n",
+        "PORT=8189\n",
+        "const comfyPort = 8188;\n",
+        "srv.listen(8188)\n",
+        "sock.bind((host, 8188))\n",
+        "run(app, port=8188)\n",
+        "const COMFY_PORT: number = 8188;\n",
+    ],
+)
+def test_port_literals_are_flagged_including_suffixed_names_and_listen_calls(line):
+    assert "port" in rules("mod.py", ".py", line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "timeout = 30\n",
+        "chunk = data[0:1000]\n",
+        "chunk = data[start:1000]\n",
+        "backlog = srv.listen(128)\n",
+        "report = 12\n",
+        "x = port\n",
+    ],
+)
+def test_port_rule_ignores_slices_small_numbers_and_non_literals(line):
+    assert "port" not in rules("mod.py", ".py", line)
+
+
+@pytest.mark.parametrize(
+    "name,suffix,line",
+    [
+        ("agent.py", ".py", 'from os import environ\nx = environ["X"]\n'),
+        ("agent.py", ".py", 'from os import getenv\nx = getenv("X")\n'),
+        ("agent.py", ".py", 'x = environ.get("X")\n'),
+        ("a.ts", ".ts", "const a = import.meta.env.X;\n"),
+        ("a.js", ".js", 'const a = process["env"].X;\n'),
+        ("a.mjs", ".mjs", "const { X } = process.env;\n"),
+    ],
+)
+def test_aliased_environment_reads_are_flagged(name, suffix, line):
+    assert "env-read" in rules(name, suffix, line)
+    allowed = {".py": "config.py", ".ts": "config.ts", ".js": "config.js", ".mjs": "config.mjs"}[suffix]
+    assert "env-read" not in rules(allowed, suffix, line)
+
+
+def test_environment_look_alikes_and_comments_are_not_flagged():
+    code = "environment = 1\nmy_environ_name = 2\n# environ['X'] and getenv('Y')\nx = get_environment()\n"
+    assert "env-read" not in rules("agent.py", ".py", code)
+    assert "env-read" not in rules("a.ts", ".ts", "// import.meta.env\nconst environment = 1;\n")

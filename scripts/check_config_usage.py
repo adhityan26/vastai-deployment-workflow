@@ -16,11 +16,19 @@ COMMENT_PREFIX = {".py": "#", ".sh": "#", ".conf": ";", ".ts": "//", ".js": "//"
 
 IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 URL = re.compile(r"https?://")
-PORT = re.compile(r"(?:\bport\s*[=:]\s*\d{2,5}\b)|(?:(?<=[A-Za-z0-9.\]]):\d{4,5}\b)", re.IGNORECASE)
+PORT = re.compile(
+    r"(?:(?<![A-Za-z0-9])(?:(?:\w*_)?port|\w*(?-i:Port))(?:\s*:\s*\w+)?\s*(?:==|=|:)\s*\d{2,5}\b)"  # port = N, COMFY_PORT = N
+    r"|(?:(?<![\w\[.-])[A-Za-z][\w.-]*:\d{4,5}\b|\]:\d{4,5}\b)"  # host:N (not a slice such as data[a:1000])
+    r"|(?:\b(?:listen|bind|serve)\s*\([^)]*\b\d{4,5}\b)",  # listen(N), bind((host, N))
+    re.IGNORECASE,
+)
 SYSTEM_DIRS = r"(?:etc|var|opt|usr|workspace|tmp|home|root|srv|mnt|run)"
 ABS_QUOTED = re.compile(rf"""["'`]/{SYSTEM_DIRS}(?:/|\b)""")
 ABS_BARE = re.compile(rf"""(?<![\w$%){{}}"'])/{SYSTEM_DIRS}/""")
-ENV_READ = re.compile(r"os\.environ|os\.getenv|process\.env")
+ENV_READ = re.compile(
+    r"\bos\.environ|\bos\.getenv|\benviron\b|\bgetenv\s*\("  # config-lint: ok (the rule's own pattern)
+    r"|process\.env|process\s*\[\s*[\"']env[\"']\s*\]|import\.meta\.env"
+)
 
 
 def scan_text(name: str, suffix: str, text: str) -> list[tuple[int, str, str]]:
