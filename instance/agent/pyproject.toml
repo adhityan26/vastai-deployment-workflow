@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "jsonschema>=4.21"]
+dev = ["pytest>=8", "jsonschema>=4.21", "httpx2"]
 
 [tool.setuptools.packages.find]
 include = ["vastcomfy_agent*"]
