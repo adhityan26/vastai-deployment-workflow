@@ -1,0 +1,74 @@
+version: 1
+keys:
+  # --- credentials injected by Vast or by the bot (instance) ---
+  - {name: CONTAINER_ID, components: [instance], type: str, secret: false, required: true, default: null, description: "Vast instance id (injected by Vast)"}
+  - {name: CONTAINER_API_KEY, components: [instance], type: str, secret: true, required: true, default: null, description: "Per-instance Vast key, can only manage its own instance (injected by Vast)"}
+  - {name: AGENT_TOKEN, components: [instance], type: str, secret: true, required: true, default: null, description: "Bearer token for the agent API, one per instance (created by the bot)"}
+  - {name: TS_AUTHKEY, components: [instance], type: str, secret: true, required: false, default: "", description: "Single-use Tailscale auth key, blanked after use"}
+  - {name: HF_TOKEN, components: [instance], type: str, secret: true, required: false, default: "", description: "Optional Hugging Face token for model downloads"}
+  # --- identity and bootstrap inputs (instance) ---
+  - {name: TS_HOSTNAME, components: [instance], type: str, secret: false, required: true, default: null, description: "Unique tailnet hostname for this instance"}
+  - {name: TS_TAG, components: [instance], type: str, secret: false, required: false, default: "tag:gpu", description: "Tailscale tag advertised by the instance"}
+  - {name: TS_SOCKET, components: [instance], type: str, secret: false, required: false, default: "/var/run/tailscale/tailscaled.sock", description: "tailscaled socket path"}
+  - {name: TS_SERVE_ENABLED, components: [instance], type: bool, secret: false, required: false, default: false, description: "Run tailscale serve forwards (decided by spike S2)"}
+  - {name: REPO_URL, components: [instance], type: str, secret: false, required: true, default: null, description: "Git URL of this repository"}
+  - {name: REPO_COMMIT, components: [instance], type: str, secret: false, required: true, default: null, description: "Pinned commit that bootstrap checks out"}
+  - {name: PROFILE, components: [instance], type: str, secret: false, required: true, default: null, description: "Profile name, e.g. image"}
+  - {name: KEEP_ON_FAILURE, components: [instance], type: bool, secret: false, required: false, default: false, description: "Do not self-destroy on boot failure (debugging only)"}
+  # --- paths ---
+  - {name: STATE_DIR, components: [instance], type: str, secret: false, required: false, default: "/var/lib/vastcomfy", description: "Persistent state directory"}
+  - {name: ENV_FILE_PATH, components: [instance], type: str, secret: false, required: false, default: "/etc/vastcomfy/.env", description: "Where bootstrap writes the instance .env"}
+  - {name: REPO_DIR, components: [instance], type: str, secret: false, required: false, default: "/opt/vast-comfy", description: "Where the repo is cloned"}
+  - {name: COMFY_DIR, components: [instance], type: str, secret: false, required: false, default: "/workspace/ComfyUI", description: "ComfyUI install directory (S1)"}
+  - {name: WORKFLOWS_DIR, components: [instance], type: str, secret: false, required: false, default: "/workspace/ComfyUI/user/default/workflows", description: "ComfyUI user workflows directory (S1)"}
+  - {name: SUPERVISOR_CONF, components: [instance], type: str, secret: false, required: false, default: "/opt/vast-comfy/instance/supervisord.conf", description: "supervisord config path"}
+  # --- network ---
+  - {name: COMFY_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "ComfyUI bind/connect host"}
+  - {name: COMFY_PORT, components: [instance], type: int, secret: false, required: false, default: 8188, description: "ComfyUI port"}
+  - {name: AGENT_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "Agent bind host"}
+  - {name: AGENT_PORT, components: [instance], type: int, secret: false, required: false, default: 8189, description: "Agent port"}
+  - {name: HTTP_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Timeout for local HTTP calls"}
+  - {name: HF_BASE_URL, components: [instance], type: str, secret: false, required: false, default: "https://huggingface.co", description: "Model download host"}
+  - {name: GIT_HOST_URL, components: [instance], type: str, secret: false, required: false, default: "https://github.com", description: "Host used to clone custom nodes"}
+  # --- binaries ---
+  - {name: VASTAI_BIN, components: [instance], type: str, secret: false, required: false, default: "vastai", description: "vastai CLI used for self-destroy"}
+  - {name: SUPERVISORCTL_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisorctl", description: "supervisorctl binary"}
+  - {name: SUPERVISORD_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisord", description: "supervisord binary"}
+  - {name: TAILSCALE_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscale", description: "tailscale CLI binary"}
+  - {name: NVIDIA_SMI_BIN, components: [instance], type: str, secret: false, required: false, default: "nvidia-smi", description: "nvidia-smi binary"}
+  - {name: GIT_BIN, components: [instance], type: str, secret: false, required: false, default: "git", description: "git binary"}
+  - {name: PIP_BIN, components: [instance], type: str, secret: false, required: false, default: "pip", description: "pip binary for custom node requirements"}
+  - {name: COMFY_PROGRAM, components: [instance], type: str, secret: false, required: false, default: "comfyui", description: "supervisord program name of ComfyUI"}
+  # --- timing and limits ---
+  - {name: IDLE_MINUTES, components: [instance], type: int, secret: false, required: false, default: 30, description: "Idle minutes before destroy"}
+  - {name: IDLE_WARN_MINUTES, components: [instance], type: int, secret: false, required: false, default: 10, description: "Minutes before the idle destroy at which state becomes idle-warning"}
+  - {name: FAILSAFE_HOURS, components: [instance], type: int, secret: false, required: false, default: 3, description: "Default failsafe lifetime"}
+  - {name: HARD_CAP_HOURS, components: [instance], type: int, secret: false, required: false, default: 6, description: "Absolute lifetime cap, never extendable"}
+  - {name: FAILSAFE_POLL_S, components: [instance], type: int, secret: false, required: false, default: 30, description: "failsafe.sh loop interval"}
+  - {name: COMFY_POLL_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Agent runner tick interval"}
+  - {name: EXTEND_MAX_IDLE_MIN, components: [instance], type: int, secret: false, required: false, default: 120, description: "Max minutes per /extend idle call"}
+  - {name: EXTEND_MAX_FAILSAFE_MIN, components: [instance], type: int, secret: false, required: false, default: 180, description: "Max minutes per /extend failsafe call"}
+  - {name: DESTROY_RETRIES, components: [instance], type: int, secret: false, required: false, default: 5, description: "Destroy attempts before destroy_failed"}
+  - {name: DESTROY_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 120, description: "Seconds between destroy attempts"}
+  - {name: DESTROY_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, description: "Timeout of one vastai call"}
+  - {name: DESTROY_GONE_MARKERS, components: [instance], type: csv, secret: false, required: false, default: "404,not found,no such instance", description: "Output fragments meaning the instance is already gone (S4)"}
+  - {name: DOWNLOAD_RETRIES, components: [instance], type: int, secret: false, required: false, default: 3, description: "Download attempts per file"}
+  - {name: DOWNLOAD_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Seconds between download attempts"}
+  - {name: DOWNLOAD_CHUNK_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, description: "Download chunk size"}
+  - {name: DISK_MARGIN_MB, components: [instance], type: int, secret: false, required: false, default: 2048, description: "Free disk to keep after downloads"}
+  - {name: WORKFLOW_MAX_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, description: "Max accepted workflow size"}
+  - {name: COMFY_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 300, description: "Wait for ComfyUI to answer"}
+  - {name: AGENT_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, description: "Wait for the agent to answer"}
+  # --- apps (homelab, sub-projects 2-3; listed so the schema is the single registry) ---
+  - {name: VAST_API_KEY, components: [apps], type: str, secret: true, required: true, default: null, description: "Main Vast API key, lives on the homelab only"}
+  - {name: VAST_API_URL, components: [apps], type: str, secret: false, required: false, default: "https://console.vast.ai/api/v0", description: "Vast REST API base URL"}
+  - {name: TS_API_CREDENTIAL, components: [apps], type: str, secret: true, required: true, default: null, description: "Tailscale OAuth credential used to mint auth keys"}
+  - {name: DISCORD_BOT_TOKEN, components: [apps], type: str, secret: true, required: true, default: null, description: "Discord bot token"}
+  - {name: DISCORD_ADMIN_USER_IDS, components: [apps], type: csv, secret: false, required: true, default: null, description: "Discord user ids allowed to start/destroy/extend"}
+  - {name: DISCORD_ALERT_TARGET, components: [apps], type: str, secret: false, required: true, default: null, description: "Channel or user that receives alerts"}
+  - {name: OUTPUT_DIR, components: [apps], type: str, secret: false, required: false, default: "output", description: "Where saved generations are written"}
+  - {name: WATCHDOG_INTERVAL_S, components: [apps], type: int, secret: false, required: false, default: 180, description: "Watchdog polling interval"}
+  - {name: BOOT_TIMEOUT_MIN, components: [apps], type: int, secret: false, required: false, default: 25, description: "Destroy an instance that is not ready after this long"}
+  - {name: UNREACHABLE_WARN_MIN, components: [apps], type: int, secret: false, required: false, default: 10, description: "Warn when /status is unreachable this long"}
+  - {name: UNREACHABLE_DESTROY_MIN, components: [apps], type: int, secret: false, required: false, default: 15, description: "Destroy when /status is unreachable this long"}
+  - {name: ALERT_REPEAT_MIN, components: [apps], type: int, secret: false, required: false, default: 5, description: "Repeat urgent alerts at this interval"}
