@@ -78,3 +78,15 @@ def test_missing_or_unknown_state_file_reads_as_none(tmp_path):
     assert make(tmp_path).get().state is None
     (tmp_path / "state.json").write_text('{"state": "weird", "reason": null, "updated_at": 1}')
     assert make(tmp_path).get().state is None
+
+
+def test_reset_for_boot_forces_booting_from_any_state(tmp_path):
+    store = make(tmp_path, 7)
+    force(store, State.READY)
+    record = store.reset_for_boot()
+    assert (record.state, record.reason, record.updated_at) == (State.BOOTING, None, 7)
+    assert store.get().state == State.BOOTING
+
+
+def test_boot_reasons_added_for_supervisor_and_agent_failures():
+    assert {"agent_start_failed", "supervisor_failed"} <= REASONS

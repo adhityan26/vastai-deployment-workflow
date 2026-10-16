@@ -35,6 +35,8 @@ keys:
   - {name: SUPERVISORCTL_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisorctl", description: "supervisorctl binary"}
   - {name: SUPERVISORD_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisord", description: "supervisord binary"}
   - {name: TAILSCALE_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscale", description: "tailscale CLI binary"}
+  - {name: TAILSCALED_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscaled", description: "tailscaled daemon binary"}
+  - {name: COMFY_PYTHON, components: [instance], type: str, secret: false, required: false, default: "python3", description: "Python interpreter used to run ComfyUI and the agent"}
   - {name: NVIDIA_SMI_BIN, components: [instance], type: str, secret: false, required: false, default: "nvidia-smi", description: "nvidia-smi binary"}
   - {name: GIT_BIN, components: [instance], type: str, secret: false, required: false, default: "git", description: "git binary"}
   - {name: PIP_BIN, components: [instance], type: str, secret: false, required: false, default: "pip", description: "pip binary for custom node requirements"}

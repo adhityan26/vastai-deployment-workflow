@@ -25,6 +25,7 @@ REASONS = frozenset(
         "missing_container_credentials", "config_invalid", "hard_cap_missing", "failsafe_failed",
         "tailscale_failed", "node_install_failed", "download_failed", "disk_insufficient",
         "comfyui_start_failed", "idle_timeout", "failsafe_deadline", "manual", "watchdog",
+        "agent_start_failed", "supervisor_failed",
     }
 )
 
@@ -66,6 +67,13 @@ class StateStore:
         except ValueError:
             return StateRecord(None, None, None)
         return StateRecord(state, data.get("reason"), data.get("updated_at"))
+
+    def reset_for_boot(self) -> StateRecord:
+        """A container (re)start begins a new boot: force `booting` regardless of the previous state."""
+        with self._lock:
+            record = StateRecord(State.BOOTING, None, self._now())
+            write_json(self._path, {"state": State.BOOTING.value, "reason": None, "updated_at": record.updated_at})
+            return record
 
     def set(self, new: State, reason: str | None = None) -> StateRecord:
         if reason is not None and reason not in REASONS:
