@@ -30,7 +30,11 @@ class KeySpec:
 
 
 def load_schema(path: Path | None = None) -> list[KeySpec]:
-    raw = yaml.safe_load((path or SCHEMA_PATH).read_text())
+    path = path or SCHEMA_PATH
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise ConfigError(f"config schema not found at {path}") from None
     specs: list[KeySpec] = []
     for item in raw["keys"]:
         if item["type"] not in _TYPES:

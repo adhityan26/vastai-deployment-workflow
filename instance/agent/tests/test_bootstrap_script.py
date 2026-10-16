@@ -70,3 +70,8 @@ def test_every_step_after_the_trap_is_guarded():
         if not stripped.startswith(step_markers):
             continue
         assert "|| die_with" in stripped or "|| exit $?" in stripped, stripped
+
+
+def test_agent_is_installed_editable_so_the_repo_schema_resolves():
+    install = lines()[index_of("pip install")]
+    assert " -e " in install and '"$HERE/agent"' in install

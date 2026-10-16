@@ -393,3 +393,14 @@ def test_failed_state_write_does_not_prevent_the_destroy_attempt(tmp_path, capsy
     assert code == 12
     assert any(c[0] == "vastai" for c in runner.cmds)
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_write_env_with_a_missing_schema_exits_13_without_a_traceback(tmp_path, capsys, monkeypatch):
+    from vastcomfy_agent import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "SCHEMA_PATH", tmp_path / "gone" / "config-schema.yaml")
+    code, runner = run_boot(tmp_path, ["write-env"])
+    err = capsys.readouterr().err
+    assert code == 13
+    assert "config schema not found at" in err and "Traceback" not in err
+    assert runner.cmds == []

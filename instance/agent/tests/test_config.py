@@ -144,3 +144,9 @@ def test_gen_keys_matches_committed_allowed_keys_file(tmp_path):
     assert cfgmod.main(["gen-keys", "--out", str(generated)]) == 0
     committed = cfgmod.SCHEMA_PATH.parents[1] / "instance" / "allowed-keys.txt"
     assert committed.read_text() == generated.read_text()
+
+
+def test_missing_schema_file_raises_a_clear_config_error(tmp_path):
+    missing = tmp_path / "nowhere" / "config-schema.yaml"
+    with pytest.raises(ConfigError, match="config schema not found at .*nowhere"):
+        load_schema(missing)

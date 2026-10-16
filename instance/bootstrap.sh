@@ -7,7 +7,8 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY=python3  # config-lint: ok (interpreter needed before any configuration exists)
 
-"$PY" -m pip install -q "$HERE/agent" || { echo "bootstrap: installing the agent failed" >&2; exit 1; }
+# Editable install: the agent reads contracts/config-schema.yaml from this repository checkout.
+"$PY" -m pip install -q -e "$HERE/agent" || { echo "bootstrap: installing the agent failed" >&2; exit 1; }
 boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
 
 # Step 1: credentials. Writes the instance .env from the environment (schema keys only).
