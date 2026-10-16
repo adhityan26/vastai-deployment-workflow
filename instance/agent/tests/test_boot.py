@@ -370,3 +370,26 @@ def test_mark_ready_crash_self_destroys(tmp_path):
         boot.Boot.__init__ = original
     assert code == 12 and states(tmp_path).get().reason == "boot_failed"
     assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+def test_failed_state_write_does_not_prevent_the_destroy_attempt(tmp_path, capsys, monkeypatch):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+    with_profile_nodes(tmp_path)
+
+    def broken_set(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(StateStore, "set", broken_set)
+
+    class Missing(Runner):
+        def __call__(self, cmd, **kwargs):
+            if cmd[0] != "vastai":
+                raise FileNotFoundError(cmd[0])
+            return super().__call__(cmd, **kwargs)
+
+    code, runner = run_boot(tmp_path, ["install-nodes", "--env-file", ef], runner=Missing())
+    assert code == 12
+    assert any(c[0] == "vastai" for c in runner.cmds)
+    assert "Traceback" not in capsys.readouterr().err

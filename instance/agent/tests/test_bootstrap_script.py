@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "bootstrap.sh"
@@ -43,8 +44,17 @@ def test_supervisord_programs_do_not_autostart_and_use_env_expansion_only():
 
 
 def test_exit_trap_is_installed_after_write_env_and_before_init_times():
-    assert index_of("write-env") < index_of("trap ") < index_of("init-times")
+    assert index_of("write-env") < index_of("trap on_exit EXIT") < index_of("init-times")
     assert "boot_failed" in SCRIPT.read_text()
+
+
+def test_trap_placement_check_catches_a_misplaced_trap(monkeypatch):
+    # Mutant: the installing line moved after install-nodes must fail the placement check.
+    mutant = [line for line in lines() if line != "trap on_exit EXIT"]
+    position = next(i for i, line in enumerate(mutant) if "install-nodes" in line)
+    mutant.insert(position + 1, "trap on_exit EXIT")
+    monkeypatch.setattr(sys.modules[__name__], "lines", lambda: mutant)
+    assert not (index_of("write-env") < index_of("trap on_exit EXIT") < index_of("init-times"))
 
 
 def test_boot_done_is_set_after_mark_ready():

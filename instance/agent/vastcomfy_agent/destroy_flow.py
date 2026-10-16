@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable
 
 from .destroyer import Destroyer
 from .state import InvalidTransition, State, StateStore
+
+log = logging.getLogger(__name__)
 
 
 class DestroyFlow:
@@ -17,22 +20,25 @@ class DestroyFlow:
         self._lock = threading.Lock()
         self._running = False
 
+    def _record(self, state: State, reason: str | None = None) -> None:
+        """A failing state write must never prevent the destroy attempt."""
+        try:
+            self._states.set(state, reason)
+        except InvalidTransition:
+            pass
+        except Exception as exc:
+            log.error("could not record state %s: %s", state.value, type(exc).__name__)
+
     def run(self, reason: str) -> bool:
         with self._lock:
             if self._running:
                 return True
             self._running = True
         try:
-            try:
-                self._states.set(State.STOPPING, reason)
-            except InvalidTransition:
-                pass
+            self._record(State.STOPPING, reason)
             if self._destroyer.destroy():
                 return True
-            try:
-                self._states.set(State.DESTROY_FAILED)
-            except InvalidTransition:
-                pass
+            self._record(State.DESTROY_FAILED)
             try:
                 self._stop_comfy()
             except Exception:

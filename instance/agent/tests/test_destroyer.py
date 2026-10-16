@@ -132,3 +132,23 @@ def test_flow_survives_a_failing_stop_comfy(tmp_path):
     flow = DestroyFlow(states, FakeDestroyer(False), boom)
     assert flow.run("manual") is False
     assert states.get().state == State.DESTROY_FAILED
+
+
+class _Always:
+    def destroy(self):
+        self.called = getattr(self, "called", 0) + 1
+        return self.result
+
+
+class _BrokenStates:
+    def set(self, *args, **kwargs):
+        raise OSError("disk full")
+
+
+def test_destroy_flow_still_destroys_when_the_state_cannot_be_written():
+    for result in (True, False):
+        destroyer = _Always()
+        destroyer.result = result
+        flow = DestroyFlow(_BrokenStates(), destroyer, lambda: None)
+        assert flow.run("manual") is result
+        assert destroyer.called == 1
