@@ -44,6 +44,15 @@ class DeadlineStore:
     def set_idle_destroy_at(self, value: int) -> None:
         write_int(self._p.idle_destroy_at, value)
 
+    def push_idle_destroy_at(self, value: int) -> int:
+        """Move the idle destroy time to `value` unless it is already later (never backwards)."""
+        with self._lock:
+            current = self.idle_destroy_at()
+            if current is None or value > current:
+                write_int(self._p.idle_destroy_at, value)
+                return value
+            return current
+
     def init_first_boot(self, failsafe_hours: int, hard_cap_hours: int) -> str:
         """Write the boot files once. Returns 'fresh', 'restart' or 'hard_cap_missing'."""
         with self._lock:

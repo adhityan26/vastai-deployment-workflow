@@ -87,3 +87,20 @@ def test_only_ready_states_are_watched(tmp_path):
     watcher = IdleWatcher(states, deadlines, clock, 30, 10)
     clock.t = T0 + 10**6
     assert watcher.tick(0) == "none"
+
+
+def test_busy_queue_never_moves_an_extended_idle_timer_backwards(tmp_path):
+    clock, states, deadlines, watcher = setup(tmp_path)
+    extended = deadlines.extend_idle(120, max_per_call=120)
+    assert extended == T0 + 1800 + 7200
+    clock.t = T0 + 60
+    assert watcher.tick(3) == "none"
+    assert deadlines.idle_destroy_at() == extended
+
+
+def test_busy_queue_still_pushes_the_timer_forward_past_an_extension(tmp_path):
+    clock, states, deadlines, watcher = setup(tmp_path)
+    deadlines.extend_idle(10, max_per_call=120)
+    clock.t = T0 + 30 * 60
+    watcher.tick(1)
+    assert deadlines.idle_destroy_at() == clock.t + 1800

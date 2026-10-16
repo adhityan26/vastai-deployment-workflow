@@ -32,7 +32,8 @@ class IdleWatcher:
             return "none"
         now = self._now()
         if queue_total is not None and queue_total > 0:
-            self._deadlines.set_idle_destroy_at(now + self._idle * 60)
+            # max(current, now + idle): an /extend idle beyond the busy reset is kept
+            self._deadlines.push_idle_destroy_at(now + self._idle * 60)
             if record.state == State.IDLE_WARNING:
                 self._states.set(State.READY)
             return "none"

@@ -125,7 +125,7 @@ Pengaman dipasang sebelum hal yang bisa gagal.
 
 ### 5.5 Idle watcher (di agent)
 
-- Antrean berisi (running + pending > 0): `idle_destroy_at = sekarang + IDLE_MINUTES` pada tiap polling.
+- Antrean berisi (running + pending > 0): `idle_destroy_at = max(idle_destroy_at, sekarang + IDLE_MINUTES)` pada tiap polling; selama antrean berisi, waktu idle destroy tidak pernah mundur (perpanjangan `/extend idle` tetap berlaku).
 - Antrean kosong: nilai dibiarkan. `idle_destroy_at − 10 menit` terlewati → state `idle-warning`. Lewat `idle_destroy_at` → destroy (reason `idle_timeout`).
 - `/extend kind=idle minutes=N`: `idle_destroy_at += N`, dibatasi `hard_cap` dan maksimum 120 menit per panggilan. `/extend kind=failsafe minutes=N`: `deadline += N`, dibatasi `hard_cap` dan maksimum 180 menit per panggilan.
 - Karena state ada di file, restart agent tidak mengatur ulang hitungan.
