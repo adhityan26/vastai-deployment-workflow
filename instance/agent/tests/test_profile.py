@@ -199,3 +199,35 @@ def test_install_nodes_failure_raises_with_the_command_context(tmp_path):
     with pytest.raises(NodeInstallError, match="clone"):
         install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip",
                       run=FakeRun(tmp_path, fail_on="clone"))
+
+
+def test_install_nodes_reruns_pip_when_a_previous_pip_install_failed(tmp_path):
+    run = FakeRun(tmp_path, fail_on="pip")
+    with pytest.raises(NodeInstallError, match="pip"):
+        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    run.fail_on = None
+    run.cmds.clear()
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    dest = str(tmp_path / "custom_nodes" / "ComfyUI-GGUF")
+    assert ["pip", "install", "-r", dest + "/requirements.txt"] in run.cmds
+    assert all("clone" not in c and "checkout" not in c for c in run.cmds)
+
+
+def test_install_nodes_recovers_from_a_broken_checkout(tmp_path):
+    dest = tmp_path / "custom_nodes" / "ComfyUI-GGUF"
+    dest.mkdir(parents=True)
+    (dest / "garbage").write_text("partial")
+    sibling = tmp_path / "custom_nodes" / "keep"
+    sibling.mkdir()
+
+    class BrokenRun(FakeRun):
+        def __call__(self, cmd, **kwargs):
+            if "rev-parse" in cmd and (dest / "garbage").exists():
+                self.cmds.append(cmd)
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: not a git repository")
+            return super().__call__(cmd, **kwargs)
+
+    run = BrokenRun(tmp_path)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    assert not (dest / "garbage").exists() and sibling.exists()
+    assert any("clone" in c for c in run.cmds) and any("checkout" in c for c in run.cmds)

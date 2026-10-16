@@ -204,6 +204,17 @@ def _run_checked(run: Callable, cmd: list[str], what: str) -> subprocess.Complet
     return proc
 
 
+def _clone(run: Callable, git_bin: str, git_host: str, node: NodeSpec, name: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run_checked(run, [git_bin, "clone", f"{git_host.rstrip('/')}/{node.repo}", str(dest)], f"clone {name}")
+
+
+def _install_requirements(run: Callable, pip_bin: str, dest: Path, name: str) -> None:
+    requirements = dest / "requirements.txt"
+    if requirements.exists():
+        _run_checked(run, [pip_bin, "install", "-r", str(requirements)], f"pip install {name}")
+
+
 def install_nodes(
     profile: Profile, comfy_dir: Path, *, git_host: str, git_bin: str, pip_bin: str, run: Callable = subprocess.run
 ) -> None:
@@ -211,14 +222,17 @@ def install_nodes(
         name = node.repo.rsplit("/", 1)[-1]
         dest = Path(comfy_dir) / "custom_nodes" / name
         if dest.exists():
-            head = _run_checked(run, [git_bin, "-C", str(dest), "rev-parse", "HEAD"], f"rev-parse {name}")
-            if head.stdout.strip() == node.commit:
+            head = run([git_bin, "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True)
+            if head.returncode != 0:
+                # Broken checkout (e.g. a partial clone from a killed process): wipe it and clone afresh.
+                shutil.rmtree(dest)
+                _clone(run, git_bin, git_host, node, name, dest)
+            elif head.stdout.strip() == node.commit:
+                _install_requirements(run, pip_bin, dest, name)
                 continue
-            _run_checked(run, [git_bin, "-C", str(dest), "fetch", "--all", "--tags"], f"fetch {name}")
+            else:
+                _run_checked(run, [git_bin, "-C", str(dest), "fetch", "--all", "--tags"], f"fetch {name}")
         else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            _run_checked(run, [git_bin, "clone", f"{git_host.rstrip('/')}/{node.repo}", str(dest)], f"clone {name}")
+            _clone(run, git_bin, git_host, node, name, dest)
         _run_checked(run, [git_bin, "-C", str(dest), "checkout", "--detach", node.commit], f"checkout {name}")
-        requirements = dest / "requirements.txt"
-        if requirements.exists():
-            _run_checked(run, [pip_bin, "install", "-r", str(requirements)], f"pip install {name}")
+        _install_requirements(run, pip_bin, dest, name)
