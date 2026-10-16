@@ -50,6 +50,7 @@ Destroy dari dalam instance **berfungsi** dan **terbatas ke instance sendiri**, 
 
 ## Follow-ups
 - **Kode (wajib sebelum uji nyata berikutnya):** ubah `Destroyer._command` dan `failsafe.sh` untuk memakai `-y`; ganti aturan sukses dari "rc == 0" menjadi pencocokan teks; tambah `DESTROY_OK_MARKERS`; perbarui tes (stub `vastai` harus meniru rc 0 pada kegagalan, output `Failed with error 401`, dan output sukses `destroying instance <id>.`). Termasuk `bootstrap`/`boot` jika memakai perintah yang sama.
+  - [x] Selesai: lihat rencana `docs/superpowers/plans/2026-10-17-s4-destroy-fix.md` (Task 1: `-y`, sukses dari teks output, `DESTROY_OK_MARKERS`; `Destroyer`, `failsafe.sh`, schema, dan tes diperbarui).
 - Putuskan apakah key tetap lewat `--api-key` (terlihat di `ps`, root-only di container) atau lewat file `~/.config/vastai/vast_api_key`; belum diuji apakah env var `VAST_API_KEY` dihormati CLI.
 - S1 harus memastikan `vastai` CLI terpasang di image ComfyUI bawaan Vast saat boot, karena `failsafe.sh` sekarang keluar (exit 2) bila binary tidak ditemukan; instalasinya (venv/`pipx`) harus dilakukan sebelum failsafe dijalankan, atau lewat `PYTHON_BIN` tertentu.
 - S3: gunakan `/usr/bin/curl` untuk panggilan API Hugging Face mentah.

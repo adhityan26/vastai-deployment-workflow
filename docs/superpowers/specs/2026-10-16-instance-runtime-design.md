@@ -120,6 +120,7 @@ Pengaman dipasang sebelum hal yang bisa gagal.
 - Jika `min(deadline, hard_cap)` terlewati (epoch UTC) → destroy, **tanpa memedulikan job aktif**.
 - Pengaman sekunder: failsafe menghitung waktu berjalannya sendiri (`$SECONDS`); jika ≥ `HARD_CAP_HOURS` × 3600, destroy. Ini melindungi dari lompatan jam atau file yang diubah.
 - API Vast tidak terjangkau → coba lagi tiap 30 detik terus-menerus, tulis `destroy_failsafe.json` (`pending: true`), matikan ComfyUI.
+- Perintah destroy: `vastai destroy instance <id> -y --api-key <key>` (teks biasa, tanpa `--raw`). `-y` wajib: tanpa TTY CLI mencetak `Aborted.` dan tidak menghancurkan apa pun. CLI **selalu exit 0**, juga saat gagal, jadi exit status diabaikan dan sukses ditentukan dari teks output saja (S4): setelah id dan key dibuang dari output, cocokkan tanpa membedakan huruf besar/kecil; sukses bila memuat salah satu `DESTROY_OK_MARKERS` (default `destroying instance`) atau `DESTROY_GONE_MARKERS` (default `Failed with error 404`, sudah hilang). Selain itu (output kosong, `Aborted.`, `Failed with error 401/5xx`) = gagal dan diulang; exit status 124/126/127 tidak pernah sukses.
 - Destroy idempoten: 404/"already gone" dianggap sukses.
 - Menulis pid ke `failsafe.pid`.
 
@@ -245,7 +246,8 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 | Destroy gagal | Retry; lalu `destroy_failed`, ComfyUI dimatikan; watchdog mencoba dengan key utama; alert berulang ke Discord. |
 | Container restart | File di `/var/lib/vastcomfy/` tidak ditimpa; `first_boot_at` mencegah penulisan ulang; Tailscale memakai state di disk; batas mutlak juga ditegakkan watchdog dari `start_date`. |
 | `deadline`/file lain korup atau setengah tulis | Penulisan atomik mencegahnya; bila tetap terjadi, failsafe jatuh ke `hard_cap`. |
-| Tiga pihak destroy bersamaan | Idempoten; 404 dianggap sukses. |
+| Tiga pihak destroy bersamaan | Idempoten; `Failed with error 404` dianggap sukses. |
+| `vastai destroy` exit 0 tetapi gagal (`Failed with error 401/5xx`, kosong, `Aborted.`) | Dihitung gagal: CLI selalu exit 0, sukses hanya dari teks (`destroying instance` atau 404). Retry/backoff seperti biasa. |
 
 ## 11. Pengujian
 
@@ -341,7 +343,7 @@ Daftar otoritatif ada di `contracts/config-schema.yaml` (dibuat di Task 1); tabe
 | `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S`, `VAST_API_URL` | apps | tidak |
 | `COMFY_PORT`, `AGENT_PORT`, `COMFY_DIR`, `STATE_DIR`, `ENV_FILE_PATH` | instance | tidak |
 | `FAILSAFE_POLL_S`, `IDLE_WARN_MINUTES`, `EXTEND_MAX_IDLE_MIN`, `EXTEND_MAX_FAILSAFE_MIN`, `WORKFLOW_MAX_BYTES`, `DESTROY_RETRIES`, `DOWNLOAD_RETRIES` | instance | tidak |
-| `TAILSCALED_BIN`, `COMFY_PYTHON`, `REPO_DIR`, `SUPERVISOR_CONF`, `COMFY_PROGRAM`, `DESTROY_TIMEOUT_S`, `DESTROY_BACKOFF_S`, `DESTROY_GONE_MARKERS`, `HF_BASE_URL`, `GIT_HOST_URL`, `COMFY_START_TIMEOUT_S`, `AGENT_START_TIMEOUT_S` | instance, non-secret (`ENV_FILE_PATH` dan `DESTROY_RETRIES` sudah terdaftar di atas) | tidak |
+| `TAILSCALED_BIN`, `COMFY_PYTHON`, `REPO_DIR`, `SUPERVISOR_CONF`, `COMFY_PROGRAM`, `DESTROY_TIMEOUT_S`, `DESTROY_BACKOFF_S`, `DESTROY_GONE_MARKERS` (default `Failed with error 404`), `DESTROY_OK_MARKERS` (default `destroying instance`), `HF_BASE_URL`, `GIT_HOST_URL`, `COMFY_START_TIMEOUT_S`, `AGENT_START_TIMEOUT_S` | instance, non-secret (`ENV_FILE_PATH` dan `DESTROY_RETRIES` sudah terdaftar di atas). Success destroy ditentukan dari teks output (`DESTROY_OK_MARKERS` atau `DESTROY_GONE_MARKERS`), bukan exit status | tidak |
 | `UNREACHABLE_WARN_MIN`, `UNREACHABLE_DESTROY_MIN`, `ALERT_REPEAT_MIN` | apps/watchdog | tidak |
 
 ## 15. `contracts/`
@@ -364,6 +366,7 @@ Sisi agent (Python) memakai model pydantic yang divalidasi terhadap skema; sisi 
 - **Watchdog bisa menghancurkan instance yang sedang mengerjakan job** bila hanya agent yang mati. Biaya didahulukan; ada peringatan di menit ke-10.
 - **Rahasia di env Vast terlihat di UI/API Vast.** Dibatasi oleh sifat sekali pakai dan umur instance.
 - **Custom node berjalan sebagai root** dan dapat membaca rahasia instance. Dibatasi dengan commit yang dipin dan tanpa ComfyUI-Manager.
+- **Key container punya akses baca akun yang luas** (terukur di S4): `vastai show instances` dengan key itu mendaftar semua instance akun, tetapi tulis (destroy) hanya ke id sendiri (`401 ... constraint on id` untuk id lain). Custom node yang berjalan sebagai root dapat melihat daftar instance akun, tidak bisa mengubahnya.
 - **Hook pre-commit bisa dilewati** (`--no-verify`, atau clone tanpa hook). Tidak ada cadangan di sisi server; pemilik menerima risiko ini.
 
 ## 17. Pertanyaan terbuka

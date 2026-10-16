@@ -36,13 +36,15 @@ def base_environ(tmp_path, **extra):
 
 
 class Runner:
-    def __init__(self, vast_code=0):
-        self.cmds, self.vast_code = [], vast_code
+    def __init__(self, vast_ok=True):
+        self.cmds, self.vast_ok = [], vast_ok
 
     def __call__(self, cmd, **kwargs):
         self.cmds.append(cmd)
-        code = self.vast_code if cmd[0] == "vastai" else 0
-        return subprocess.CompletedProcess(cmd, code, "", "err")
+        if cmd[0] == "vastai":  # the real CLI exits 0 and prints the outcome
+            out = f"destroying instance {cmd[3]}." if self.vast_ok else "Failed with error 401: denied"
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+        return subprocess.CompletedProcess(cmd, 0, "", "err")
 
 
 def run_boot(tmp_path, argv, environ=None, clock=None, runner=None, **kw):
@@ -67,7 +69,8 @@ def test_write_env_keeps_only_schema_keys_with_defaults_resolved_and_mode_600(tm
     written = parse_env_file(tmp_path / "etc" / ".env")
     assert "PATH" not in written and "PUBLIC_IPADDR" not in written and "VAST_CONTAINERLABEL" not in written
     assert written["IDLE_MINUTES"] == "30" and written["COMFY_PORT"] == "8188"
-    assert written["KEEP_ON_FAILURE"] == "false" and written["DESTROY_GONE_MARKERS"] == "404,not found,no such instance"
+    assert written["KEEP_ON_FAILURE"] == "false" and written["DESTROY_GONE_MARKERS"] == "Failed with error 404"
+    assert written["DESTROY_OK_MARKERS"] == "destroying instance"
     assert stat.S_IMODE((tmp_path / "etc" / ".env").stat().st_mode) == 0o600
     assert "VAST_API_KEY" not in written
 
@@ -140,6 +143,7 @@ def test_hard_cap_missing_after_first_boot_fails_and_self_destroys(tmp_path):
     assert code == 11
     assert states(tmp_path).get().state == State.STOPPING and states(tmp_path).get().reason == "hard_cap_missing"
     assert [c[:3] for c in runner.cmds if c[0] == "vastai"] == [["vastai", "destroy", "instance"]]
+    assert [c[4] for c in runner.cmds if c[0] == "vastai"] == ["-y"]
 
 
 def test_fail_self_destroys_unless_disabled(tmp_path):

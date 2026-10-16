@@ -1,14 +1,21 @@
 import subprocess
 
+import pytest
+
 from vastcomfy_agent.destroy_flow import DestroyFlow
 from vastcomfy_agent.destroyer import Destroyer
 from vastcomfy_agent.files import read_json
 from vastcomfy_agent.state import State, StateStore
 
 KEY = "k-secret-123"
+OK = "destroying instance 42."
+GONE = "Failed with error 404: Instance 42 not found."
+DENIED = ("Failed with error 401: Authorization Error. Your key lacks proper privileges to perform "
+          "this action, due to a constraint on id")
 
 
 def proc(code=0, out="", err=""):
+    """The real vastai CLI exits 0 even on failure, so tests pass code=0 unless they probe the exit status."""
     return subprocess.CompletedProcess(args=[], returncode=code, stdout=out, stderr=err)
 
 
@@ -25,56 +32,87 @@ class FakeRun:
         return result
 
 
-def make(tmp_path, results, retries=3, markers=("404", "not found"), container_id="42", api_key=KEY):
+def make(tmp_path, results, retries=3, markers=("failed with error 404",), ok_markers=("destroying instance",),
+         container_id="42", api_key=KEY):
     run = FakeRun(results)
     sleeps = []
     destroyer = Destroyer(
         vastai_bin="vastai", container_id=container_id, api_key=api_key, retries=retries, backoff_s=7,
-        timeout_s=9, gone_markers=list(markers), state_dir=tmp_path, run=run, sleep=sleeps.append,
+        timeout_s=9, gone_markers=list(markers), ok_markers=list(ok_markers), state_dir=tmp_path, run=run,
+        sleep=sleeps.append,
     )
     return destroyer, run, sleeps
 
 
 def test_success_on_first_attempt_builds_the_expected_command(tmp_path):
-    destroyer, run, sleeps = make(tmp_path, [proc(0)])
+    destroyer, run, sleeps = make(tmp_path, [proc(0, out=OK)])
     assert destroyer.destroy() is True
     cmd, kwargs = run.calls[0]
-    assert cmd == ["vastai", "destroy", "instance", "42", "--api-key", KEY]
+    assert cmd == ["vastai", "destroy", "instance", "42", "-y", "--api-key", KEY]
     assert kwargs["timeout"] == 9
-    assert sleeps == []
+    assert len(run.calls) == 1 and sleeps == []
     assert read_json(tmp_path / "destroy_agent.json") == {"attempts": 1, "last_error": None}
 
 
 def test_retries_with_backoff_then_succeeds(tmp_path):
-    destroyer, _, sleeps = make(tmp_path, [proc(1, err="boom"), proc(1, err="boom"), proc(0)])
+    destroyer, _, sleeps = make(tmp_path, [proc(0, out=DENIED), proc(0, out=DENIED), proc(0, out=OK)])
     assert destroyer.destroy() is True
     assert sleeps == [7, 7]
     assert read_json(tmp_path / "destroy_agent.json")["attempts"] == 3
 
 
 def test_gives_up_after_the_configured_attempts_and_records_the_error(tmp_path):
-    destroyer, run, sleeps = make(tmp_path, [proc(1, err="api down")] * 3)
+    destroyer, run, sleeps = make(tmp_path, [proc(0, out="Failed with error 503: api down")] * 3)
     assert destroyer.destroy() is False
     assert len(run.calls) == 3 and sleeps == [7, 7]
     record = read_json(tmp_path / "destroy_agent.json")
-    assert record == {"attempts": 3, "last_error": "api down"}
+    assert record == {"attempts": 3, "last_error": "Failed with error 503: api down"}
 
 
-def test_already_gone_counts_as_success(tmp_path):
-    destroyer, run, _ = make(tmp_path, [proc(1, out="Error: Instance Not Found (404)")])
+def test_already_gone_counts_as_success_with_exit_status_0(tmp_path):
+    destroyer, run, _ = make(tmp_path, [proc(0, out=GONE)])
     assert destroyer.destroy() is True
     assert len(run.calls) == 1
 
 
+def test_exit_status_0_with_an_authorization_error_is_a_failed_attempt(tmp_path):
+    destroyer, run, sleeps = make(tmp_path, [proc(0, out=DENIED)] * 3)
+    assert destroyer.destroy() is False
+    assert len(run.calls) == 3 and sleeps == [7, 7]
+    last_error = read_json(tmp_path / "destroy_agent.json")["last_error"]
+    assert "401" in last_error and KEY not in last_error
+
+
+@pytest.mark.parametrize("output", ["", "Aborted.", "   \n"])
+def test_exit_status_0_with_empty_output_or_aborted_is_a_failed_attempt(tmp_path, output):
+    destroyer, run, sleeps = make(tmp_path, [proc(0, out=output)] * 2, retries=2)
+    assert destroyer.destroy() is False
+    assert len(run.calls) == 2 and sleeps == [7]
+    assert read_json(tmp_path / "destroy_agent.json")["last_error"]
+
+
+@pytest.mark.parametrize("code", [124, 126, 127])
+def test_exit_status_124_126_127_is_a_failure_even_with_a_marker_in_the_output(tmp_path, code):
+    destroyer, _, _ = make(tmp_path, [proc(code, out=OK), proc(code, out=GONE)], retries=2)
+    assert destroyer.destroy() is False
+
+
+def test_markers_match_case_insensitively(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out="DESTROYING INSTANCE 42.")], retries=1)
+    assert destroyer.destroy() is True
+    destroyer, _, _ = make(tmp_path, [proc(0, out="failed WITH Error 404: Instance 42 not found.")], retries=1)
+    assert destroyer.destroy() is True
+
+
 def test_missing_binary_and_timeout_are_failed_attempts_not_crashes(tmp_path):
     destroyer, _, _ = make(
-        tmp_path, [FileNotFoundError("vastai"), subprocess.TimeoutExpired("vastai", 9), proc(0)]
+        tmp_path, [FileNotFoundError("vastai"), subprocess.TimeoutExpired("vastai", 9), proc(0, out=OK)]
     )
     assert destroyer.destroy() is True
 
 
 def test_error_text_never_contains_the_api_key(tmp_path):
-    destroyer, _, _ = make(tmp_path, [proc(1, err=f"bad key {KEY}")] * 3)
+    destroyer, _, _ = make(tmp_path, [proc(0, err=f"Failed with error 401: bad key {KEY}")] * 3)
     destroyer.destroy()
     assert KEY not in read_json(tmp_path / "destroy_agent.json")["last_error"]
 
@@ -154,21 +192,22 @@ def test_destroy_flow_still_destroys_when_the_state_cannot_be_written():
         assert destroyer.called == 1
 
 
-def test_output_echoing_an_instance_id_containing_404_is_not_gone(tmp_path):
-    destroyer, _, _ = make(tmp_path, [proc(1, err="rate limited destroying instance 14040404")],
-                           retries=1, container_id="14040404")
+def test_a_non_404_error_echoing_an_instance_id_containing_404_is_a_failure(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out="Failed with error 500: backend 14040404 timeout")],
+                           retries=1, container_id="14040404", markers=("404",))
     assert destroyer.destroy() is False
 
 
 def test_output_echoing_a_key_containing_404_is_not_gone(tmp_path):
-    destroyer, _, _ = make(tmp_path, [proc(1, err="bad key k404k")], retries=1, api_key="k404k")
+    destroyer, _, _ = make(tmp_path, [proc(0, err="bad key k404k")], retries=1, api_key="k404k",
+                           markers=("404",))
     assert destroyer.destroy() is False
     assert "k404k" not in read_json(tmp_path / "destroy_agent.json")["last_error"]
 
 
-def test_genuine_not_found_is_gone_even_when_the_id_contains_404(tmp_path):
-    destroyer, _, _ = make(tmp_path, [proc(1, out="Error: Instance Not Found (404)")], retries=1,
-                           container_id="14040404")
+def test_genuine_404_is_gone_even_when_the_id_contains_404(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out="Failed with error 404: Instance 14040404 not found.")],
+                           retries=1, container_id="14040404")
     assert destroyer.destroy() is True
 
 

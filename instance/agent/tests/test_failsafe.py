@@ -27,10 +27,15 @@ def write_exec(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
-def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_times=0, stub_out="boom",
-          stub_sleep=0, timeout_s=5, key=KEY, markers="404,not found", drop_key=None,
-          stub_rc=1, sctl_sleep=0, overrides=None, stub_pre=""):
-    """deadline/hard_cap: int offset in seconds from now, a raw str, or None for 'file missing'."""
+def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_times=0,
+          stub_out="Failed with error 401: Authorization Error. Your key lacks proper privileges",
+          stub_sleep=0, timeout_s=5, key=KEY, markers="Failed with error 404", ok_markers="destroying instance",
+          drop_key=None, stub_rc=0, sctl_sleep=0, overrides=None, stub_pre="", success_out="destroying instance $3."):
+    """deadline/hard_cap: int offset in seconds from now, a raw str, or None for 'file missing'.
+
+    The vastai stub mimics the real CLI (spike S4): it exits 0 (stub_rc) also when it fails and prints the
+    outcome on stdout: stub_out for the first fail_times calls, then success_out ('' prints nothing).
+    """
     state = tmp_path / "state"
     state.mkdir()
     now = int(time.time())
@@ -42,13 +47,15 @@ def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_time
         tmp_path / "vastai",
         f'#!/usr/bin/env bash\necho "$*" >> {log}\nn=$(cat {count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {count}\n'
         + (f'echo "{stub_pre}"\n' if stub_pre else "")
-        + f'sleep {stub_sleep}\nif [ "$n" -le {fail_times} ]; then echo "{stub_out}" >&2; exit {stub_rc}; fi\nexit 0\n',
+        + f'sleep {stub_sleep}\nif [ "$n" -le {fail_times} ]; then echo "{stub_out}"; exit {stub_rc}; fi\n'
+        + (f'echo "{success_out}"\n' if success_out else "")
+        + "exit 0\n",
     )
     write_exec(tmp_path / "sctl", f'#!/usr/bin/env bash\necho "$*" >> {sctl_log}\nsleep {sctl_sleep}\nexit 0\n')
     values = {
         "STATE_DIR": str(state), "CONTAINER_ID": "42", "CONTAINER_API_KEY": key,
         "HARD_CAP_HOURS": str(hard_cap_hours), "FAILSAFE_POLL_S": "1", "VASTAI_BIN": str(tmp_path / "vastai"),
-        "DESTROY_GONE_MARKERS": markers, "DESTROY_TIMEOUT_S": str(timeout_s),
+        "DESTROY_GONE_MARKERS": markers, "DESTROY_OK_MARKERS": ok_markers, "DESTROY_TIMEOUT_S": str(timeout_s),
         "SUPERVISORCTL_BIN": str(tmp_path / "sctl"), "SUPERVISOR_CONF": "/unused/sup.conf", "COMFY_PROGRAM": "comfy",
     }
     if drop_key:
@@ -85,7 +92,7 @@ def test_destroys_when_the_deadline_passes_and_exits(tmp_path, procs):
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None)
     assert proc.returncode == 0
-    assert log.read_text().strip() == f"destroy instance 42 --api-key {KEY}"
+    assert log.read_text().strip() == f"destroy instance 42 -y --api-key {KEY}"
     assert record(state) == {"attempts": 1, "last_error": None, "pending": False}
     assert "stop comfy" in sctl.read_text()
 
@@ -178,7 +185,7 @@ def test_retries_until_the_api_works_and_counts_attempts(tmp_path, procs):
 
 
 def test_already_gone_counts_as_success(tmp_path, procs):
-    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, stub_out="Instance Not Found (404)")
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, stub_out="Failed with error 404: Instance 42 not found.")
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
     assert len(log.read_text().strip().splitlines()) == 1
@@ -206,10 +213,10 @@ def test_env_value_with_equals_spaces_and_hash_reaches_the_command_intact(tmp_pa
     env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, key="a=b#c d")
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None)
-    assert log.read_text().strip() == "destroy instance 42 --api-key a=b#c d"
+    assert log.read_text().strip() == "destroy instance 42 -y --api-key a=b#c d"
 
 
-@pytest.mark.parametrize("missing", ["STATE_DIR", "CONTAINER_API_KEY", "VASTAI_BIN", "FAILSAFE_POLL_S"])
+@pytest.mark.parametrize("missing", ["STATE_DIR", "CONTAINER_API_KEY", "VASTAI_BIN", "FAILSAFE_POLL_S", "DESTROY_OK_MARKERS"])
 def test_missing_required_key_exits_2_and_names_it(tmp_path, procs, missing):
     env, _, _, _ = setup(tmp_path, deadline=1000, hard_cap=2000, drop_key=missing)
     proc = start(env, procs)
@@ -229,9 +236,9 @@ def test_missing_vastai_binary_exits_2_at_startup_and_names_the_key(tmp_path, pr
     assert proc.returncode == 2 and "VASTAI_BIN" in proc.stderr.read()
 
 
-def test_exit_127_with_a_gone_marker_is_a_failure_not_a_success(tmp_path, procs):
+def test_exit_127_with_an_ok_marker_is_a_failure_not_a_success(tmp_path, procs):
     env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, stub_rc=127,
-                             stub_out="vastai: command not found")
+                             stub_out="destroying instance 42.")
     proc = start(env, procs)
     assert wait_until(lambda: (state / "destroy_failsafe.json").exists() and record(state)["attempts"] >= 2)
     assert proc.poll() is None
@@ -275,7 +282,7 @@ def test_state_dir_becoming_unwritable_after_startup_still_destroys(tmp_path, pr
         assert wait_until(lambda: proc.poll() is not None, timeout=10)
     finally:
         state.chmod(0o755)
-    assert log.read_text().strip() == f"destroy instance 42 --api-key {KEY}"
+    assert log.read_text().strip() == f"destroy instance 42 -y --api-key {KEY}"
 
 
 def test_unusable_output_file_still_runs_the_destroy(tmp_path, procs):
@@ -283,7 +290,7 @@ def test_unusable_output_file_still_runs_the_destroy(tmp_path, procs):
     (state / ".failsafe_out").mkdir()
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None, timeout=10)
-    assert log.read_text().strip() == f"destroy instance 42 --api-key {KEY}"
+    assert log.read_text().strip() == f"destroy instance 42 -y --api-key {KEY}"
 
 
 def test_a_hung_supervisorctl_cannot_delay_the_destroy_beyond_the_timeout(tmp_path, procs):
@@ -295,7 +302,7 @@ def test_a_hung_supervisorctl_cannot_delay_the_destroy_beyond_the_timeout(tmp_pa
 
 def test_timeout_with_partial_gone_output_is_a_failure_not_a_success(tmp_path, procs):
     # I1: a call killed by the timeout (rc 124) never counts as gone, whatever it printed first.
-    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre="Instance Not Found (404)",
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre="destroying instance 42.",
                              stub_sleep=30, timeout_s=2)
     proc = start(env, procs)
     assert wait_until(lambda: (state / "destroy_failsafe.json").exists()
@@ -309,7 +316,8 @@ def test_output_echoing_the_instance_id_or_key_containing_404_is_a_failure(tmp_p
     # I2: a bare "404" marker must not match the instance id or the API key echoed in an error.
     ident, key = ("14040404", KEY) if field == "id" else ("42", "k404k")
     env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, key=key,
-                             stub_out=f"error: rate limited destroying {ident} with {key}",
+                             markers="404", ok_markers="destroying instance",
+                             stub_out=f"Failed with error 500: rate limited {ident} with {key}",
                              overrides={"CONTAINER_ID": ident})
     proc = start(env, procs)
     assert wait_until(lambda: (state / "destroy_failsafe.json").exists() and record(state)["attempts"] >= 2)
@@ -320,7 +328,8 @@ def test_output_echoing_the_instance_id_or_key_containing_404_is_a_failure(tmp_p
 
 def test_genuine_not_found_still_counts_as_gone_when_the_id_contains_404(tmp_path, procs):
     env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
-                           stub_out="Instance Not Found (404)", overrides={"CONTAINER_ID": "14040404"})
+                           stub_out="Failed with error 404: Instance 14040404 not found.",
+                           overrides={"CONTAINER_ID": "14040404"})
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
     assert len(log.read_text().strip().splitlines()) == 1
@@ -340,3 +349,47 @@ def test_last_error_is_valid_json_without_control_or_non_ascii_bytes(tmp_path, p
     assert data["pending"] is True
     if "red" in noise:
         assert "red error" in data["last_error"] and "bad" in data["last_error"]
+
+
+def failing_attempts(state, proc):
+    assert wait_until(lambda: (state / "destroy_failsafe.json").exists() and record(state)["attempts"] >= 2)
+    assert proc.poll() is None
+    assert wait_until(lambda: record(state)["last_error"] is not None)
+    assert record(state)["pending"] is True
+
+
+def test_exit_status_0_with_an_authorization_error_is_a_failure_and_is_retried(tmp_path, procs):
+    # The real CLI exits 0 on failure; the exit status must never count as a success.
+    env, state, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99)
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+    assert len(log.read_text().strip().splitlines()) >= 2
+    assert "401" in record(state)["last_error"] and KEY not in record(state)["last_error"]
+
+
+def test_exit_status_0_with_empty_output_is_a_failure(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, success_out="")
+    proc = start(env, procs)
+    assert wait_until(lambda: (state / "destroy_failsafe.json").exists() and record(state)["attempts"] >= 2)
+    assert proc.poll() is None and record(state)["pending"] is True
+
+
+def test_aborted_output_is_a_failure(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, stub_out="Aborted.")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+    assert "Aborted" in record(state)["last_error"]
+
+
+def test_markers_match_case_insensitively(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, success_out="DESTROYING INSTANCE $3.")
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert len(log.read_text().strip().splitlines()) == 1
+
+
+def test_a_missing_ok_markers_key_exits_2_and_names_it(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, drop_key="DESTROY_OK_MARKERS")
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None, timeout=5)
+    assert proc.returncode == 2 and "DESTROY_OK_MARKERS" in proc.stderr.read() and not log.exists()

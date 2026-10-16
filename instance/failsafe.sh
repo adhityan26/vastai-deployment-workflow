@@ -19,7 +19,7 @@ fi
 env_get() { grep -m1 "^$1=" "$ENV_FILE" | cut -d= -f2-; }
 
 for key in STATE_DIR CONTAINER_ID CONTAINER_API_KEY HARD_CAP_HOURS FAILSAFE_POLL_S VASTAI_BIN \
-           DESTROY_GONE_MARKERS DESTROY_TIMEOUT_S SUPERVISORCTL_BIN SUPERVISOR_CONF COMFY_PROGRAM; do
+           DESTROY_GONE_MARKERS DESTROY_OK_MARKERS DESTROY_TIMEOUT_S SUPERVISORCTL_BIN SUPERVISOR_CONF COMFY_PROGRAM; do
   if [ -z "$(env_get "$key")" ]; then
     echo "failsafe: missing $key in $ENV_FILE" >&2
     exit 2
@@ -33,6 +33,7 @@ HARD_CAP_HOURS="$(env_get HARD_CAP_HOURS)"
 POLL_S="$(env_get FAILSAFE_POLL_S)"
 VASTAI_BIN="$(env_get VASTAI_BIN)"
 GONE_MARKERS="$(env_get DESTROY_GONE_MARKERS)"
+OK_MARKERS="$(env_get DESTROY_OK_MARKERS)"
 TIMEOUT_S="$(env_get DESTROY_TIMEOUT_S)"
 SUPERVISORCTL_BIN="$(env_get SUPERVISORCTL_BIN)"
 SUPERVISOR_CONF="$(env_get SUPERVISOR_CONF)"
@@ -75,7 +76,8 @@ if ! is_int "$HARD_CAP"; then
 fi
 ELAPSED_LIMIT=$((HARD_CAP_HOURS * 3600))
 
-IFS=',' read -r -a MARKERS <<< "$(lower "$GONE_MARKERS")"
+# The OK markers (destroy accepted) and the gone markers (404, already gone) both mean success.
+IFS=',' read -r -a MARKERS <<< "$(lower "$OK_MARKERS,$GONE_MARKERS")"
 OUT_FILE="$STATE_DIR/.failsafe_out"
 
 # Output goes to OUT_FILE; if that cannot be opened, fall back so the command ALWAYS runs.
@@ -100,7 +102,7 @@ run_with_timeout() {  # seconds outfile command...
   wait "$pid"
 }
 
-is_gone() {
+is_success_text() {
   local lowered marker
   lowered="$(lower "$1")"
   for marker in "${MARKERS[@]}"; do
@@ -116,15 +118,17 @@ destroy_once() {
   if [ "$attempts" -eq 1 ]; then
     run_with_timeout "$TIMEOUT_S" /dev/null "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" stop "$COMFY_PROGRAM" || true
   fi
-  run_with_timeout "$TIMEOUT_S" "$OUT_FILE" "$VASTAI_BIN" destroy instance "$CONTAINER_ID" --api-key "$API_KEY"
+  run_with_timeout "$TIMEOUT_S" "$OUT_FILE" "$VASTAI_BIN" destroy instance "$CONTAINER_ID" -y --api-key "$API_KEY"
   local rc=$? out
   out="$(cat "$OUT_USED" 2>/dev/null)"
   case "$OUT_USED" in "$OUT_FILE"|/dev/null) ;; *) rm -f "$OUT_USED" ;; esac
   # The id and key are stripped before matching so a bare marker such as "404" cannot match them.
   local scrubbed="${out//"$CONTAINER_ID"/}"
   scrubbed="${scrubbed//"$API_KEY"/}"
-  # 124 = killed by the timeout, 126/127 = could not execute: never a success, whatever the output says
-  if [ "$rc" -eq 0 ] || { [ "$rc" -ne 124 ] && [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] && is_gone "$scrubbed"; }; then
+  # The vastai CLI always exits 0 (also on failure), so the exit status is ignored and only the text
+  # decides: an OK or gone marker. 124 = killed by the timeout, 126/127 = could not execute: never a
+  # success, whatever the output says.
+  if [ "$rc" -ne 124 ] && [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] && is_success_text "$scrubbed"; then
     write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": false}"
     exit 0
   fi

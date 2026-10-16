@@ -64,6 +64,7 @@ def build(
         backoff_s=cfg.destroy_backoff_s,
         timeout_s=cfg.destroy_timeout_s,
         gone_markers=cfg.destroy_gone_markers,
+        ok_markers=cfg.destroy_ok_markers,
         state_dir=state_dir,
         run=run,
     )
