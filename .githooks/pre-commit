@@ -1,2 +1,5 @@
 #!/usr/bin/env bash
-exec "$(git rev-parse --show-toplevel)/scripts/check-secrets.sh"
+set -e
+root="$(git rev-parse --show-toplevel)"
+"$root/scripts/check-secrets.sh"
+python3 "$root/scripts/check_config_usage.py" --staged
