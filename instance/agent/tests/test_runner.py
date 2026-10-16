@@ -7,6 +7,7 @@ from vastcomfy_agent.runner import Runner
 from vastcomfy_agent.state import State, StateStore
 
 T0 = 4_000_000
+RETRY_S = 300
 
 
 class Clock:
@@ -45,7 +46,8 @@ def make(tmp_path, counts=(0, 0), ready=True):
     idle = IdleWatcher(states, deadlines, clock, 30, 10)
     idle.start()
     flow = FakeFlow()
-    runner = Runner(states=states, idle=idle, comfy=FakeComfy(counts), flow=flow, state_dir=tmp_path)
+    runner = Runner(states=states, idle=idle, comfy=FakeComfy(counts), flow=flow, state_dir=tmp_path,
+                    now=clock, destroy_failed_retry_s=RETRY_S)
     return clock, states, flow, runner
 
 
@@ -102,3 +104,55 @@ def test_run_forever_survives_exceptions_and_stops_on_event(tmp_path):
     runner.tick = flaky
     runner.run_forever(stop, interval_s=0)
     assert len(calls) == 2
+
+
+def destroy_failed(tmp_path, reason=None):
+    clock, states, flow, runner = make(tmp_path, ready=False)
+    states.set(State.STOPPING, "manual")
+    states.set(State.DESTROY_FAILED)
+    if reason is not None:
+        write_json(tmp_path / "state.json", {"state": "destroy_failed", "reason": reason, "updated_at": T0})
+    return clock, states, flow, runner
+
+
+def test_destroy_failed_is_not_retried_before_the_interval(tmp_path):
+    clock, _, flow, runner = destroy_failed(tmp_path)
+    runner.tick()
+    clock.t = T0 + RETRY_S - 1
+    runner.tick()
+    assert flow.reasons == []
+
+
+def test_destroy_failed_is_retried_after_the_interval_and_then_waits_again(tmp_path):
+    clock, _, flow, runner = destroy_failed(tmp_path)
+    runner.tick()
+    clock.t = T0 + RETRY_S
+    runner.tick()
+    assert flow.reasons == ["manual"]
+    clock.t = T0 + 2 * RETRY_S - 1
+    runner.tick()
+    assert flow.reasons == ["manual"]
+    clock.t = T0 + 2 * RETRY_S
+    runner.tick()
+    assert flow.reasons == ["manual", "manual"]
+
+
+def test_destroy_failed_retry_uses_the_stored_reason(tmp_path):
+    clock, _, flow, runner = destroy_failed(tmp_path, reason="watchdog")
+    runner.tick()
+    clock.t = T0 + RETRY_S
+    runner.tick()
+    assert flow.reasons == ["watchdog"]
+
+
+def test_other_states_are_never_retried(tmp_path):
+    for name, steps in (("booting", []), ("failed", [State.FAILED]), ("stopping", [State.STOPPING])):
+        path = tmp_path / name
+        path.mkdir()
+        clock, states, flow, runner = make(path, ready=False)
+        for step in steps:
+            states.set(step, "manual" if step == State.STOPPING else "boot_failed")
+        for offset in (0, RETRY_S, 10 * RETRY_S):
+            clock.t = T0 + offset
+            runner.tick()
+        assert flow.reasons == [], name

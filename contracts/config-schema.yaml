@@ -53,6 +53,7 @@ keys:
   - {name: DESTROY_RETRIES, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Destroy attempts before destroy_failed"}
   - {name: DESTROY_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 120, min: 0, description: "Seconds between destroy attempts"}
   - {name: DESTROY_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, min: 1, description: "Timeout of one vastai call"}
+  - {name: DESTROY_FAILED_RETRY_S, components: [instance], type: int, secret: false, required: false, default: 300, min: 1, description: "Seconds between agent destroy retries while in destroy_failed"}
   - {name: DESTROY_GONE_MARKERS, components: [instance], type: csv, secret: false, required: false, default: "404,not found,no such instance", description: "Output fragments meaning the instance is already gone (S4)"}
   - {name: DOWNLOAD_RETRIES, components: [instance], type: int, secret: false, required: false, default: 3, min: 1, description: "Download attempts per file"}
   - {name: DOWNLOAD_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 0, description: "Seconds between download attempts"}

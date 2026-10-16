@@ -34,3 +34,10 @@ def test_build_wires_a_working_status_and_destroy_flow(make_cfg, tmp_path):
     assert wired.flow.run("manual") is False
     assert wired.states.get().state == State.DESTROY_FAILED
     assert any(cmd[0] == "supervisorctl" for cmd in calls)
+
+
+def test_build_passes_the_destroy_failed_retry_interval_to_the_runner(make_cfg):
+    cfg = make_cfg(DESTROY_FAILED_RETRY_S="77")
+    with httpx.Client() as client:
+        wired = wiring.build(cfg, now=lambda: 1000, run=lambda *a, **k: None, http_client=client)
+    assert wired.runner._retry_s == 77

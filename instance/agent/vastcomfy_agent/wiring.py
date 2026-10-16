@@ -69,7 +69,8 @@ def build(
     )
     flow = DestroyFlow(states, destroyer, make_stop_comfy(cfg, run))
     idle = IdleWatcher(states, deadlines, now, cfg.idle_minutes, cfg.idle_warn_minutes)
-    runner = Runner(states=states, idle=idle, comfy=comfy, flow=flow, state_dir=state_dir)
+    runner = Runner(states=states, idle=idle, comfy=comfy, flow=flow, state_dir=state_dir, now=now,
+                    destroy_failed_retry_s=cfg.destroy_failed_retry_s)
     status = StatusBuilder(
         state_dir=state_dir,
         states=states,

@@ -220,7 +220,7 @@ def test_list_shows_the_bounds(capsys, bounded):
 MIN_1_KEYS = ("DESTROY_RETRIES", "DESTROY_TIMEOUT_S", "FAILSAFE_POLL_S", "FAILSAFE_HOURS", "HARD_CAP_HOURS",
               "IDLE_MINUTES", "IDLE_WARN_MINUTES", "COMFY_POLL_S", "EXTEND_MAX_IDLE_MIN", "EXTEND_MAX_FAILSAFE_MIN",
               "DOWNLOAD_RETRIES", "HTTP_TIMEOUT_S", "WORKFLOW_MAX_BYTES", "COMFY_START_TIMEOUT_S",
-              "AGENT_START_TIMEOUT_S")
+              "AGENT_START_TIMEOUT_S", "DESTROY_FAILED_RETRY_S")
 
 
 def test_real_schema_bounds_the_behaviour_driving_ints():
