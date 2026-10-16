@@ -59,8 +59,10 @@ def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_time
     return env, state, log, sctl_log
 
 
-def start(env, procs):
-    proc = subprocess.Popen(["bash", str(SCRIPT), "--env-file", str(env)], stderr=subprocess.PIPE, text=True)
+def start(env, procs, extra_env=None):
+    environ = {**os.environ, **(extra_env or {})}
+    proc = subprocess.Popen(["bash", str(SCRIPT), "--env-file", str(env)], stderr=subprocess.PIPE, text=True,
+                            env=environ)
     procs.append(proc)
     return proc
 
@@ -117,15 +119,53 @@ def test_deadline_in_the_past_after_a_restart_destroys_on_the_first_loop(tmp_pat
 
 
 def test_missing_hard_cap_file_is_computed_from_the_configured_hours(tmp_path, procs):
-    env, _, log, _ = setup(tmp_path, deadline=None, hard_cap=None, hard_cap_hours=0)
+    # HARD_CAP_HOURS must be >= 1 (I3), so the computed cap lies an hour ahead: no destroy yet,
+    # and an earlier deadline still wins over the computed cap.
+    env, state, log, _ = setup(tmp_path, deadline=None, hard_cap=None, hard_cap_hours=1)
     proc = start(env, procs)
-    assert wait_until(lambda: proc.poll() is not None, timeout=5) and log.exists()
+    assert wait_until(lambda: (state / "failsafe.pid").exists())
+    time.sleep(2.5)
+    assert proc.poll() is None and not log.exists()
+
+
+def test_missing_hard_cap_file_still_honours_a_passed_deadline(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=-100, hard_cap=None, hard_cap_hours=1)
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and log.exists()
 
 
 def test_elapsed_time_guard_fires_even_when_the_files_say_far_future(tmp_path, procs):
-    env, _, log, _ = setup(tmp_path, deadline=10**6, hard_cap=10**6, hard_cap_hours=0)
+    # bash takes SECONDS from the environment, which stands in for an hour of uptime here.
+    env, _, log, _ = setup(tmp_path, deadline=10**6, hard_cap=10**6, hard_cap_hours=1)
+    proc = start(env, procs, extra_env={"SECONDS": "3600"})
+    assert wait_until(lambda: proc.poll() is not None) and log.exists()
+
+
+def test_elapsed_time_guard_is_not_early(tmp_path, procs):
+    env, state, log, _ = setup(tmp_path, deadline=10**6, hard_cap=10**6, hard_cap_hours=1)
+    proc = start(env, procs, extra_env={"SECONDS": "3590"})
+    assert wait_until(lambda: (state / "failsafe.pid").exists())
+    time.sleep(2.5)
+    assert proc.poll() is None and not log.exists()
+
+
+@pytest.mark.parametrize("key", ["DESTROY_TIMEOUT_S", "HARD_CAP_HOURS", "FAILSAFE_POLL_S"])
+@pytest.mark.parametrize("value", ["1_0", "0", "-5", "+5", " 5", "5 ", "abc", "1.5"])
+def test_non_strict_or_zero_numeric_key_exits_2_and_names_it(tmp_path, procs, key, value):
+    # I3: exit 2 at startup makes bootstrap's kill -0 check fail closed (failsafe_failed).
+    env, _, log, _ = setup(tmp_path, deadline=-100, hard_cap=1000, overrides={key: value})
     proc = start(env, procs)
-    assert wait_until(lambda: proc.poll() is not None, timeout=5) and log.exists()
+    assert wait_until(lambda: proc.poll() is not None, timeout=5)
+    assert proc.returncode == 2 and key in proc.stderr.read()
+    assert not log.exists()
+
+
+def test_numeric_keys_with_a_leading_zero_are_read_as_decimal(tmp_path, procs):
+    # bash arithmetic would read 08 as a bad octal number and leave the cap unset.
+    env, _, log, _ = setup(tmp_path, deadline=-100, hard_cap=None,
+                           overrides={"HARD_CAP_HOURS": "08", "DESTROY_TIMEOUT_S": "09", "FAILSAFE_POLL_S": "01"})
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0 and log.exists()
 
 
 def test_retries_until_the_api_works_and_counts_attempts(tmp_path, procs):

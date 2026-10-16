@@ -404,3 +404,11 @@ def test_write_env_with_a_missing_schema_exits_13_without_a_traceback(tmp_path, 
     assert code == 13
     assert "config schema not found at" in err and "Traceback" not in err
     assert runner.cmds == []
+
+
+@pytest.mark.parametrize("key, value", [("DESTROY_TIMEOUT_S", "1_0"), ("HARD_CAP_HOURS", "48"), ("FAILSAFE_POLL_S", "0")])
+def test_write_env_rejects_non_strict_or_out_of_range_ints_with_exit_13(tmp_path, capsys, key, value):
+    code, runner = run_boot(tmp_path, ["write-env"], base_environ(tmp_path, **{key: value}))
+    assert code == 13 and key in capsys.readouterr().err
+    record = states(tmp_path).get()
+    assert (record.state, record.reason) == (State.FAILED, "config_invalid")

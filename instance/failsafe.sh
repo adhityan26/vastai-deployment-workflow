@@ -41,6 +41,19 @@ COMFY_PROGRAM="$(env_get COMFY_PROGRAM)"
 is_int() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Numeric keys: digits only and >= 1, or the timeout/cap arithmetic below silently breaks.
+# 10# reads a value such as 08 as decimal instead of an invalid octal number.
+for key in HARD_CAP_HOURS FAILSAFE_POLL_S DESTROY_TIMEOUT_S; do
+  value="$(env_get "$key")"
+  if ! is_int "$value" || [ "$((10#$value))" -lt 1 ]; then
+    echo "failsafe: $key must be a whole number >= 1 (got '$value')" >&2
+    exit 2
+  fi
+done
+HARD_CAP_HOURS=$((10#$HARD_CAP_HOURS))
+POLL_S=$((10#$POLL_S))
+TIMEOUT_S=$((10#$TIMEOUT_S))
+
 write_atomic() {  # file content
   local tmp="$1.tmp.$$"
   printf '%s\n' "$2" > "$tmp" && mv "$tmp" "$1"

@@ -27,7 +27,7 @@ keys:
   - {name: COMFY_PORT, components: [instance], type: int, secret: false, required: false, default: 8188, description: "ComfyUI port"}
   - {name: AGENT_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "Agent bind host"}
   - {name: AGENT_PORT, components: [instance], type: int, secret: false, required: false, default: 8189, description: "Agent port"}
-  - {name: HTTP_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Timeout for local HTTP calls"}
+  - {name: HTTP_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Timeout for local HTTP calls"}
   - {name: HF_BASE_URL, components: [instance], type: str, secret: false, required: false, default: "https://huggingface.co", description: "Model download host"}
   - {name: GIT_HOST_URL, components: [instance], type: str, secret: false, required: false, default: "https://github.com", description: "Host used to clone custom nodes"}
   # --- binaries ---
@@ -42,25 +42,25 @@ keys:
   - {name: PIP_BIN, components: [instance], type: str, secret: false, required: false, default: "pip", description: "pip binary for custom node requirements"}
   - {name: COMFY_PROGRAM, components: [instance], type: str, secret: false, required: false, default: "comfyui", description: "supervisord program name of ComfyUI"}
   # --- timing and limits ---
-  - {name: IDLE_MINUTES, components: [instance], type: int, secret: false, required: false, default: 30, description: "Idle minutes before destroy"}
-  - {name: IDLE_WARN_MINUTES, components: [instance], type: int, secret: false, required: false, default: 10, description: "Minutes before the idle destroy at which state becomes idle-warning"}
-  - {name: FAILSAFE_HOURS, components: [instance], type: int, secret: false, required: false, default: 3, description: "Default failsafe lifetime"}
-  - {name: HARD_CAP_HOURS, components: [instance], type: int, secret: false, required: false, default: 6, description: "Absolute lifetime cap, never extendable"}
-  - {name: FAILSAFE_POLL_S, components: [instance], type: int, secret: false, required: false, default: 30, description: "failsafe.sh loop interval"}
-  - {name: COMFY_POLL_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Agent runner tick interval"}
-  - {name: EXTEND_MAX_IDLE_MIN, components: [instance], type: int, secret: false, required: false, default: 120, description: "Max minutes per /extend idle call"}
-  - {name: EXTEND_MAX_FAILSAFE_MIN, components: [instance], type: int, secret: false, required: false, default: 180, description: "Max minutes per /extend failsafe call"}
-  - {name: DESTROY_RETRIES, components: [instance], type: int, secret: false, required: false, default: 5, description: "Destroy attempts before destroy_failed"}
-  - {name: DESTROY_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 120, description: "Seconds between destroy attempts"}
-  - {name: DESTROY_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, description: "Timeout of one vastai call"}
+  - {name: IDLE_MINUTES, components: [instance], type: int, secret: false, required: false, default: 30, min: 1, description: "Idle minutes before destroy"}
+  - {name: IDLE_WARN_MINUTES, components: [instance], type: int, secret: false, required: false, default: 10, min: 1, description: "Minutes before the idle destroy at which state becomes idle-warning"}
+  - {name: FAILSAFE_HOURS, components: [instance], type: int, secret: false, required: false, default: 3, min: 1, max: 24, description: "Default failsafe lifetime"}
+  - {name: HARD_CAP_HOURS, components: [instance], type: int, secret: false, required: false, default: 6, min: 1, max: 24, description: "Absolute lifetime cap, never extendable"}
+  - {name: FAILSAFE_POLL_S, components: [instance], type: int, secret: false, required: false, default: 30, min: 1, description: "failsafe.sh loop interval"}
+  - {name: COMFY_POLL_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Agent runner tick interval"}
+  - {name: EXTEND_MAX_IDLE_MIN, components: [instance], type: int, secret: false, required: false, default: 120, min: 1, description: "Max minutes per /extend idle call"}
+  - {name: EXTEND_MAX_FAILSAFE_MIN, components: [instance], type: int, secret: false, required: false, default: 180, min: 1, description: "Max minutes per /extend failsafe call"}
+  - {name: DESTROY_RETRIES, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Destroy attempts before destroy_failed"}
+  - {name: DESTROY_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 120, min: 0, description: "Seconds between destroy attempts"}
+  - {name: DESTROY_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, min: 1, description: "Timeout of one vastai call"}
   - {name: DESTROY_GONE_MARKERS, components: [instance], type: csv, secret: false, required: false, default: "404,not found,no such instance", description: "Output fragments meaning the instance is already gone (S4)"}
-  - {name: DOWNLOAD_RETRIES, components: [instance], type: int, secret: false, required: false, default: 3, description: "Download attempts per file"}
-  - {name: DOWNLOAD_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 5, description: "Seconds between download attempts"}
-  - {name: DOWNLOAD_CHUNK_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, description: "Download chunk size"}
-  - {name: DISK_MARGIN_MB, components: [instance], type: int, secret: false, required: false, default: 2048, description: "Free disk to keep after downloads"}
-  - {name: WORKFLOW_MAX_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, description: "Max accepted workflow size"}
-  - {name: COMFY_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 300, description: "Wait for ComfyUI to answer"}
-  - {name: AGENT_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, description: "Wait for the agent to answer"}
+  - {name: DOWNLOAD_RETRIES, components: [instance], type: int, secret: false, required: false, default: 3, min: 1, description: "Download attempts per file"}
+  - {name: DOWNLOAD_BACKOFF_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 0, description: "Seconds between download attempts"}
+  - {name: DOWNLOAD_CHUNK_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, min: 1, description: "Download chunk size"}
+  - {name: DISK_MARGIN_MB, components: [instance], type: int, secret: false, required: false, default: 2048, min: 0, description: "Free disk to keep after downloads"}
+  - {name: WORKFLOW_MAX_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, min: 1, description: "Max accepted workflow size"}
+  - {name: COMFY_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 300, min: 1, description: "Wait for ComfyUI to answer"}
+  - {name: AGENT_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, min: 1, description: "Wait for the agent to answer"}
   # --- apps (homelab, sub-projects 2-3; listed so the schema is the single registry) ---
   - {name: VAST_API_KEY, components: [apps], type: str, secret: true, required: true, default: null, description: "Main Vast API key, lives on the homelab only"}
   - {name: VAST_API_URL, components: [apps], type: str, secret: false, required: false, default: "https://console.vast.ai/api/v0", description: "Vast REST API base URL"}

@@ -150,3 +150,88 @@ def test_missing_schema_file_raises_a_clear_config_error(tmp_path):
     missing = tmp_path / "nowhere" / "config-schema.yaml"
     with pytest.raises(ConfigError, match="config schema not found at .*nowhere"):
         load_schema(missing)
+
+
+@pytest.mark.parametrize("text", ["1_0", "+5", " 08 ", "-1", "5 ", "1e3", "0x10", "٣", "12\n"])
+def test_int_accepts_only_plain_ascii_digits(schema, text):
+    port = next(s for s in load_schema(schema) if s.name == "PORT")
+    with pytest.raises(ConfigError, match="PORT: expected an integer"):
+        cfgmod._coerce(port, text)
+
+
+def test_non_strict_int_in_an_env_file_fails_and_names_the_key(tmp_path, schema):
+    with pytest.raises(ConfigError, match="PORT"):
+        load_config(write_env(tmp_path, "TOKEN=a\nPORT=1_0\n"), "instance", schema)
+
+
+def test_int_with_leading_zero_is_still_a_plain_integer(tmp_path, schema):
+    assert load_config(write_env(tmp_path, "TOKEN=a\nPORT=08\n"), "instance", schema).port == 8
+
+
+BOUNDED = """
+version: 1
+keys:
+  - {name: HOURS, components: [instance], type: int, secret: false, required: false, default: 3, min: 1, max: 24, description: "hours"}
+  - {name: BACKOFF, components: [instance], type: int, secret: false, required: false, default: 5, min: 0, description: "backoff"}
+"""
+
+
+@pytest.fixture
+def bounded(tmp_path):
+    path = tmp_path / "bounded.yaml"
+    path.write_text(BOUNDED)
+    return path
+
+
+def test_schema_bounds_are_loaded(bounded):
+    specs = {s.name: s for s in load_schema(bounded)}
+    assert (specs["HOURS"].min, specs["HOURS"].max) == (1, 24)
+    assert (specs["BACKOFF"].min, specs["BACKOFF"].max) == (0, None)
+
+
+@pytest.mark.parametrize("text, bound", [("0", "minimum 1"), ("25", "maximum 24")])
+def test_out_of_range_int_names_the_key_and_the_bound(tmp_path, bounded, text, bound):
+    with pytest.raises(ConfigError, match=f"HOURS: {text} is .*{bound}"):
+        load_config(write_env(tmp_path, f"HOURS={text}\n"), "instance", bounded)
+
+
+def test_values_on_the_bounds_are_accepted(tmp_path, bounded):
+    assert load_config(write_env(tmp_path, "HOURS=1\nBACKOFF=0\n"), "instance", bounded).hours == 1
+    assert load_config(write_env(tmp_path, "HOURS=24\n"), "instance", bounded).hours == 24
+
+
+def test_bounds_on_a_non_int_key_or_non_int_bound_are_rejected(tmp_path):
+    path = tmp_path / "bad.yaml"
+    for item in ("{name: A, components: [instance], type: str, secret: false, required: false, default: x, min: 1, description: d}",
+                 "{name: A, components: [instance], type: int, secret: false, required: false, default: 1, min: '1', description: d}",
+                 "{name: A, components: [instance], type: int, secret: false, required: false, default: 1, min: 5, max: 2, description: d}"):
+        path.write_text(f"version: 1\nkeys:\n  - {item}\n")
+        with pytest.raises(ConfigError, match="A:"):
+            load_schema(path)
+
+
+def test_list_shows_the_bounds(capsys, bounded):
+    assert cfgmod.cmd_list("instance", bounded) == 0
+    out = capsys.readouterr().out
+    hours = next(line for line in out.splitlines() if line.startswith("HOURS"))
+    assert "min=1" in hours and "max=24" in hours
+
+
+MIN_1_KEYS = ("DESTROY_RETRIES", "DESTROY_TIMEOUT_S", "FAILSAFE_POLL_S", "FAILSAFE_HOURS", "HARD_CAP_HOURS",
+              "IDLE_MINUTES", "IDLE_WARN_MINUTES", "COMFY_POLL_S", "EXTEND_MAX_IDLE_MIN", "EXTEND_MAX_FAILSAFE_MIN",
+              "DOWNLOAD_RETRIES", "HTTP_TIMEOUT_S", "WORKFLOW_MAX_BYTES", "COMFY_START_TIMEOUT_S",
+              "AGENT_START_TIMEOUT_S")
+
+
+def test_real_schema_bounds_the_behaviour_driving_ints():
+    specs = {s.name: s for s in load_schema()}
+    for name in MIN_1_KEYS:
+        assert specs[name].min == 1, name
+    for name in ("DESTROY_BACKOFF_S", "DISK_MARGIN_MB"):
+        assert specs[name].min == 0, name
+    for name in ("FAILSAFE_HOURS", "HARD_CAP_HOURS"):
+        assert specs[name].max == 24, name
+    for spec in specs.values():  # every default satisfies its own bounds
+        if spec.type == "int" and spec.default is not None:
+            assert spec.min is None or spec.default >= spec.min, spec.name
+            assert spec.max is None or spec.default <= spec.max, spec.name

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ import yaml
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / "contracts" / "config-schema.yaml"
 
 _TYPES = {"str", "int", "bool", "csv"}
+_INT_TEXT = re.compile(r"[0-9]+")  # ASCII digits only: no sign, underscore, spaces or other scripts
 
 
 class ConfigError(Exception):
@@ -27,6 +29,19 @@ class KeySpec:
     required: bool
     default: Any
     description: str
+    min: int | None = None
+    max: int | None = None
+
+
+def _bound(item: dict, which: str) -> int | None:
+    value = item.get(which)
+    if value is None:
+        return None
+    if item["type"] != "int":
+        raise ConfigError(f"{item['name']}: {which} is only allowed on int keys")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{item['name']}: {which} must be an integer")
+    return value
 
 
 def load_schema(path: Path | None = None) -> list[KeySpec]:
@@ -39,6 +54,9 @@ def load_schema(path: Path | None = None) -> list[KeySpec]:
     for item in raw["keys"]:
         if item["type"] not in _TYPES:
             raise ConfigError(f"{item['name']}: unknown type {item['type']!r}")
+        low, high = _bound(item, "min"), _bound(item, "max")
+        if low is not None and high is not None and low > high:
+            raise ConfigError(f"{item['name']}: min {low} is greater than max {high}")
         specs.append(
             KeySpec(
                 name=item["name"],
@@ -48,6 +66,8 @@ def load_schema(path: Path | None = None) -> list[KeySpec]:
                 required=bool(item["required"]),
                 default=item.get("default"),
                 description=item["description"],
+                min=low,
+                max=high,
             )
         )
     names = [s.name for s in specs]
@@ -86,10 +106,14 @@ def _coerce(spec: KeySpec, text: str) -> Any:
     if spec.type == "str":
         return text
     if spec.type == "int":
-        try:
-            return int(text)
-        except ValueError:
-            raise ConfigError(f"{spec.name}: expected an integer") from None
+        if not _INT_TEXT.fullmatch(text):
+            raise ConfigError(f"{spec.name}: expected an integer (digits only)")
+        value = int(text)
+        if spec.min is not None and value < spec.min:
+            raise ConfigError(f"{spec.name}: {value} is below the minimum {spec.min}")
+        if spec.max is not None and value > spec.max:
+            raise ConfigError(f"{spec.name}: {value} is above the maximum {spec.max}")
+        return value
     if spec.type == "bool":
         if text in ("true", "false"):
             return text == "true"
@@ -157,7 +181,8 @@ def cmd_list(component: str, schema_path: Path | None = None) -> int:
     for spec in _specs_for(component, schema_path):
         flags = ["secret" if spec.secret else "plain", "required" if spec.required else "optional"]
         default = "" if spec.secret else default_text(spec)
-        print(f"{spec.name:28} {' '.join(flags):18} default={default!r:34} {spec.description}")
+        bounds = " ".join(f"{which}={value}" for which, value in (("min", spec.min), ("max", spec.max)) if value is not None)
+        print(f"{spec.name:28} {' '.join(flags):18} default={default!r:34} {bounds:14} {spec.description}")
     return 0
 
 
