@@ -294,3 +294,79 @@ def test_wait_for_comfy_returns_when_it_answers(tmp_path):
     up = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
     code, _ = run_boot(tmp_path, ["wait", "--target", "comfy", "--env-file", ef], http_client=up, sleep=lambda s: None)
     assert code == 0
+
+
+def test_write_env_rejects_type_invalid_values_with_config_invalid(tmp_path):
+    for extra in ({"KEEP_ON_FAILURE": "1"}, {"IDLE_MINUTES": "30m"}):
+        sub = tmp_path / next(iter(extra))
+        sub.mkdir()
+        code, runner = run_boot(sub, ["write-env"], base_environ(sub, **extra))
+        record = StateStore(sub / "state", Clock()).get()
+        assert code == 13 and (record.state, record.reason) == (State.FAILED, "config_invalid")
+        assert runner.cmds == []
+
+
+def test_main_with_an_invalid_env_file_exits_13_without_traceback(tmp_path, capsys):
+    prepared(tmp_path)
+    ef = tmp_path / "etc" / ".env"
+    ef.write_text(ef.read_text().replace("KEEP_ON_FAILURE=false", "KEEP_ON_FAILURE=1"))
+    code, runner = run_boot(tmp_path, ["begin", "--env-file", str(ef)])
+    assert code == 13 and runner.cmds == []
+    assert states(tmp_path).get().reason == "config_invalid"
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_uncaught_exception_in_a_boot_command_self_destroys(tmp_path):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+    with_profile_nodes(tmp_path)
+
+    class Missing(Runner):
+        def __call__(self, cmd, **kwargs):
+            if cmd[0] != "vastai":
+                self.cmds.append(cmd)
+                raise FileNotFoundError(cmd[0])
+            return super().__call__(cmd, **kwargs)
+
+    code, runner = run_boot(tmp_path, ["install-nodes", "--env-file", ef], runner=Missing())
+    assert code == 12
+    record = states(tmp_path).get()
+    assert record.state == State.STOPPING and record.reason == "boot_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+def with_profile_nodes(tmp_path):
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(PROFILE.replace("nodes: []", "nodes:\n  - {name: n, repo: org/n, commit: abc}"))
+
+
+def test_copy_workflows_missing_source_file_self_destroys(tmp_path):
+    prepared(tmp_path)
+    with_profile(tmp_path)
+    (tmp_path / "repo" / "instance" / "workflows" / "flow.json").unlink()
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+    code, runner = run_boot(tmp_path, ["copy-workflows", "--env-file", ef])
+    assert code == 12 and states(tmp_path).get().reason == "boot_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+def test_mark_ready_crash_self_destroys(tmp_path):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])  # no init-times, so idle.start may raise or not
+    original = boot.Boot.__init__
+
+    def patched(self, *a, **k):
+        original(self, *a, **k)
+        self.wired.idle.start = lambda: (_ for _ in ()).throw(OSError("disk"))
+
+    boot.Boot.__init__ = patched
+    try:
+        code, runner = run_boot(tmp_path, ["mark-ready", "--env-file", ef])
+    finally:
+        boot.Boot.__init__ = original
+    assert code == 12 and states(tmp_path).get().reason == "boot_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)

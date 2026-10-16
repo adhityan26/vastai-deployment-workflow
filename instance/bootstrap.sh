@@ -12,9 +12,26 @@ boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
 
 # Step 1: credentials. Writes the instance .env from the environment (schema keys only).
 ENV_FILE="$(boot write-env)" || exit $?
+
+# Fail closed: credentials exist from here on, so any non-zero exit before BOOT_DONE that no boot command or
+# die_with already handled (a boot command returns 11, 12 or 13 after handling) self-destroys the instance.
+BOOT_DONE=0
+HANDLED=0
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 0 ] && [ "${BOOT_DONE:-0}" != 1 ] && [ "${HANDLED:-0}" != 1 ]; then
+    case "$rc" in
+      11|12|13) ;;
+      *) "$PY" -m vastcomfy_agent.boot fail boot_failed --env-file "$ENV_FILE" ;;
+    esac
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 eval "$(boot env-export --env-file "$ENV_FILE")"  # non-secret keys for supervisord's %(ENV_...)s
 
-die_with() { boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
+die_with() { HANDLED=1; boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
 ctl() { "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" "$@"; }
 
 # Step 2: new boot, time files (written only on the very first boot).
@@ -60,3 +77,4 @@ boot wait --target comfy --env-file "$ENV_FILE" || exit $?
 
 # Step 10: ready (starts the idle timer).
 boot mark-ready --env-file "$ENV_FILE" || exit $?
+BOOT_DONE=1

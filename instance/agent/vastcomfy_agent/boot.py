@@ -13,7 +13,6 @@ from typing import Callable, Mapping
 import httpx
 
 from .clock import utc_now
-from .comfy import ComfyClient
 from .config import ConfigError, KeySpec, default_text, load_config, load_schema, parse_env_file
 from .deadlines import DeadlineStore
 from .files import atomic_write
@@ -75,7 +74,10 @@ class Boot:
         self.wired = build(self.cfg, now=now, run=run, http_client=self.http)
 
     def fail(self, reason: str, destroy: bool = True) -> int:
-        _safe_set(self.wired.states, State.FAILED, reason)
+        try:
+            _safe_set(self.wired.states, State.FAILED, reason)
+        except Exception as exc:  # the destroy below must still run
+            print(f"boot: could not record {reason}: {exc}", file=sys.stderr)
         if destroy and not self.cfg.keep_on_failure:
             self.wired.flow.run(reason)
         return EXIT_FAILED
@@ -98,6 +100,12 @@ def cmd_write_env(environ, now, schema_path=None) -> int:
     if missing:
         _safe_set(states, State.FAILED, "config_invalid")
         print(f"boot: missing required keys: {', '.join(missing)}", file=sys.stderr)
+        return EXIT_CONFIG
+    try:
+        load_config(path, "instance")
+    except ConfigError as exc:
+        _safe_set(states, State.FAILED, "config_invalid")
+        print(f"boot: {exc}", file=sys.stderr)
         return EXIT_CONFIG
     print(path)
     return EXIT_OK
@@ -248,7 +256,31 @@ def main(
         print(load_config(args.env_file, "instance").get(args.key))
         return EXIT_OK
 
-    b = Boot(args.env_file, now=now, run=run, http_client=http_client, free_bytes_fn=free_bytes_fn, sleep=sleep)
+
+    try:
+        b = Boot(args.env_file, now=now, run=run, http_client=http_client, free_bytes_fn=free_bytes_fn, sleep=sleep)
+    except ConfigError as exc:
+        # No valid config means no destroy is possible here; the watchdog covers this case.
+        try:
+            _safe_set(StateStore(state_dir_of(args.env_file, environ), now), State.FAILED, "config_invalid")
+        except Exception:
+            pass
+        print(f"boot: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    try:
+        return run_boot_command(b, args)
+    except Exception as exc:  # fail closed: any crash after the credentials exist ends in a self-destroy
+        print(f"boot: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return b.fail("boot_failed")
+
+
+def state_dir_of(env_file: Path, environ: Mapping[str, str]) -> Path:
+    values = parse_env_file(env_file) if env_file.exists() else {}
+    return Path(values.get("STATE_DIR") or environ.get("STATE_DIR") or default_text(
+        next(s for s in instance_specs() if s.name == "STATE_DIR")))
+
+
+def run_boot_command(b: Boot, args) -> int:
     if args.command == "begin":
         b.wired.states.reset_for_boot()
         return EXIT_OK

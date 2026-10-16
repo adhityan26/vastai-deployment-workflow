@@ -39,7 +39,7 @@ Urutan 1 → 2 → 3 → 4. Sub-proyek 2 dan 3 bergantung pada kontrak di bagian
 | Workflow | Template bawaan dari repo. Workflow buatan pengguna disinkron lewat `PUT /workflows/{nama}`, **timpa saja** (tanpa `.bak`). |
 | Extend | Idle dan failsafe, dibatasi `hard_cap` dan batas per panggilan. |
 | Bahasa | `instance/`: **Python** (agent FastAPI) + shell (bootstrap, failsafe). `apps/`: **Node.js/TypeScript**. Kontrak di `contracts/` menjaga keduanya sinkron. |
-| Kegagalan boot | Setelah failsafe aktif, kegagalan boot **menghancurkan instance sendiri** (kecuali `KEEP_ON_FAILURE=1` untuk debugging). |
+| Kegagalan boot | Setelah failsafe aktif, kegagalan boot **menghancurkan instance sendiri** (kecuali `KEEP_ON_FAILURE=true` untuk debugging). |
 
 ## 3. Non-goals (v1)
 
@@ -104,7 +104,7 @@ Pengaman dipasang sebelum hal yang bisa gagal.
 
 1. **Kredensial.** Tulis `/etc/vastcomfy/.env` hanya dari key yang ada di skema (daftar kunci dihasilkan dari `contracts/config-schema.yaml` ke `instance/allowed-keys.txt`; **bukan** seluruh env Vast). Pastikan `CONTAINER_ID` dan `CONTAINER_API_KEY` tidak kosong; jika kosong, boot berhenti (state `failed`, reason `missing_container_credentials`). Tidak ada kredensial untuk destroy, jadi **hanya timeout watchdog 25 menit yang menghentikannya**.
 2. **Tanda waktu.** Jika `first_boot_at` tidak ada: tulis `first_boot_at`, `hard_cap` (boot + `HARD_CAP_HOURS`), dan `deadline` (boot + `FAILSAFE_HOURS`). Jika `first_boot_at` ada tetapi `hard_cap` hilang: `failed` (reason `hard_cap_missing`) dan self-destroy; jangan menghitung ulang.
-3. **Jalankan `failsafe.sh`.** Mulai dari titik ini, setiap kegagalan boot **menghancurkan instance sendiri** (`self_destroy <reason>`), kecuali `KEEP_ON_FAILURE=1`.
+3. **Jalankan `failsafe.sh`.** Mulai dari titik ini, setiap kegagalan boot **menghancurkan instance sendiri** (`self_destroy <reason>`), kecuali `KEEP_ON_FAILURE=true`.
 4. **supervisord** (disesuaikan hasil S1); nyalakan program lewat `supervisorctl`.
 5. **Tailscale naik** (state di `/var/lib/vastcomfy/tailscale/`), `tailscale serve` bila diperlukan (hasil S2). Hapus `TS_AUTHKEY` dari `.env` setelah berhasil. Gagal → `failed` (`tailscale_failed`), self-destroy.
 6. **Jalankan agent** (agent hanya terjangkau lewat Tailscale, jadi setelah langkah 5). Menampilkan state `booting`/`downloading`.
@@ -136,13 +136,13 @@ Pengaman dipasang sebelum hal yang bisa gagal.
 | Dari | Ke | Pemicu | Reason |
 |---|---|---|---|
 | `booting` | `downloading` | langkah 8 mulai | - |
-| `booting`/`downloading` | `failed` | kegagalan boot | `missing_container_credentials`, `hard_cap_missing`, `tailscale_failed`, `node_install_failed`, `download_failed`, `disk_insufficient`, `comfyui_start_failed`, `config_invalid`, `failsafe_failed`, `supervisor_failed`, `agent_start_failed` |
+| `booting`/`downloading` | `failed` | kegagalan boot | `missing_container_credentials`, `hard_cap_missing`, `tailscale_failed`, `node_install_failed`, `download_failed`, `disk_insufficient`, `comfyui_start_failed`, `config_invalid`, `failsafe_failed`, `supervisor_failed`, `agent_start_failed`, `boot_failed` |
 | `downloading` | `ready` | ComfyUI menjawab | - |
 | `ready` | `idle-warning` | antrean kosong sampai `idle_destroy_at − 10 menit` | - |
 | `idle-warning` | `ready` | antrean berisi atau `/extend idle` | - |
 | `booting`/`downloading` | `stopping` | destroy diminta (sebelum `ready`) | `manual`, `watchdog` |
 | `ready`/`idle-warning` | `stopping` | destroy dimulai | `idle_timeout`, `failsafe_deadline`, `manual`, `watchdog` |
-| `failed` | `stopping` | self-destroy (kecuali `KEEP_ON_FAILURE=1`) | alasan asal |
+| `failed` | `stopping` | self-destroy (kecuali `KEEP_ON_FAILURE=true`) | alasan asal |
 | `stopping` | `destroy_failed` | percobaan destroy habis | - |
 | `destroy_failed` | `stopping` | percobaan ulang (agent atau watchdog) | - |
 
@@ -239,7 +239,7 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 |---|---|
 | Kredensial container kosong (langkah 1) | `failed`; failsafe tidak bisa dijalankan; dihentikan oleh watchdog (timeout 25 menit). |
 | `hard_cap` hilang setelah boot pertama | `failed` + self-destroy; tidak dihitung ulang. Watchdog menegakkan dari `start_date` sebagai cadangan. |
-| Tailscale/node/ComfyUI gagal (setelah langkah 3) | `failed` + alasan, lalu **self-destroy** (kecuali `KEEP_ON_FAILURE=1`). Tanpa retry otomatis (retry memakan waktu GPU berbayar). |
+| Tailscale/node/ComfyUI gagal (setelah langkah 3) | `failed` + alasan, lalu **self-destroy** (kecuali `KEEP_ON_FAILURE=true`). Tanpa retry otomatis (retry memakan waktu GPU berbayar). |
 | Download gagal (jaringan, rate limit, disk, ukuran) | Retry 3x dengan backoff, lalu `failed` dan self-destroy. |
 | Agent crash | `supervisord` restart; state ada di file jadi tidak ada yang hilang. Crash terus-menerus → watchdog (15 menit tak terjangkau). |
 | Destroy gagal | Retry; lalu `destroy_failed`, ComfyUI dimatikan; watchdog mencoba dengan key utama; alert berulang ke Discord. |
@@ -254,7 +254,7 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 - `failsafe.sh` dengan stub API Vast dan deadline berdurasi detik: agent mati, job aktif, API tak terjangkau, `deadline` korup, `hard_cap` tidak ada, lompatan jam (pengaman `$SECONDS`), container restart (file tidak ditimpa).
 - Pembaca `.env` di shell: tidak mengeksekusi kode; nilai berisi karakter khusus.
 - Bootstrap menulis hanya key dari skema; `TS_AUTHKEY` terhapus setelah dipakai.
-- Kegagalan boot setelah langkah 3 memicu self-destroy; `KEEP_ON_FAILURE=1` menahannya.
+- Kegagalan boot setelah langkah 3 memicu self-destroy; `KEEP_ON_FAILURE=true` menahannya.
 - `first_boot_at` ada tetapi `hard_cap` hilang → `failed` + self-destroy.
 - Kredensial container kosong → boot berhenti, failsafe tidak dijalankan.
 - Format epoch UTC pada semua file; penulisan atomik (tidak ada file setengah tulis terbaca).

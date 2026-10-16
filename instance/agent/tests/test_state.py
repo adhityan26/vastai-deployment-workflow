@@ -90,3 +90,7 @@ def test_reset_for_boot_forces_booting_from_any_state(tmp_path):
 
 def test_boot_reasons_added_for_supervisor_and_agent_failures():
     assert {"agent_start_failed", "supervisor_failed"} <= REASONS
+
+
+def test_boot_failed_reason_exists():
+    assert "boot_failed" in REASONS

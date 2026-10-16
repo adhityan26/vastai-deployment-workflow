@@ -40,3 +40,23 @@ def test_supervisord_programs_do_not_autostart_and_use_env_expansion_only():
     for program in ("tailscaled", "agent", "comfyui"):
         assert f"[program:{program}]" in text
     assert "%(ENV_STATE_DIR)s" in text and "%(ENV_COMFY_PORT)s" in text
+
+
+def test_exit_trap_is_installed_after_write_env_and_before_init_times():
+    assert index_of("write-env") < index_of("trap ") < index_of("init-times")
+    assert "boot_failed" in SCRIPT.read_text()
+
+
+def test_boot_done_is_set_after_mark_ready():
+    assert index_of("mark-ready") < index_of("BOOT_DONE=1")
+
+
+def test_every_step_after_the_trap_is_guarded():
+    start = index_of("init-times")
+    end = index_of("BOOT_DONE=1")
+    step_markers = ("boot ", "ctl ", '"$SUPERVISORD_BIN"', "serve_port ")
+    for line in lines()[start:end]:
+        stripped = line.strip()
+        if not stripped.startswith(step_markers):
+            continue
+        assert "|| die_with" in stripped or "|| exit $?" in stripped, stripped
