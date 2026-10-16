@@ -58,3 +58,23 @@ def test_state_paths_use_the_documented_file_names(tmp_path):
     assert p.destroy_agent.name == "destroy_agent.json"
     with pytest.raises(AttributeError):
         p.nope
+
+
+def test_read_int_and_read_json_return_the_default_on_undecodable_or_unreadable_files(tmp_path):
+    (tmp_path / "binary").write_bytes(b"\xff\xfe\x00garbage")
+    (tmp_path / "a_dir").mkdir()
+    for path in (tmp_path / "binary", tmp_path / "a_dir"):
+        assert files.read_int(path) is None
+        assert files.read_json(path, {"d": 1}) == {"d": 1}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="chmod does not restrict root")
+def test_read_helpers_return_the_default_on_permission_errors(tmp_path):
+    target = tmp_path / "locked"
+    target.write_text("12")
+    target.chmod(0)
+    try:
+        assert files.read_int(target) is None
+        assert files.read_json(target, "dflt") == "dflt"
+    finally:
+        target.chmod(0o644)

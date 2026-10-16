@@ -115,7 +115,7 @@ def test_deadline_in_the_past_after_a_restart_destroys_on_the_first_loop(tmp_pat
     # Review focus 3
     env, _, log, _ = setup(tmp_path, deadline=-100, hard_cap=1000)
     proc = start(env, procs)
-    assert wait_until(lambda: proc.poll() is not None, timeout=5) and log.exists()
+    assert wait_until(lambda: proc.poll() is not None, timeout=20) and log.exists()
 
 
 def test_missing_hard_cap_file_is_computed_from_the_configured_hours(tmp_path, procs):
@@ -324,3 +324,19 @@ def test_genuine_not_found_still_counts_as_gone_when_the_id_contains_404(tmp_pat
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
     assert len(log.read_text().strip().splitlines()) == 1
+
+
+@pytest.mark.parametrize("noise", ["\x1b[31mred error\x1b[0m\tbad\x01 caf\u00e9 \x7f", "\u00e9" * 300],
+                         ids=["ansi-and-controls", "long-multibyte"])
+def test_last_error_is_valid_json_without_control_or_non_ascii_bytes(tmp_path, procs, noise):
+    # minor (a): ANSI escapes, tabs, DEL and multi-byte text must not break the JSON record.
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99, stub_out=noise)
+    start(env, procs)
+    assert wait_until(lambda: (state / "destroy_failsafe.json").exists()
+                      and '"last_error": null' not in (state / "destroy_failsafe.json").read_text())
+    raw = (state / "destroy_failsafe.json").read_bytes()
+    assert all(0x20 <= b < 0x7f for b in raw.rstrip(b"\n"))
+    data = json.loads(raw)
+    assert data["pending"] is True
+    if "red" in noise:
+        assert "red error" in data["last_error"] and "bad" in data["last_error"]

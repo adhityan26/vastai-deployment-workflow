@@ -106,3 +106,8 @@ def test_agent_python_is_a_plain_instance_key_defaulting_to_python3():
 
     spec = next(s for s in load_schema() if s.name == "AGENT_PYTHON")
     assert spec.components == ("instance",) and not spec.secret and not spec.required and spec.default == "python3"
+
+
+def test_agent_program_retries_generously_so_quick_crashes_do_not_leave_it_fatal():
+    section = program_section("agent")
+    assert "startretries=10" in section and "startsecs=1" in section

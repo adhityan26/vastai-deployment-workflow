@@ -130,7 +130,9 @@ destroy_once() {
   fi
   if [ "$rc" -eq 124 ]; then out="vastai call timed out"; fi
   out="${out//"$API_KEY"/***}"
-  out="$(printf '%s' "$out" | tr -d '"\\\r\n' | cut -c1-200)"
+  # Keep printable ASCII only (drops control bytes 0-31, DEL and multi-byte text), then quotes and
+  # backslashes, so last_error is always valid JSON; LC_ALL=C makes tr and cut work on plain bytes.
+  out="$(printf '%s' "$out" | LC_ALL=C tr -cd ' -~' | LC_ALL=C tr -d '"\\' | LC_ALL=C cut -c1-200)"
   write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": \"$out\", \"pending\": true}"
 }
 

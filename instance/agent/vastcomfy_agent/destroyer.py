@@ -53,6 +53,8 @@ class Destroyer:
             return False, "vastai binary not found"
         except subprocess.TimeoutExpired:
             return False, "vastai call timed out"
+        except OSError as exc:  # PermissionError, exec format error, ...: a failed attempt, never a crash
+            return False, self._redact(f"vastai could not run: {type(exc).__name__}: {exc}")[:500]
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
         if proc.returncode == 0:
             return True, None

@@ -29,7 +29,7 @@ def atomic_write(path: Path, data: str) -> None:
 def read_int(path: Path) -> int | None:
     try:
         return int(Path(path).read_text().strip())
-    except (FileNotFoundError, ValueError):
+    except (OSError, ValueError):  # missing, unreadable, undecodable (UnicodeDecodeError) or not an int
         return None
 
 
@@ -40,7 +40,7 @@ def write_int(path: Path, value: int) -> None:
 def read_json(path: Path, default: Any = None) -> Any:
     try:
         return json.loads(Path(path).read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):  # missing, unreadable, undecodable or invalid JSON (JSONDecodeError)
         return default
 
 

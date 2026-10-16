@@ -170,3 +170,11 @@ def test_genuine_not_found_is_gone_even_when_the_id_contains_404(tmp_path):
     destroyer, _, _ = make(tmp_path, [proc(1, out="Error: Instance Not Found (404)")], retries=1,
                            container_id="14040404")
     assert destroyer.destroy() is True
+
+
+def test_os_errors_from_the_call_are_failed_attempts_not_crashes(tmp_path):
+    destroyer, run, sleeps = make(tmp_path, [PermissionError("denied"), OSError("exec format error")], retries=2)
+    assert destroyer.destroy() is False
+    assert len(run.calls) == 2 and sleeps == [7]
+    assert read_json(tmp_path / "destroy_agent.json")["attempts"] == 2
+    assert "exec format error" in read_json(tmp_path / "destroy_agent.json")["last_error"]
