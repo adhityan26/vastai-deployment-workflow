@@ -75,3 +75,34 @@ def test_every_step_after_the_trap_is_guarded():
 def test_agent_is_installed_editable_so_the_repo_schema_resolves():
     install = lines()[index_of("pip install")]
     assert " -e " in install and '"$HERE/agent"' in install
+
+
+def program_section(name):
+    section, current = [], None
+    for line in CONF.read_text().splitlines():
+        if line.startswith("["):
+            current = line.strip()
+        elif current == f"[program:{name}]" and line.strip():
+            section.append(line.strip())
+    return section
+
+
+def test_bootstrap_uses_agent_python_for_the_install_and_the_boot_cli():
+    assert lines()[index_of("PY=")].startswith('PY="${AGENT_PYTHON:-python3}"')
+    assert lines()[index_of("pip install")].lstrip().startswith('"$PY" -m pip install')
+    assert lines()[index_of("boot() {")].lstrip().startswith('boot() { "$PY" -m vastcomfy_agent.boot')
+    assert "COMFY_PYTHON" not in SCRIPT.read_text()
+
+
+def test_supervisord_runs_the_agent_with_agent_python_and_comfyui_with_comfy_python():
+    agent = next(line for line in program_section("agent") if line.startswith("command="))
+    comfy = next(line for line in program_section("comfyui") if line.startswith("command="))
+    assert agent.startswith("command=%(ENV_AGENT_PYTHON)s -m vastcomfy_agent")
+    assert comfy.startswith("command=%(ENV_COMFY_PYTHON)s main.py")
+
+
+def test_agent_python_is_a_plain_instance_key_defaulting_to_python3():
+    from vastcomfy_agent.config import load_schema
+
+    spec = next(s for s in load_schema() if s.name == "AGENT_PYTHON")
+    assert spec.components == ("instance",) and not spec.secret and not spec.required and spec.default == "python3"
