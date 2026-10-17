@@ -1,0 +1,101 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import type { AppsConfig } from "../src/config.js";
+import { ComfyClient, ComfyError, Unreachable } from "../src/comfy.js";
+
+interface Seen { method: string; url: string; body: string }
+let server: Server | undefined;
+afterEach(() => {
+  server?.closeAllConnections?.();
+  server?.close();
+  server = undefined;
+});
+
+async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 5) {
+  const seen: Seen[] = [];
+  server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const s = { method: req.method ?? "", url: req.url ?? "", body: raw };
+      seen.push(s);
+      handler(s, res);
+    });
+  });
+  await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  const cfg = { comfyPort: port, httpTimeoutSApps: timeoutS, secretNames: [] } as unknown as AppsConfig;
+  return { client: new ComfyClient("127.0.0.1", cfg), seen };
+}
+
+const json = (res: ServerResponse, status: number, body: unknown) => {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+};
+
+describe("ComfyClient", () => {
+  it("submit returns the prompt id", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 200, { prompt_id: "abc" }));
+    expect(await client.submit({ "1": {} })).toEqual({ promptId: "abc" });
+    expect(JSON.parse(seen[0]!.body)).toEqual({ prompt: { "1": {} } });
+  });
+
+  it("history is null until finished", async () => {
+    let done = false;
+    const { client } = await fake((_s, res) => json(res, 200, done ? { p1: { outputs: {}, status: { completed: true } } } : {}));
+    expect(await client.history("p1")).toBeNull();
+    done = true;
+    expect((await client.history("p1"))?.status?.completed).toBe(true);
+  });
+
+  it("view returns bytes with content type and encodes parameters", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255]);
+    const { client, seen } = await fake((_s, res) => {
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(png);
+    });
+    const out = await client.view("a b&c.png", "sub dir/x", "output");
+    expect(out.contentType).toBe("image/png");
+    expect(out.bytes.equals(png)).toBe(true);
+    const q = new URL(seen[0]!.url, "http://x").searchParams;
+    expect(q.get("filename")).toBe("a b&c.png");
+    expect(q.get("subfolder")).toBe("sub dir/x");
+    expect(seen[0]!.url).not.toContain(" ");
+  });
+
+  it("rejects path traversal and absolute paths before any request", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 200, {}));
+    for (const [f, s] of [["../x.png", ""], ["a.png", "../.."], ["a.png", "ok/../.."], ["/etc/passwd", ""], ["a.png", "/abs"], ["..\\x", ""]] as const) {
+      await expect(client.view(f, s, "output")).rejects.toBeInstanceOf(ComfyError);
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  it("queue returns running and pending", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, { queue_running: [1], queue_pending: [] }));
+    expect(await client.queue()).toEqual({ running: [1], pending: [] });
+  });
+
+  it("HTTP error -> ComfyError with status", async () => {
+    const { client } = await fake((_s, res) => json(res, 400, { error: "bad prompt" }));
+    const err = (await client.submit({}).catch((e: unknown) => e)) as ComfyError;
+    expect(err).toBeInstanceOf(ComfyError);
+    expect(err.status).toBe(400);
+    expect(err.message).toContain("bad prompt");
+  });
+
+  it("unreachable host -> Unreachable", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, {}));
+    server!.close();
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(client.queue()).rejects.toBeInstanceOf(Unreachable);
+  });
+
+  it("hung server -> Unreachable within the timeout", async () => {
+    const { client } = await fake(() => undefined, 1);
+    const t0 = Date.now();
+    await expect(client.queue()).rejects.toBeInstanceOf(Unreachable);
+    expect(Date.now() - t0).toBeLessThan(4000);
+  });
+});

@@ -26,9 +26,9 @@ keys:
   - {name: VENV_DIR, components: [instance], type: str, secret: false, required: false, default: "/opt/vastcomfy-venv", description: "Virtualenv that holds the agent and the pinned vastai CLI; the image venv is left untouched (S1)"}
   # --- network ---
   - {name: COMFY_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "ComfyUI bind/connect host"}
-  - {name: COMFY_PORT, components: [instance], type: int, secret: false, required: false, default: 18188, description: "ComfyUI port; the image comfyui supervisor program listens on 18188 (S1)"}
+  - {name: COMFY_PORT, components: [instance, apps], type: int, secret: false, required: false, default: 18188, description: "ComfyUI port; the image comfyui supervisor program listens on 18188 (S1)"}
   - {name: AGENT_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "Agent bind host"}
-  - {name: AGENT_PORT, components: [instance], type: int, secret: false, required: false, default: 8189, description: "Agent port"}
+  - {name: AGENT_PORT, components: [instance, apps], type: int, secret: false, required: false, default: 8189, description: "Agent port"}
   - {name: HTTP_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Timeout for local HTTP calls"}
   - {name: HF_BASE_URL, components: [instance], type: str, secret: false, required: false, default: "https://huggingface.co", description: "Model download host"}
   - {name: GIT_HOST_URL, components: [instance], type: str, secret: false, required: false, default: "https://github.com", description: "Host used to clone custom nodes"}

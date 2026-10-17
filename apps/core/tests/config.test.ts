@@ -78,6 +78,6 @@ describe("loadConfig", () => {
 
   it("ignores keys of other components", () => {
     const cfg = loadConfig(base, schema);
-    expect(cfg["agentPort"]).toBeUndefined();
+    expect(cfg["agentHost"]).toBeUndefined();
   });
 });
