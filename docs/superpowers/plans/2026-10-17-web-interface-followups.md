@@ -9,6 +9,11 @@ Triage from the final whole-branch review (2026-10-17). Everything here is CAN-W
 - Container-to-tailnet reachability and single-label MagicDNS names (`vast-xxxx`) from the web container.
 - Authentik outpost: `X-authentik-jwt` header, `groups` claim, and the JWKS/issuer/audience values.
 
+## From the first real boot (docs/spikes/T13-boot-end-to-end.md)
+- Re-measure /view download speed from the homelab (the laptop was saturated during the test); keep `WEB_CONNECTION_TIMEOUT_S` larger than `WEB_IMAGE_TIMEOUT_S`.
+- Optional later: image format choice (WEBP/JPEG) in the web page and bot.
+- The page shows `ready` for ~1.5 min after the instance self-destroyed; surface Vast status/agent-unreachable more prominently.
+
 ## Small hardening
 - lifecycle: guard the hard-cap fallback with `> 0` for `vast_start_date`; the comment at lifecycle.ts:86-87 overstates what boot_timeout covers after a web restart; `stop_grace_period` budget should include the agent `/destroy` call (HTTP_TIMEOUT_S_APPS): raise to ~75s or document; small in-memory leaks (pending-destroy set, miss counter) per Start.
 - `view()` can throw if `registry.active()` fails (500, fails closed).

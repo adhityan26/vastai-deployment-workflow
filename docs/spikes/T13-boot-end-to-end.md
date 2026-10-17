@@ -18,7 +18,7 @@
 2. `/view` shared the 10 s API timeout; a 1.8 MB image over the tailnet took 7.5 s. Fix: `WEB_IMAGE_TIMEOUT_S` (default 60).
 
 ## Findings that need follow-up
-- Image download over the tailnet is slow and variable: ~230-330 KB/s, 6-24 s for ~2 MB, and two requests stalled until the 60 s timeout (the connection then closed with no HTTP reply). The 60 s `WEB_IMAGE_TIMEOUT_S` equals `WEB_CONNECTION_TIMEOUT_S`; raise the image timeout (e.g. 120 s) and make sure the connection timeout is larger, and consider saving WEBP/JPEG instead of PNG to cut the size 3-5x.
+- Image download over the tailnet measured ~230-330 KB/s (6-24 s for ~2 MB) and two requests stalled until the 60 s timeout (the connection then closed with no HTTP reply). The owner reports the laptop was saturated by other downloads during the test, so this is probably a measurement artifact, not the real path speed; re-measure from the homelab. Still, `WEB_IMAGE_TIMEOUT_S` (60 s) equals `WEB_CONNECTION_TIMEOUT_S`: keep the connection timeout larger than the image timeout. An image-format option (WEBP/JPEG) in the page/bot is a nice-to-have for later, not a priority.
 - The page keeps showing `ready` for ~1.5 min after the instance destroyed itself (reconcile needs two misses); show Vast status/agent-unreachable more prominently.
 - With `START_IDLE_MINUTES` (5) below `IDLE_WARN_MINUTES` (10) the state is `idle-warning` right after ready; only a test-config artifact.
 - First image generation after boot is slower (model load): 45 s vs 35 s for 25 steps.
