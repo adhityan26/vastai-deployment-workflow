@@ -9,6 +9,7 @@
     "jose": "^6.2.12"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.page.json --noEmit",
     "build:page": "esbuild public/app.ts --bundle --format=iife --target=es2022 --minify --outfile=public/app.js"
   },

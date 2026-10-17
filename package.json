@@ -7,7 +7,8 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p apps/core --noEmit && npm run typecheck -w @vast-comfy/web"
+    "typecheck": "tsc -p apps/core --noEmit && npm run typecheck -w @vast-comfy/web",
+    "build": "npm run build -w @vast-comfy/core && npm run build -w @vast-comfy/web && npm run build:page -w @vast-comfy/web"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
