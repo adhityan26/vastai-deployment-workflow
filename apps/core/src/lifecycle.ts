@@ -5,6 +5,7 @@ import { AlreadyActiveError, type InstanceRecord, type Registry } from "./regist
 import {
   CreateRejected,
   DestroyError,
+  MB_PER_GB,
   normalizeGpuName,
   offerFiltersFromConfig,
   type CreateRequest,
@@ -392,12 +393,25 @@ export class Lifecycle {
     return [wanted];
   }
 
-  /** One Vast search over `models`; offers of any other model are dropped whatever Vast returns. */
-  private async offersFor(models: readonly string[]): Promise<Offer[]> {
-    const filters: OfferFilters = { ...offerFiltersFromConfig(this.cfg), allowedGpus: models };
+  /** The configured offer filters (throws VastError on a bad VAST_* value). */
+  private baseFilters(): OfferFilters {
+    return offerFiltersFromConfig(this.cfg);
+  }
+
+  /**
+   * One Vast search over `models`. Whatever Vast returns, an offer is kept only when it is one
+   * of these models, has a finite positive price within VAST_MAX_DPH and reports at least
+   * VAST_MIN_VRAM_GB (same MB unit as the query); a missing price or VRAM drops it.
+   */
+  private async offersFor(models: readonly string[], base: OfferFilters = this.baseFilters()): Promise<Offer[]> {
+    const filters: OfferFilters = { ...base, allowedGpus: models };
+    const minRamMb = filters.minVramGb * MB_PER_GB;
     const offers = await this.deps.vast.searchOffers(filters);
     return offers
       .filter((o) => typeof o.gpu_name === "string" && models.includes(normalizeGpuName(o.gpu_name)))
+      .filter((o) => typeof o.dph_total === "number" && Number.isFinite(o.dph_total) && o.dph_total > 0)
+      .filter((o) => o.dph_total <= filters.maxDph)
+      .filter((o) => typeof o.gpu_ram === "number" && Number.isFinite(o.gpu_ram) && o.gpu_ram >= minRamMb)
       .sort((a, b) => a.dph_total - b.dph_total);
   }
 
@@ -503,9 +517,16 @@ export class Lifecycle {
     this.secrets.add(authKey);
     if (authKey === "") return failBeforeCreate(new Error("the Tailscale auth key is empty"), "ts_key_missing");
 
+    let filters: OfferFilters;
+    try {
+      filters = this.baseFilters();
+    } catch (err) {
+      return failBeforeCreate(err, "config_invalid");
+    }
+
     let offer: Offer | undefined;
     try {
-      offer = (await this.offersFor(models))[0];
+      offer = (await this.offersFor(models, filters))[0];
     } catch (err) {
       return failBeforeCreate(err, "vast_unavailable");
     }

@@ -13,7 +13,8 @@ const GONE_TEXT = /instance\b.*\bnot found/i;
 const VERSIONED_BASE = /\/v\d+\/?$/;
 const MAX_PAGES = 1000;
 const RUNTYPE_SSH_DIRECT = "ssh_direc ssh_proxy"; // ssh + direct, as built by the vastai CLI
-const MB_PER_GB = 1000; // the CLI sends gpu_ram in MB using 1000 per GB
+/** Vast reports and filters gpu_ram in MB; the CLI converts GB with 1000 per GB. */
+export const MB_PER_GB = 1000;
 
 export class VastError extends Error {
   constructor(message: string) {

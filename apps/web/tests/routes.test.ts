@@ -162,7 +162,7 @@ function agentStatus(state: string, over: Record<string, unknown> = {}) {
 }
 
 class FakeVast {
-  offers: Offer[] = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000" }];
+  offers: Offer[] = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 }];
   instances: VastInstance[] = [];
   listError: Error | null = null;
   creates = 0;
@@ -1250,11 +1250,15 @@ describe("GPU choice", () => {
       expect(res.statusCode, JSON.stringify(body)).toBe(400);
       expect(res.json().error.code).toBe("invalid_body");
     }
-    for (const gpu of ["Tesla P40", "rtx 4090", "RTX 4090,Tesla P40"]) {
+    const SNEAKY = "Tesla P40 vast-host Bearer sneaky-input-123";
+    for (const gpu of ["Tesla P40", "rtx 4090", "RTX 4090,Tesla P40", SNEAKY]) {
       const res = await post("/api/start", a, { confirm: true, gpu });
       expect(res.statusCode, gpu).toBe(400);
       expect(res.json().error.code).toBe("gpu_not_allowed");
     }
+    expect(h.logs.filter((l) => l === "warn start refused: gpu_not_allowed")).toHaveLength(4);
+    // The user-supplied name never reaches a log line.
+    for (const l of h.logs) expect(l).not.toMatch(/P40|rtx 4090|sneaky/);
     expect(h.vast.searches).toHaveLength(0);
     expect(h.vast.creates).toBe(0);
     expect(await h.registry.all()).toEqual([]);
@@ -1282,6 +1286,8 @@ describe("GPU choice", () => {
       expect(res.statusCode).toBe(503);
       expect(res.json().error.code).toBe("no_gpu_configured");
     }
+    expect(h.logs.filter((l) => l === "warn start refused: no_gpu_configured")).toHaveLength(2);
+    for (const l of h.logs) expect(l).not.toContain("P40");
     expect(h.vast.searches).toHaveLength(0);
     expect(h.vast.creates).toBe(0);
   });

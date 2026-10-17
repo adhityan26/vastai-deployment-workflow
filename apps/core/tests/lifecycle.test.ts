@@ -64,7 +64,7 @@ const cfg = {
 
 class FakeVast {
   calls: string[];
-  offers: Offer[] = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000" }];
+  offers: Offer[] = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 }];
   instances: VastInstance[] = [];
   createImpl: (offerId: number, req: CreateRequest) => Promise<{ id: number }>;
   destroyQueue: (DestroyOutcome | Error)[] = [];
@@ -997,9 +997,9 @@ describe("Lifecycle GPU choice", () => {
 
   it("names are normalised exactly like the offer query (underscore to space, case kept)", async () => {
     const { life, vast } = setup();
-    vast.offers = [{ id: 30, dph_total: 0.2, gpu_name: "RTX 3090" }];
+    vast.offers = [{ id: 30, dph_total: 0.2, gpu_name: "RTX 3090", gpu_ram: 24576 }];
     // Config says RTX_3090; the query and the option list say RTX 3090.
-    expect((await life.gpuOptions())[1]).toEqual({ name: "RTX 3090", dph: 0.2, vram_gb: null, available: true });
+    expect((await life.gpuOptions())[1]).toEqual({ name: "RTX 3090", dph: 0.2, vram_gb: 24, available: true });
     expect((await life.estimate("RTX_3090")).gpu_name).toBe("RTX 3090");
     expect((await life.estimate("RTX 3090")).offer_id).toBe(30);
     expect(vast.searches.slice(1).map((f) => f.allowedGpus)).toEqual([["RTX 3090"], ["RTX 3090"]]);
@@ -1022,6 +1022,61 @@ describe("Lifecycle GPU choice", () => {
     expect((await life.view()).gpu_name).toBe("RTX 4090");
     vast.instances[0]!["gpu_name"] = "RTX 4090 (row)";
     expect((await life.view()).gpu_name).toBe("RTX 4090 (row)");
+  });
+});
+
+describe("Lifecycle re-checks every offer locally (Vast may ignore its filters)", () => {
+  // cfg: VAST_MAX_DPH 0.50, VAST_MIN_VRAM_GB 24 (24000 MB, the query's unit).
+  const ok: Offer = { id: 20, dph_total: 0.4, gpu_name: "RTX 4090", gpu_ram: 24564 };
+
+  it("an allowed model above VAST_MAX_DPH is never created", async () => {
+    const { life, vast, registry } = setup();
+    vast.offers = [{ id: 21, dph_total: 0.51, gpu_name: "RTX 4090", gpu_ram: 24564 }];
+    await expect(life.start("RTX 4090")).rejects.toBeInstanceOf(NoOffersError);
+    await expect(life.estimate()).rejects.toBeInstanceOf(NoOffersError);
+    expect(vast.requests).toHaveLength(0);
+    expect(await registry.active()).toBeNull();
+    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: null, vram_gb: null, available: false });
+  });
+
+  it("drops offers below VAST_MIN_VRAM_GB or without a usable price or VRAM", async () => {
+    const bad: Offer[] = [
+      { id: 22, dph_total: 0.1, gpu_name: "RTX 4090", gpu_ram: 23999 },
+      { id: 23, dph_total: 0.1, gpu_name: "RTX 4090" },
+      { id: 24, dph_total: 0.1, gpu_name: "RTX 4090", gpu_ram: Number.NaN },
+      { id: 25, dph_total: Number.NaN, gpu_name: "RTX 4090", gpu_ram: 24564 },
+      { id: 26, dph_total: 0, gpu_name: "RTX 4090", gpu_ram: 24564 },
+      { id: 27, dph_total: -1, gpu_name: "RTX 4090", gpu_ram: 24564 },
+      { id: 28, gpu_name: "RTX 4090", gpu_ram: 24564 } as unknown as Offer,
+      { id: 29, dph_total: "0.1", gpu_name: "RTX 4090", gpu_ram: 24564 } as unknown as Offer,
+    ];
+    for (const offer of bad) {
+      const { life, vast } = setup();
+      vast.offers = [offer];
+      await expect(life.start("RTX 4090"), String(offer.id)).rejects.toBeInstanceOf(NoOffersError);
+      expect(vast.requests).toHaveLength(0);
+      expect((await life.gpuOptions())[2]!.available, String(offer.id)).toBe(false);
+    }
+  });
+
+  it("the cheapest valid offer wins over a cheaper invalid or a pricier one", async () => {
+    const { life, vast } = setup();
+    vast.offers = [
+      { id: 30, dph_total: 0.9, gpu_name: "RTX 4090", gpu_ram: 24564 },
+      { id: 31, dph_total: 0.05, gpu_name: "RTX 4090", gpu_ram: 12000 },
+      ok,
+    ];
+    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: 0.4, vram_gb: 24, available: true });
+    await life.start("RTX 4090");
+    expect(vast.createdOffers).toEqual([20]);
+  });
+
+  it("a longer model name that merely starts with an allowed one is never created", async () => {
+    const { life, vast } = setup();
+    vast.offers = [{ id: 32, dph_total: 0.2, gpu_name: "RTX 3090 Ti", gpu_ram: 24564 }];
+    await expect(life.start("RTX 3090")).rejects.toBeInstanceOf(NoOffersError);
+    await expect(life.start()).rejects.toBeInstanceOf(NoOffersError);
+    expect(vast.requests).toHaveLength(0);
   });
 });
 
@@ -1064,6 +1119,15 @@ describe("Lifecycle start failure reasons", () => {
       throw new Error("disk full");
     };
     expect(((await errorOf(reg.life.start())) as StartError).reason).toBe("registry_failed");
+
+    // A bad offer-filter setting is a configuration problem, not Vast being down.
+    for (const bad of [{ vastMaxDph: "abc" }, { vastMinReliability: "1.5" }]) {
+      const conf = setup({ cfg: bad });
+      const e5 = (await errorOf(conf.life.start())) as StartError;
+      expect([e5.reason, e5.ambiguous]).toEqual(["config_invalid", false]);
+      expect(conf.vast.calls.filter((c) => c.startsWith("vast."))).toEqual([]);
+      expect(await conf.registry.active()).toBeNull();
+    }
   });
 });
 

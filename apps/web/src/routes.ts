@@ -305,6 +305,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       if (err instanceof AlreadyActiveError) return sendError(reply, 409, "already_active", "an instance is already active");
       if (err instanceof NoOffersError) log("warn", "start failed: NoOffersError (internal: no_offers)");
+      // Fixed codes only: the requested name is user input and is never logged.
+      if (err instanceof GpuNotAllowedError) log("warn", "start refused: gpu_not_allowed");
+      if (err instanceof NoGpuConfiguredError) log("warn", "start refused: no_gpu_configured");
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
       // A fixed reason only: the error message may carry provider text.
