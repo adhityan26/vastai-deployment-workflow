@@ -235,3 +235,41 @@ def test_real_schema_bounds_the_behaviour_driving_ints():
         if spec.type == "int" and spec.default is not None:
             assert spec.min is None or spec.default >= spec.min, spec.name
             assert spec.max is None or spec.default <= spec.max, spec.name
+
+
+S1_DEFAULTS = {  # measured on the stock vastai/comfy image (spike S1/S4)
+    "COMFY_PORT": 18188, "COMFY_DIR": "/workspace/ComfyUI",
+    "WORKFLOWS_DIR": "/workspace/ComfyUI/user/default/workflows", "COMFY_PYTHON": "/venv/main/bin/python",
+    "VENV_DIR": "/opt/vastcomfy-venv", "AGENT_PYTHON": "/opt/vastcomfy-venv/bin/python",
+    "VASTAI_BIN": "/opt/vastcomfy-venv/bin/vastai", "VASTAI_VERSION": "1.8.3",
+    "STOCK_VASTAI_BIN": "/opt/instance-tools/bin/vastai", "SUPERVISOR_CONF": "/etc/supervisor/supervisord.conf",
+    "SUPERVISOR_CONF_DIR": "/etc/supervisor/conf.d", "SUPERVISOR_PROGRAMS_FILE": "vastcomfy.conf",
+    "DESTROY_ASSUME_YES": True, "COMFY_PROGRAM": "comfyui",
+}
+
+
+def test_s1_defaults_and_new_keys_are_in_the_real_schema():
+    by_name = {s.name: s for s in load_schema()}
+    for name, default in S1_DEFAULTS.items():
+        spec = by_name[name]
+        assert spec.default == default, name
+        assert spec.components == ("instance",) and not spec.secret and not spec.required, name
+    assert by_name["COMFY_PORT"].type == "int" and by_name["DESTROY_ASSUME_YES"].type == "bool"
+    for name in ("VENV_DIR", "VASTAI_VERSION", "STOCK_VASTAI_BIN", "SUPERVISOR_CONF_DIR", "SUPERVISOR_PROGRAMS_FILE"):
+        assert by_name[name].type == "str" and "S1" in by_name[name].description, name
+
+
+def test_every_schema_default_lies_inside_its_own_bounds_and_coerces():
+    for spec in load_schema():
+        if spec.default is None or spec.type != "int":
+            continue
+        assert spec.min is None or spec.default >= spec.min, spec.name
+        assert spec.max is None or spec.default <= spec.max, spec.name
+
+
+def test_real_schema_defaults_load_through_load_config(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("CONTAINER_ID=1\nCONTAINER_API_KEY=k\nAGENT_TOKEN=t\nTS_HOSTNAME=h\nREPO_URL=u\nREPO_COMMIT=c\nPROFILE=p\n")
+    cfg = load_config(env, "instance")
+    assert cfg.comfy_port == 18188 and cfg.venv_dir == "/opt/vastcomfy-venv" and cfg.vastai_version == "1.8.3"
+    assert cfg.supervisor_programs_file == "vastcomfy.conf" and cfg.destroy_assume_yes is True

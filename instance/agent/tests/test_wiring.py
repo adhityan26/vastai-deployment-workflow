@@ -19,7 +19,7 @@ def test_stop_comfy_uses_configured_binary_conf_and_program(make_cfg):
 
 
 def test_build_wires_a_working_status_and_destroy_flow(make_cfg, tmp_path):
-    cfg = make_cfg(DESTROY_RETRIES="1", DESTROY_BACKOFF_S="0")
+    cfg = make_cfg(DESTROY_RETRIES="1", DESTROY_BACKOFF_S="0", VASTAI_BIN="vastai")
     calls = []
 
     def run(cmd, **kwargs):
@@ -46,7 +46,7 @@ def test_build_passes_the_destroy_failed_retry_interval_to_the_runner(make_cfg):
 
 
 def test_build_wires_the_ok_markers_so_a_real_success_text_destroys(make_cfg):
-    cfg = make_cfg(DESTROY_RETRIES="1", DESTROY_BACKOFF_S="0")
+    cfg = make_cfg(DESTROY_RETRIES="1", DESTROY_BACKOFF_S="0", VASTAI_BIN="vastai")  # the stub recognises the CLI by name
     calls = []
 
     def run(cmd, **kwargs):

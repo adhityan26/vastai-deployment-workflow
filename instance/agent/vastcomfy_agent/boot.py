@@ -13,7 +13,7 @@ from typing import Callable, Mapping
 import httpx
 
 from .clock import utc_now
-from .config import ConfigError, KeySpec, default_text, load_config, load_schema, parse_env_file
+from .config import ConfigError, KeySpec, _coerce, default_text, load_config, load_schema, parse_env_file
 from .deadlines import DeadlineStore
 from .files import atomic_write
 from .profile import (
@@ -21,6 +21,7 @@ from .profile import (
     free_bytes_of, install_nodes, load_profile, missing_models,
 )
 from .state import InvalidTransition, State, StateStore
+from .supervisor_conf import render as render_supervisor_programs
 from .wiring import build
 
 EXIT_OK = 0
@@ -208,6 +209,42 @@ def cmd_wipe_key(env_file: Path, key: str) -> int:
     return EXIT_OK
 
 
+def cmd_set_key(env_file: Path, key: str, value: str) -> int:
+    """Rewrite one existing key of the instance .env (validated, atomic, mode 0600). Never echoes the value."""
+    if "\n" in value or "\r" in value:
+        print(f"boot: {key}: value contains a line break", file=sys.stderr)
+        return EXIT_CONFIG
+    spec = next((s for s in instance_specs() if s.name == key), None)
+    values = parse_env_file(env_file)
+    if spec is None or key not in values:
+        print(f"boot: unknown key {key}", file=sys.stderr)
+        return EXIT_CONFIG
+    try:
+        if value != "" or spec.required:
+            _coerce(spec, value)
+    except ConfigError as exc:
+        print(f"boot: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    values[key] = value
+    atomic_write(env_file, "".join(f"{k}={v}\n" for k, v in values.items()))
+    env_file.chmod(0o600)
+    return EXIT_OK
+
+
+def cmd_render_supervisor_conf(b: Boot) -> int:
+    conf_dir = Path(b.cfg.supervisor_conf_dir)
+    try:
+        text = render_supervisor_programs(b.cfg)
+    except ConfigError as exc:
+        print(f"boot: {exc}", file=sys.stderr)
+        b.fail("config_invalid")
+        return EXIT_CONFIG
+    if not conf_dir.is_dir():  # the image's supervisor must already own this directory; never create it
+        raise FileNotFoundError(f"supervisor conf dir {conf_dir} does not exist")
+    atomic_write(conf_dir / b.cfg.supervisor_programs_file, text)
+    return EXIT_OK
+
+
 def cmd_env_export(env_file: Path) -> int:
     secret = {s.name for s in instance_specs() if s.secret}
     for key, value in parse_env_file(env_file).items():
@@ -229,7 +266,7 @@ def main(
     parser = argparse.ArgumentParser(prog="vastcomfy_agent.boot")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("write-env")
-    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "mark-ready", "env-export"):
+    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "mark-ready", "env-export", "render-supervisor-conf"):
         sub.add_parser(name).add_argument("--env-file", type=Path, required=True)
     p = sub.add_parser("fail")
     p.add_argument("reason")
@@ -241,6 +278,10 @@ def main(
     p = sub.add_parser("wipe-key")
     p.add_argument("key")
     p.add_argument("--env-file", type=Path, required=True)
+    p = sub.add_parser("set-key")
+    p.add_argument("key")
+    p.add_argument("value")
+    p.add_argument("--env-file", type=Path, required=True)
     p = sub.add_parser("get")
     p.add_argument("key")
     p.add_argument("--env-file", type=Path, required=True)
@@ -250,6 +291,8 @@ def main(
         return cmd_write_env(environ, now)
     if args.command == "wipe-key":
         return cmd_wipe_key(args.env_file, args.key)
+    if args.command == "set-key":
+        return cmd_set_key(args.env_file, args.key, args.value)
     if args.command == "env-export":
         return cmd_env_export(args.env_file)
     if args.command == "get":
@@ -296,6 +339,8 @@ def run_boot_command(b: Boot, args) -> int:
         return cmd_copy_workflows(b)
     if args.command == "wait":
         return cmd_wait(b, args.target)
+    if args.command == "render-supervisor-conf":
+        return cmd_render_supervisor_conf(b)
     return cmd_mark_ready(b)
 
 

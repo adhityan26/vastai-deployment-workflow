@@ -21,23 +21,28 @@ keys:
   - {name: REPO_DIR, components: [instance], type: str, secret: false, required: false, default: "/opt/vast-comfy", description: "Where the repo is cloned"}
   - {name: COMFY_DIR, components: [instance], type: str, secret: false, required: false, default: "/workspace/ComfyUI", description: "ComfyUI install directory (S1)"}
   - {name: WORKFLOWS_DIR, components: [instance], type: str, secret: false, required: false, default: "/workspace/ComfyUI/user/default/workflows", description: "ComfyUI user workflows directory (S1)"}
-  - {name: SUPERVISOR_CONF, components: [instance], type: str, secret: false, required: false, default: "/opt/vast-comfy/instance/supervisord.conf", description: "supervisord config path"}
+  - {name: SUPERVISOR_CONF, components: [instance], type: str, secret: false, required: false, default: "/etc/supervisor/supervisord.conf", description: "Config of the supervisord the image already runs; we never start a second one (S1)"}
+  - {name: SUPERVISOR_CONF_DIR, components: [instance], type: str, secret: false, required: false, default: "/etc/supervisor/conf.d", description: "Directory of the image supervisord program files; the rendered programs file is written here (S1)"}
+  - {name: SUPERVISOR_PROGRAMS_FILE, components: [instance], type: str, secret: false, required: false, default: "vastcomfy.conf", description: "File name, inside SUPERVISOR_CONF_DIR, of the rendered tailscaled and agent programs (S1)"}
+  - {name: VENV_DIR, components: [instance], type: str, secret: false, required: false, default: "/opt/vastcomfy-venv", description: "Virtualenv that holds the agent and the pinned vastai CLI; the image venv is left untouched (S1)"}
   # --- network ---
   - {name: COMFY_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "ComfyUI bind/connect host"}
-  - {name: COMFY_PORT, components: [instance], type: int, secret: false, required: false, default: 8188, description: "ComfyUI port"}
+  - {name: COMFY_PORT, components: [instance], type: int, secret: false, required: false, default: 18188, description: "ComfyUI port; the image comfyui supervisor program listens on 18188 (S1)"}
   - {name: AGENT_HOST, components: [instance], type: str, secret: false, required: false, default: "127.0.0.1", description: "Agent bind host"}
   - {name: AGENT_PORT, components: [instance], type: int, secret: false, required: false, default: 8189, description: "Agent port"}
   - {name: HTTP_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 5, min: 1, description: "Timeout for local HTTP calls"}
   - {name: HF_BASE_URL, components: [instance], type: str, secret: false, required: false, default: "https://huggingface.co", description: "Model download host"}
   - {name: GIT_HOST_URL, components: [instance], type: str, secret: false, required: false, default: "https://github.com", description: "Host used to clone custom nodes"}
   # --- binaries ---
-  - {name: VASTAI_BIN, components: [instance], type: str, secret: false, required: false, default: "vastai", description: "vastai CLI used for self-destroy"}
+  - {name: VASTAI_BIN, components: [instance], type: str, secret: false, required: false, default: "/opt/vastcomfy-venv/bin/vastai", description: "vastai CLI used for self-destroy: the pinned new CLI installed in VENV_DIR; fallback sets STOCK_VASTAI_BIN (S1)"}
+  - {name: VASTAI_VERSION, components: [instance], type: str, secret: false, required: false, default: "1.8.3", description: "Pinned vastai CLI version pip-installed into VENV_DIR (S1)"}
+  - {name: STOCK_VASTAI_BIN, components: [instance], type: str, secret: false, required: false, default: "/opt/instance-tools/bin/vastai", description: "Deprecated vastai CLI shipped in the image (no -y); fallback when the pinned CLI cannot be installed (S1)"}
   - {name: SUPERVISORCTL_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisorctl", description: "supervisorctl binary"}
   - {name: SUPERVISORD_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisord", description: "supervisord binary"}
   - {name: TAILSCALE_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscale", description: "tailscale CLI binary"}
   - {name: TAILSCALED_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscaled", description: "tailscaled daemon binary"}
-  - {name: COMFY_PYTHON, components: [instance], type: str, secret: false, required: false, default: "python3", description: "Python interpreter used to run ComfyUI"}
-  - {name: AGENT_PYTHON, components: [instance], type: str, secret: false, required: false, default: "python3", description: "Python interpreter that installs and runs the agent and the boot CLI"}
+  - {name: COMFY_PYTHON, components: [instance], type: str, secret: false, required: false, default: "/venv/main/bin/python", description: "Python interpreter of the image ComfyUI venv (S1)"}
+  - {name: AGENT_PYTHON, components: [instance], type: str, secret: false, required: false, default: "/opt/vastcomfy-venv/bin/python", description: "Python interpreter of VENV_DIR that runs the agent and the boot CLI (S1)"}
   - {name: NVIDIA_SMI_BIN, components: [instance], type: str, secret: false, required: false, default: "nvidia-smi", description: "nvidia-smi binary"}
   - {name: GIT_BIN, components: [instance], type: str, secret: false, required: false, default: "git", description: "git binary"}
   - {name: PIP_BIN, components: [instance], type: str, secret: false, required: false, default: "pip", description: "pip binary for custom node requirements"}

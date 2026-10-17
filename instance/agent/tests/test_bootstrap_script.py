@@ -101,11 +101,11 @@ def test_supervisord_runs_the_agent_with_agent_python_and_comfyui_with_comfy_pyt
     assert comfy.startswith("command=%(ENV_COMFY_PYTHON)s main.py")
 
 
-def test_agent_python_is_a_plain_instance_key_defaulting_to_python3():
+def test_agent_python_is_a_plain_instance_key_defaulting_to_the_venv_python():
     from vastcomfy_agent.config import load_schema
 
     spec = next(s for s in load_schema() if s.name == "AGENT_PYTHON")
-    assert spec.components == ("instance",) and not spec.secret and not spec.required and spec.default == "python3"
+    assert spec.components == ("instance",) and not spec.secret and not spec.required and spec.default == "/opt/vastcomfy-venv/bin/python"
 
 
 def test_agent_program_retries_generously_so_quick_crashes_do_not_leave_it_fatal():

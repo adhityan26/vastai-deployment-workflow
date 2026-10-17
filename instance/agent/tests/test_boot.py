@@ -29,6 +29,7 @@ def base_environ(tmp_path, **extra):
         "STATE_DIR": str(tmp_path / "state"), "ENV_FILE_PATH": str(tmp_path / "etc" / ".env"),
         "REPO_DIR": str(tmp_path / "repo"), "COMFY_DIR": str(tmp_path / "comfy"),
         "WORKFLOWS_DIR": str(tmp_path / "workflows"), "DESTROY_RETRIES": "1", "DESTROY_BACKOFF_S": "0",
+        "VASTAI_BIN": "vastai",  # the stub Runner recognises the CLI by this name
         "PATH": "/usr/bin", "PUBLIC_IPADDR": "1.2.3.4", "VAST_CONTAINERLABEL": "C.42",
     }
     env.update(extra)
@@ -68,7 +69,7 @@ def test_write_env_keeps_only_schema_keys_with_defaults_resolved_and_mode_600(tm
     assert code == 0 and capsys.readouterr().out.strip() == env_file(tmp_path)
     written = parse_env_file(tmp_path / "etc" / ".env")
     assert "PATH" not in written and "PUBLIC_IPADDR" not in written and "VAST_CONTAINERLABEL" not in written
-    assert written["IDLE_MINUTES"] == "30" and written["COMFY_PORT"] == "8188"
+    assert written["IDLE_MINUTES"] == "30" and written["COMFY_PORT"] == "18188"
     assert written["KEEP_ON_FAILURE"] == "false" and written["DESTROY_GONE_MARKERS"] == "Failed with error 404: Instance"
     assert written["DESTROY_OK_MARKERS"] == "destroying instance"
     assert written["DESTROY_ASSUME_YES"] == "true"
@@ -184,7 +185,7 @@ def test_get_prints_a_single_value(tmp_path, capsys):
     prepared(tmp_path)
     capsys.readouterr()
     run_boot(tmp_path, ["get", "COMFY_PORT", "--env-file", env_file(tmp_path)])
-    assert capsys.readouterr().out.strip() == "8188"
+    assert capsys.readouterr().out.strip() == "18188"
 
 
 def test_env_export_is_shell_safe_and_leaves_secrets_out(tmp_path, capsys):
@@ -417,3 +418,99 @@ def test_write_env_rejects_non_strict_or_out_of_range_ints_with_exit_13(tmp_path
     assert code == 13 and key in capsys.readouterr().err
     record = states(tmp_path).get()
     assert (record.state, record.reason) == (State.FAILED, "config_invalid")
+
+
+# --- S1: set-key and render-supervisor-conf ---
+
+def test_set_key_rewrites_only_that_key_keeps_mode_600_and_round_trips(tmp_path):
+    prepared(tmp_path, TS_AUTHKEY="tskey-secret")
+    path = tmp_path / "etc" / ".env"
+    before = parse_env_file(path)
+    assert run_boot(tmp_path, ["set-key", "VASTAI_BIN", "/opt/instance-tools/bin/vastai", "--env-file", str(path)])[0] == 0
+    assert run_boot(tmp_path, ["set-key", "DESTROY_ASSUME_YES", "false", "--env-file", str(path)])[0] == 0
+    after = parse_env_file(path)
+    assert after["VASTAI_BIN"] == "/opt/instance-tools/bin/vastai" and after["DESTROY_ASSUME_YES"] == "false"
+    assert {k: v for k, v in after.items() if k not in ("VASTAI_BIN", "DESTROY_ASSUME_YES")} == \
+        {k: v for k, v in before.items() if k not in ("VASTAI_BIN", "DESTROY_ASSUME_YES")}
+    assert list(after) == list(before)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    cfg = load_config(path, "instance")
+    assert cfg.vastai_bin == "/opt/instance-tools/bin/vastai" and cfg.destroy_assume_yes is False
+    assert not [p for p in path.parent.iterdir() if p.name != ".env"]  # no temp file left behind
+
+
+def test_set_key_rejects_unknown_keys_and_line_breaks_without_touching_the_file(tmp_path, capsys):
+    prepared(tmp_path)
+    path = tmp_path / "etc" / ".env"
+    original = path.read_text()
+    for argv in (["set-key", "NOT_A_KEY", "x"], ["set-key", "VASTAI_BIN", "a\nTS_AUTHKEY=evil"],
+                 ["set-key", "VASTAI_BIN", "a\rb"], ["set-key", "DESTROY_ASSUME_YES", "yes"],
+                 ["set-key", "COMFY_PORT", "abc"]):
+        capsys.readouterr()
+        assert run_boot(tmp_path, [*argv, "--env-file", str(path)])[0] == boot.EXIT_CONFIG
+        assert "evil" not in capsys.readouterr().err
+    assert path.read_text() == original
+
+
+def test_set_key_never_echoes_a_secret_value(tmp_path, capsys):
+    prepared(tmp_path)
+    path = tmp_path / "etc" / ".env"
+    capsys.readouterr()
+    assert run_boot(tmp_path, ["set-key", "HF_TOKEN", "hf-very-secret", "--env-file", str(path)])[0] == 0
+    out = capsys.readouterr()
+    assert "hf-very-secret" not in out.out + out.err
+    assert parse_env_file(path)["HF_TOKEN"] == "hf-very-secret"
+    assert run_boot(tmp_path, ["set-key", "COMFY_PORT", "hf-very-secret", "--env-file", str(path)])[0] == boot.EXIT_CONFIG
+    out = capsys.readouterr()
+    assert "hf-very-secret" not in out.out + out.err
+
+
+def conf_environ(tmp_path, **extra):
+    conf_dir = tmp_path / "conf.d"
+    conf_dir.mkdir(exist_ok=True)
+    return prepared(tmp_path, SUPERVISOR_CONF_DIR=str(conf_dir), SUPERVISOR_PROGRAMS_FILE="vc.conf", **extra), conf_dir
+
+
+def test_render_supervisor_conf_writes_the_programs_file_atomically(tmp_path):
+    _, conf_dir = conf_environ(tmp_path)
+    code, _ = run_boot(tmp_path, ["render-supervisor-conf", "--env-file", env_file(tmp_path)])
+    assert code == 0
+    text = (conf_dir / "vc.conf").read_text()
+    assert "[program:tailscaled]" in text and "[program:agent]" in text and "%" not in text
+    assert f"--env-file {env_file(tmp_path)}" in text
+    assert [p.name for p in conf_dir.iterdir()] == ["vc.conf"]  # no temp file left behind
+
+
+def test_render_supervisor_conf_fails_closed_when_the_directory_is_missing(tmp_path, capsys):
+    prepared(tmp_path, SUPERVISOR_CONF_DIR=str(tmp_path / "nope"))
+    code, runner = run_boot(tmp_path, ["render-supervisor-conf", "--env-file", env_file(tmp_path)])
+    assert code == boot.EXIT_FAILED and not (tmp_path / "nope").exists()
+    assert states(tmp_path).get().reason == "boot_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)  # the self-destroy ran
+    assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0, reason="root ignores modes")
+def test_render_supervisor_conf_fails_closed_when_the_directory_is_unwritable(tmp_path):
+    _, conf_dir = conf_environ(tmp_path)
+    conf_dir.chmod(0o500)
+    try:
+        code, runner = run_boot(tmp_path, ["render-supervisor-conf", "--env-file", env_file(tmp_path)])
+    finally:
+        conf_dir.chmod(0o700)
+    assert code == boot.EXIT_FAILED and not (conf_dir / "vc.conf").exists()
+    assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+def test_render_supervisor_conf_keeps_the_keep_on_failure_exception(tmp_path):
+    prepared(tmp_path, SUPERVISOR_CONF_DIR=str(tmp_path / "nope"), KEEP_ON_FAILURE="true")
+    code, runner = run_boot(tmp_path, ["render-supervisor-conf", "--env-file", env_file(tmp_path)])
+    assert code == boot.EXIT_FAILED and not any(c[0] == "vastai" for c in runner.cmds)
+
+
+def test_render_supervisor_conf_rejects_a_value_with_whitespace_with_exit_13_and_a_destroy(tmp_path, capsys):
+    _, conf_dir = conf_environ(tmp_path, AGENT_PYTHON="/opt/my venv/bin/python")
+    code, runner = run_boot(tmp_path, ["render-supervisor-conf", "--env-file", env_file(tmp_path)])
+    assert code == boot.EXIT_CONFIG and not (conf_dir / "vc.conf").exists()
+    assert states(tmp_path).get().reason == "config_invalid" and any(c[0] == "vastai" for c in runner.cmds)
+    assert "Traceback" not in capsys.readouterr().err
