@@ -181,6 +181,7 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     httpTimeoutSApps: 5,
     webJsonMaxBytes: 65536,
     webImageMaxBytes: 65536,
+    webImageTimeoutS: 5,
     webRequestTimeoutS: 30,
     webConnectionTimeoutS: 60,
     webKeepaliveTimeoutS: 75,

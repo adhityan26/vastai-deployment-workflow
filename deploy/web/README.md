@@ -72,6 +72,8 @@ Optional (defaults are in the schema):
 - `WEB_BODY_LIMIT_BYTES`, `WEB_JOB_CACHE_MAX`, `WEB_JOB_TTL_S`, `WEB_EXTEND_MAX_MINUTES`,
   `WEB_IMAGE_MAX_BYTES`, `WEB_JSON_MAX_BYTES`
 - `WEB_REQUEST_TIMEOUT_S`, `WEB_CONNECTION_TIMEOUT_S`, `WEB_KEEPALIVE_TIMEOUT_S`
+- `WEB_IMAGE_TIMEOUT_S` (default 60): timeout of one image download from ComfyUI `/view`; images are
+  megabytes over the tailnet, so it is longer than `HTTP_TIMEOUT_S_APPS`, which every JSON call keeps
 
 Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_*`.
 

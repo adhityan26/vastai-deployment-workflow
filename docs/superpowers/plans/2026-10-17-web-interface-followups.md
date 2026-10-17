@@ -18,7 +18,7 @@ Triage from the final whole-branch review (2026-10-17). Everything here is CAN-W
 - Reusing a spent single-use TS_AUTHKEY wastes a paid boot (instance self-destroys at the Tailscale step).
 - Registry keeps old agent tokens of `gone` records (file mode 0600).
 - `COMFY_PORT`/`AGENT_PORT` are not sent to the instance (documented as fixed).
-- Per-owner job cap (one member can evict others' jobs with 4+ accounts); image route buffers up to WEB_IMAGE_MAX_BYTES; `/view` shares the 10 s timeout.
+- Per-owner job cap (one member can evict others' jobs with 4+ accounts); image route buffers up to WEB_IMAGE_MAX_BYTES; `/view` shares the 10 s timeout (fixed on fix/real-boot-1: `/view` uses `WEB_IMAGE_TIMEOUT_S`).
 - Move the hardcoded Vast search defaults (verified, external:false, num_gpus:1) into the schema with the bot (3b).
 
 ## Tests and polish

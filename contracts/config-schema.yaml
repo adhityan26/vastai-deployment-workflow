@@ -122,6 +122,7 @@ keys:
   - {name: WEB_EXTEND_MAX_MINUTES, components: [apps], type: int, secret: false, required: false, default: 360, min: 1, description: "Largest extension in minutes one Extend request may ask for (the agent still enforces the hard cap)"}
   - {name: WEB_GENERATE_RATE_LIMIT_PER_HOUR, components: [apps], type: int, secret: false, required: false, default: 60, min: 1, description: "Maximum Generate requests per hour per identity"}
   - {name: WEB_IMAGE_MAX_BYTES, components: [apps], type: int, secret: false, required: false, default: 33554432, min: 1024, description: "Largest image body the web process reads from ComfyUI /view; reading stops as soon as it is exceeded"}
+  - {name: WEB_IMAGE_TIMEOUT_S, components: [apps], type: int, secret: false, required: false, default: 60, min: 1, description: "Timeout of one ComfyUI /view image download by the web process (JSON calls keep HTTP_TIMEOUT_S_APPS)"}
   - {name: WEB_JSON_MAX_BYTES, components: [apps], type: int, secret: false, required: false, default: 2097152, min: 1024, description: "Largest JSON body the web process reads from the instance (ComfyUI /prompt, /history, /queue and agent calls)"}
   - {name: WEB_REQUEST_TIMEOUT_S, components: [apps], type: int, secret: false, required: false, default: 30, min: 1, description: "Seconds a client may take to send a whole request to the web process"}
   - {name: WEB_CONNECTION_TIMEOUT_S, components: [apps], type: int, secret: false, required: false, default: 60, min: 1, description: "Seconds of socket inactivity before the web process closes a connection"}

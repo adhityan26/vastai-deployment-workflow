@@ -12,7 +12,7 @@ afterEach(() => {
   server = undefined;
 });
 
-async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 5) {
+async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 5, imageTimeoutS = timeoutS) {
   const seen: Seen[] = [];
   server = createServer((req, res) => {
     let raw = "";
@@ -25,7 +25,7 @@ async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 
   });
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  const cfg = { comfyPort: port, httpTimeoutSApps: timeoutS, webJsonMaxBytes: 4096, webImageMaxBytes: 8192, secretNames: [] } as unknown as AppsConfig;
+  const cfg = { comfyPort: port, httpTimeoutSApps: timeoutS, webImageTimeoutS: imageTimeoutS, webJsonMaxBytes: 4096, webImageMaxBytes: 8192, secretNames: [] } as unknown as AppsConfig;
   return { client: new ComfyClient("127.0.0.1", cfg), seen };
 }
 
@@ -119,6 +119,46 @@ describe("ComfyClient", () => {
     const t0 = Date.now();
     await expect(client.queue()).rejects.toBeInstanceOf(Unreachable);
     expect(Date.now() - t0).toBeLessThan(4000);
+  });
+});
+
+describe("ComfyClient image timeout", () => {
+  // /view answers after `delayMs`; JSON calls get HTTP_TIMEOUT_S_APPS (1 s), /view WEB_IMAGE_TIMEOUT_S (3 s).
+  const slow = (delayMs: number) => (s: Seen, res: ServerResponse) => {
+    const timer = setTimeout(() => {
+      if (res.destroyed) return;
+      if (s.url.startsWith("/view")) {
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      } else json(res, 200, { queue_running: [], queue_pending: [] });
+    }, delayMs);
+    res.on("close", () => clearTimeout(timer));
+  };
+
+  it("a /view slower than the JSON timeout but within the image timeout succeeds", async () => {
+    const { client } = await fake(slow(1800), 1, 3);
+    const out = await client.view("a.png", "", "output");
+    expect(out.contentType).toBe("image/png");
+    expect(out.bytes.length).toBe(4);
+    // The same delay on a JSON call still hits the 1 s JSON timeout.
+    await expect(client.queue()).rejects.toBeInstanceOf(Unreachable);
+  }, 10_000);
+
+  it("a /view beyond the image timeout is Unreachable", async () => {
+    const { client } = await fake(slow(6000), 1, 2);
+    const t0 = Date.now();
+    const err = await client.view("a.png", "", "output").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Unreachable);
+    expect((err as Error).message).toContain("2000 ms");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1900);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  }, 10_000);
+
+  it("a missing or invalid WEB_IMAGE_TIMEOUT_S is refused at construction", () => {
+    for (const bad of [undefined, 0, -1, 1.5, "60"]) {
+      const cfg = { comfyPort: 1, httpTimeoutSApps: 1, webImageTimeoutS: bad, webJsonMaxBytes: 4096, webImageMaxBytes: 8192 } as unknown as AppsConfig;
+      expect(() => new ComfyClient("127.0.0.1", cfg)).toThrow(/WEB_IMAGE_TIMEOUT_S/);
+    }
   });
 });
 

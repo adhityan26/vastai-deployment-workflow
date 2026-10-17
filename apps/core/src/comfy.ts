@@ -1,5 +1,5 @@
 import type { AppsConfig } from "./config.js";
-import { baseUrl, clip, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
+import { baseUrl, clip, imageTimeoutMs, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
 
 export { ResponseTooLarge, Unreachable } from "./http.js";
 
@@ -42,19 +42,22 @@ function safeSegment(name: string, value: string, allowEmpty: boolean): string {
 export class ComfyClient {
   private readonly base: string;
   private readonly ms: number;
+  private readonly imageMs: number;
   private readonly jsonMax: number;
   private readonly imageMax: number;
 
   constructor(host: string, cfg: AppsConfig) {
     this.base = baseUrl(host, positiveInt("COMFY_PORT", cfg["comfyPort"]));
     this.ms = timeoutMs(cfg);
+    // Images are megabytes over the tailnet (a 1.8 MB PNG took 7.5 s), so /view has its own, longer timeout.
+    this.imageMs = imageTimeoutMs(cfg);
     this.jsonMax = jsonMaxBytes(cfg);
     this.imageMax = positiveInt("WEB_IMAGE_MAX_BYTES", cfg["webImageMaxBytes"]);
   }
 
-  // The instance is a rented third-party host: every body is size-capped (JSON vs image).
-  private call(method: string, path: string, body?: unknown, maxBytes = this.jsonMax): Promise<RawReply> {
-    return request(method, `${this.base}${path}`, this.ms, {}, body, { maxBytes });
+  // The instance is a rented third-party host: every body is size-capped and time-boxed (JSON vs image).
+  private call(method: string, path: string, body?: unknown, maxBytes = this.jsonMax, ms = this.ms): Promise<RawReply> {
+    return request(method, `${this.base}${path}`, ms, {}, body, { maxBytes });
   }
 
   private fail(what: string, reply: RawReply): never {
@@ -85,7 +88,7 @@ export class ComfyClient {
     safeSegment("subfolder", subfolder, true);
     if (!(VIEW_TYPES as readonly string[]).includes(type)) throw new ComfyError(0, "type must be input, output or temp");
     const q = new URLSearchParams({ filename, subfolder, type });
-    const reply = await this.call("GET", `/view?${q.toString()}`, undefined, this.imageMax);
+    const reply = await this.call("GET", `/view?${q.toString()}`, undefined, this.imageMax, this.imageMs);
     if (reply.status !== 200) this.fail("view", reply);
     return { bytes: reply.body, contentType: reply.contentType };
   }

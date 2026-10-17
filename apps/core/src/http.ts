@@ -1,7 +1,8 @@
 import type { AppsConfig } from "./config.js";
 
 // Shared plumbing for the instance clients (agent and ComfyUI): base URL from the configured
-// port, one timeout for every call, and the network-failure error type.
+// port, the timeouts (HTTP_TIMEOUT_S_APPS for JSON calls, WEB_IMAGE_TIMEOUT_S for image downloads; each
+// request is given its own), and the network-failure error type.
 
 const MAX_ERROR_TEXT = 200;
 const HOST_PATTERN = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
@@ -32,6 +33,11 @@ export function jsonMaxBytes(cfg: AppsConfig): number {
 
 export function timeoutMs(cfg: AppsConfig): number {
   return positiveInt("HTTP_TIMEOUT_S_APPS", cfg["httpTimeoutSApps"]) * 1000;
+}
+
+/** Timeout of one image download from ComfyUI /view (WEB_IMAGE_TIMEOUT_S); JSON calls use timeoutMs. */
+export function imageTimeoutMs(cfg: AppsConfig): number {
+  return positiveInt("WEB_IMAGE_TIMEOUT_S", cfg["webImageTimeoutS"]) * 1000;
 }
 
 export function clip(text: string, secret?: string): string {
