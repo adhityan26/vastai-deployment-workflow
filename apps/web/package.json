@@ -2,5 +2,12 @@
   "name": "@vast-comfy/web",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@vast-comfy/core": "*",
+    "jose": "^6.2.12"
+  },
+  "scripts": {
+    "typecheck": "tsc -p . --noEmit"
+  }
 }

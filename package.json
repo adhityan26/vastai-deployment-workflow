@@ -4,7 +4,7 @@
   "workspaces": ["apps/core", "apps/web"],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p apps/core --noEmit"
+    "typecheck": "tsc -p apps/core --noEmit && tsc -p apps/web --noEmit"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
