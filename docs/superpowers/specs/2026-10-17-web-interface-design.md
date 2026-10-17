@@ -1,6 +1,6 @@
 # Antarmuka web: kontrol instance dan generate gambar (sub-proyek 3a)
 
-Status: **draf untuk direview**. Ditulis saat pemilik proyek tidak bisa dihubungi; semua yang bertanda **[Keputusan saya]** adalah tebakan yang bisa dikoreksi, bukan kesepakatan. Hanya bagian "Dari pemilik" yang berasal dari percakapan.
+Status: **draf, jawaban 1-4 pemilik sudah dimasukkan; menunggu persetujuan akhir**. Ditulis saat pemilik proyek tidak bisa dihubungi; semua yang bertanda **[Keputusan saya]** adalah tebakan yang bisa dikoreksi, bukan kesepakatan. Hanya bagian "Dari pemilik" yang berasal dari percakapan.
 
 ## 1. Tujuan dan alasan
 
@@ -49,7 +49,7 @@ HP / laptop --HTTPS--> apps/web (homelab) --Vast API-----> Vast (cari, buat, han
 
 ## 4. Keputusan desain
 
-**[Keputusan saya] Akses dan login.** Layanan hanya dipublikasikan lewat satu jalur yang dipilih pemilik (lihat pertanyaan 1). Untuk tahap pemilik sendiri: satu kredensial (password atau token dari `.env`, di-hash) dengan sesi cookie `HttpOnly`; tanpa akun pengguna. Peran admin/anggota ditunda ke sub-proyek 4. Authentik SSO (sudah ada di homelab) adalah jalur naik kelas untuk tim.
+**[Dari pemilik] Akses dan login.** Halaman dipublikasikan di **domain publik di belakang Authentik** (SSO yang sudah ada di homelab). Authentik (forward auth atau OIDC) adalah satu-satunya login; `apps/web` tidak punya sistem password sendiri. Layanan hanya menerima permintaan yang membawa identitas dari Authentik (header/JWT yang diverifikasi, bukan header yang bisa dipalsukan dari luar proxy). Tahap pemilik sendiri: hanya akun pemilik yang diizinkan (grup Authentik, nama grup dari config). Peran admin/anggota untuk tim nanti dipetakan dari grup Authentik (sub-proyek 4). **[Keputusan saya]** Aksi yang mengubah biaya atau menghancurkan (Start, Extend, Destroy) hanya untuk grup admin; Generate dan lihat status untuk grup anggota.
 
 **[Keputusan saya] Proxy generate.** Backend menerima `{prompt, preset, ukuran, seed}`, mengisi workflow dari berkas profil (tidak ada parameter bebas dari browser selain yang diizinkan), mengirim ke ComfyUI, mengikuti `/history` atau websocket, dan mengalirkan gambar dari `/view`. Browser tidak bisa mengirim workflow sembarang.
 
@@ -87,10 +87,9 @@ Vast tidak punya penawaran sesuai filter; pembuatan instance gagal; instance `ru
 Struktur modul di dalam `apps/`, skema UI persis, pemilihan penawaran di antara kandidat setara, format log, dan pengujian dengan server palsu.
 
 ## 8. Pertanyaan untuk pemilik (jawaban mengubah rencana)
-1. **Jalur akses:** halaman web dibuka dari HP lewat apa? (a) hanya di jaringan tailnet/rumah (HP butuh Tailscale), (b) domain publik lewat tunnel/reverse proxy dengan login (Authentik atau password), atau (c) lainnya. Ini menentukan cara pemasangan dan model login.
-2. **Homelab di tailnet:** apakah host Docker `192.168.88.113` sudah menjadi node Tailscale (maka container cukup HTTP biasa ke nama MagicDNS), atau container web harus menjalankan `tailscaled` sendiri? Boleh diberi tag (mis. `tag:homelab`) dengan izin ke `tag:gpu:18188,8189`?
-3. **OAuth client Tailscale:** kamu mau membuatnya (scope `auth_keys`, tag `tag:gpu`) sekarang, atau tahap awal cukup dengan key sekali pakai manual untuk Task 13?
-4. **Letak `VAST_API_KEY` (key utama):** boleh disimpan di `.env` homelab untuk layanan ini?
+Dijawab pemilik: (1) domain publik dengan Authentik; (2) homelab sudah di tailnet (node `docker-apps`, tidak bertag; ACL anggota-ke-`tag:gpu` sudah berlaku untuknya); (3) key manual dulu, OAuth client menyusul; (4) `VAST_API_KEY` boleh di `.env` homelab.
+
+Masih terbuka (dipakai saat pemasangan, bukan saat menulis kode): domain/subdomain yang dipakai, reverse proxy yang sudah ada di homelab (Traefik/Nginx Proxy Manager/Cloudflare Tunnel) dan cara Authentik terpasang di depannya, serta nama grup Authentik untuk admin dan anggota.
 
 ## 9. Urutan kerja yang diusulkan
 1. `apps/core`: config, klien Vast/agent/ComfyUI, registri, siklus hidup (dengan server palsu).
