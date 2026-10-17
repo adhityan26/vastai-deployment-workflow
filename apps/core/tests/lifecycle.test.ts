@@ -230,7 +230,8 @@ describe("Lifecycle.start", () => {
     });
     expect(out.record.status).toBe("booting");
     expect(out.record.vast_instance_id).toBe(900);
-    expect(out.record.vast_start_date).toBe(T0);
+    // Vast's own start timestamp is unknown until reconcile reads it from the list.
+    expect(out.record.vast_start_date).toBeNull();
     expect(out.estimate).toEqual({ offer_id: 11, gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3 });
     expect(JSON.stringify(out)).not.toContain(TOKEN);
     expect((await registry.active())?.agent_token).toBe(TOKEN);
@@ -444,8 +445,102 @@ describe("Lifecycle.reconcile", () => {
     time.now = T0 + 60;
     expect((await life.reconcile()).gone).toEqual([]); // within grace: Vast may lag
     time.now = T0 + 11 * 60;
+    expect((await life.reconcile()).gone).toEqual([]); // first miss: not yet confirmed
+    expect((await registry.active())?.status).toBe("booting");
+    time.now = T0 + 12 * 60;
     expect((await life.reconcile()).gone).toEqual([{ tailnet_hostname: HOST, reason: "vanished" }]);
     expect(await registry.active()).toBeNull();
+  });
+
+  it("one list without the instance does not mark gone; a reappearance resets the count", async () => {
+    const { life, vast, registry, time } = setup();
+    await life.start();
+    const inst = vast.instances[0]!;
+    time.now = T0 + 11 * 60;
+    vast.instances = [];
+    expect((await life.reconcile()).gone).toEqual([]);
+    vast.instances = [inst]; // reappears
+    time.now = T0 + 12 * 60;
+    await life.reconcile();
+    vast.instances = [];
+    time.now = T0 + 13 * 60;
+    expect((await life.reconcile()).gone).toEqual([]); // counter was reset: first miss again
+    expect((await registry.active())?.status).not.toBe("gone");
+    time.now = T0 + 14 * 60;
+    expect((await life.reconcile()).gone.map((g) => g.reason)).toEqual(["vanished"]);
+  });
+
+  it("a failed Vast list never counts as a miss", async () => {
+    const { life, vast, registry, time } = setup();
+    await life.start();
+    time.now = T0 + 11 * 60;
+    vast.instances = [];
+    expect((await life.reconcile()).gone).toEqual([]); // miss 1
+    vast.listError = new VastError("list instances failed with HTTP 502");
+    time.now = T0 + 12 * 60;
+    expect((await life.reconcile()).vast_error).toMatch(/502/);
+    time.now = T0 + 13 * 60;
+    expect((await life.reconcile()).gone).toEqual([]);
+    expect((await registry.active())?.status).toBe("booting");
+    vast.listError = null;
+    time.now = T0 + 14 * 60;
+    expect((await life.reconcile()).gone.map((g) => g.reason)).toEqual(["vanished"]); // miss 2
+  });
+
+  it("the hard cap still applies when Vast reports no start_date", async () => {
+    const { life, vast, registry, time } = setup();
+    await life.start();
+    vast.instances[0]!.start_date = 0;
+    vast.instances[0]!.actual_status = "running";
+    time.now = T0 + 60;
+    expect((await life.reconcile()).destroyed).toEqual([]); // healthy and young: kept
+    expect((await registry.active())?.status).toBe("ready");
+    expect((await registry.active())?.vast_start_date).toBeNull();
+    const v = await life.view();
+    expect(v.remaining.hard_cap_s).toBe(6 * 3600 - 60);
+    expect(v.uptime_s).toBe(60);
+    time.now = T0 + 6 * 3600 - 1;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    time.now = T0 + 6 * 3600;
+    expect((await life.reconcile()).destroyed.map((d) => d.reason)).toEqual(["hard_cap"]);
+    expect(await registry.active()).toBeNull();
+  });
+
+  it("reconcile records Vast's own start_date", async () => {
+    const { life, vast, registry, time } = setup();
+    await life.start();
+    vast.instances[0]!.start_date = T0 + 30;
+    time.now = T0 + 60;
+    await life.reconcile();
+    expect((await registry.active())?.vast_start_date).toBe(T0 + 30);
+  });
+
+  it("the unreachable timer counts only while Vast says running", async () => {
+    const { life, vast, registry, time, agent } = setup();
+    await life.start();
+    time.now = T0 + 30;
+    await life.reconcile(); // ready, so the boot timeout is out of the picture
+    agent.statusImpl = async () => {
+      throw new Unreachable("down");
+    };
+    vast.instances[0]!.actual_status = "loading";
+    time.now = T0 + 60;
+    await life.reconcile();
+    expect((await registry.active())?.unreachable_since ?? null).toBeNull();
+    // A backdated timer from an earlier version is cleared while not running.
+    await registry.update(HOST, { unreachable_since: T0 - 3600 });
+    time.now = T0 + 120;
+    await life.reconcile();
+    expect((await registry.active())?.unreachable_since).toBeNull();
+    // Image pull done after 14 minutes: the clock starts now, not at the first failure.
+    vast.instances[0]!.actual_status = "running";
+    time.now = T0 + 14 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    expect((await registry.active())?.unreachable_since).toBe(T0 + 14 * 60);
+    time.now = T0 + 14 * 60 + 14 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    time.now = T0 + 14 * 60 + 15 * 60;
+    expect((await life.reconcile()).destroyed.map((d) => d.reason)).toEqual(["unreachable"]);
   });
 
   it("boot timeout destroys", async () => {
@@ -647,6 +742,41 @@ describe("Lifecycle.destroy", () => {
     expect((await second.registry.active())?.status).toBe("creating");
   });
 
+  it("a pending destroy is remembered and carried out when reconcile links the instance", async () => {
+    const { life, vast, registry, time, agent } = setup();
+    vast.createImpl = async () => {
+      throw new VastError("timed out");
+    };
+    await life.start().catch(() => undefined);
+    expect((await life.destroy()).outcome).toBe("pending");
+    // The instance shows up on Vast later.
+    vast.instances.push({ id: 903, label: `vastcomfy:${HOST}`, actual_status: "loading", start_date: T0, dph_total: 0.3 });
+    time.now = T0 + 60;
+    const report = await life.reconcile();
+    expect(report.linked).toEqual([{ tailnet_hostname: HOST, vast_instance_id: 903 }]);
+    expect(report.destroyed).toEqual([
+      { tailnet_hostname: HOST, vast_instance_id: 903, reason: "destroy_requested", outcome: "destroyed" },
+    ]);
+    expect(report.unknown).toEqual([]);
+    expect(agent.destroyCalls).toEqual(["manual"]);
+    expect(vast.calls).toContain("vast.destroy:903");
+    expect(await registry.active()).toBeNull();
+  });
+
+  it("without a pending destroy a linked instance is left booting", async () => {
+    const { life, vast, registry, time, agent } = setup();
+    vast.createImpl = async () => {
+      throw new VastError("timed out");
+    };
+    await life.start().catch(() => undefined);
+    agent.statusImpl = async () => status("downloading");
+    vast.instances.push({ id: 904, label: `vastcomfy:${HOST}`, actual_status: "loading", start_date: T0, dph_total: 0.3 });
+    time.now = T0 + 60;
+    const report = await life.reconcile();
+    expect(report.destroyed).toEqual([]);
+    expect((await registry.active())?.status).toBe("booting");
+  });
+
   it("destroyUnknown refuses foreign labels and the active record", async () => {
     const { life, vast } = setup();
     await life.start();
@@ -719,6 +849,17 @@ describe("Lifecycle.extend and view", () => {
     expect(v.vast).toBeNull();
     expect(v.vast_error).toMatch(/502/);
     expect(v.state).toBe("failed");
+  });
+
+  it("view reports stopping while the destroy is in progress even if the agent still answers", async () => {
+    const { life, vast, agent } = setup();
+    await life.start();
+    vast.destroyQueue = [new DestroyError("a"), new DestroyError("b"), new DestroyError("c")];
+    await life.destroy().catch(() => undefined);
+    agent.statusImpl = async () => status("ready");
+    const v = await life.view();
+    expect(v.state).toBe("stopping");
+    expect(v.agent?.state).toBe("ready");
   });
 
   it("view with no instance", async () => {

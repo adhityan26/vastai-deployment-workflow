@@ -10,7 +10,9 @@ Service: `apps/web` (Fastify, Node 24). Public URL: `https://gen.3dprintingbandu
    on a shared Docker network, adding the signed identity token as the `X-authentik-jwt` header.
 4. The web service verifies that JWT itself (JWKS, issuer, audience) and maps the groups
    `authentik Admins` (start/extend/destroy) and `member` (generate, status) to roles.
-   If the Authentik keys are empty, it fails closed (every request is 401).
+   `/api/*` is gated: without a valid identity it answers 401 (and if the Authentik keys are
+   empty it fails closed, so every `/api/*` request is 401). `/healthz` and the static page
+   (HTML, script, style, icon, manifest) are public; they carry no data.
 5. The web service talks to the Vast REST API (rent/destroy) and, over the tailnet, to the
    instance (agent port 8189, ComfyUI port 18188, both `tag:gpu`).
 6. The registry (one active instance record) is a JSON file on a named Docker volume.
@@ -64,7 +66,7 @@ Optional (defaults are in the schema):
 - `VAST_API_URL`, `VAST_IMAGE`, `VAST_DISK_GB`, `VAST_MIN_VRAM_GB`, `VAST_MAX_DPH`,
   `VAST_MIN_DOWNLOAD_MBPS`, `VAST_MIN_RELIABILITY`, `VAST_ALLOWED_GPUS`
 - `START_IDLE_MINUTES`, `START_FAILSAFE_HOURS`, `START_HARD_CAP_HOURS`, `START_RATE_LIMIT_PER_HOUR`
-- `COMFY_PORT`, `AGENT_PORT`, `STATUS_POLL_S`, `RECONCILE_INTERVAL_S`, `RECONCILE_GRACE_MIN`
+- `COMFY_PORT`, `AGENT_PORT` (treat as fixed, see below), `STATUS_POLL_S`, `RECONCILE_INTERVAL_S`, `RECONCILE_GRACE_MIN`
 - `GENERATE_MAX_PROMPT_CHARS`, `GENERATE_TIMEOUT_S`, `WEB_GENERATE_RATE_LIMIT_PER_HOUR`
 - `HTTP_TIMEOUT_S_APPS`, `WEB_DESTROY_RETRIES`, `WEB_DESTROY_BACKOFF_S`, `WEB_SHUTDOWN_WAIT_S`
 - `WEB_BODY_LIMIT_BYTES`, `WEB_JOB_CACHE_MAX`, `WEB_JOB_TTL_S`, `WEB_EXTEND_MAX_MINUTES`,
@@ -73,14 +75,19 @@ Optional (defaults are in the schema):
 
 Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_*`.
 
+**`COMFY_PORT` and `AGENT_PORT` are fixed.** They are NOT sent to the instance: the instance
+always uses its own defaults (ComfyUI 18188, agent 8189). Overriding them in this `.env` only
+changes where the web looks, so the web and the instance would disagree. Leave them unset.
+
 ## Authentik setup
 
 1. Create **groups** `authentik Admins` (usually exists) and `member`, and add users. The names
    must match `WEB_ADMIN_GROUP` / `WEB_MEMBER_GROUP`. A user in neither group gets 403.
 2. Create an **application** (e.g. slug `vast-comfy-web`) with a **Proxy Provider** in
-   **forward auth (single application)** mode, or the reverse-proxy mode of the outpost, with
+   **Proxy** mode (the outpost is the reverse proxy; do not use the forward-auth modes), with
    external host `https://gen.3dprintingbandung.my.id` and internal host
-   `http://vast-comfy-web:3000`. Assign the provider to the (embedded or dedicated) outpost.
+   `http://vast-comfy-web:3000`. Assign the provider to the (embedded or dedicated) outpost,
+   which must be on the shared Docker network so it can forward to `vast-comfy-web:3000`.
 3. The outpost must forward the signed JWT to the backend as the `X-authentik-jwt` header (the
    proxy provider does this and carries the user's groups in the `groups` claim). Verify with
    a request and check the header reaches the service (a 200 on `/api/state` after login).
@@ -113,6 +120,11 @@ Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_*`.
   Make a new key whenever the previous one was used or expired.
 
 ### Reaching the instance (UNVERIFIED without the real homelab)
+
+The web resolves the instance by its bare MagicDNS name (`vast-xxxx`, the `TS_HOSTNAME` it
+generated), not by an IP or a FQDN. The container's resolver must therefore resolve
+single-label tailnet names (MagicDNS 100.100.100.100 with the tailnet search domain).
+UNVERIFIED until the first real boot (Task 12).
 
 The container must reach tailnet IPs (100.64.0.0/10) and, if the registry stores a MagicDNS
 name, resolve it. Recommended simplest option: keep the container on the bridge network shared
@@ -150,6 +162,7 @@ against any running tailnet device with that port open.
 
 - The Vast create/destroy REST request and response shapes, and the instance label
   `vastcomfy:<hostname>` (contains a colon) are UNVERIFIED until the first real boot (Task 12).
+- Bare single-label MagicDNS names (`vast-xxxx`) resolving inside the container.
 - The container-to-tailnet path and DNS (section "Reaching the instance") and the exact
   Authentik outpost header and claim behaviour need to be checked on the real homelab.
 - The image was built and smoke-tested locally only (healthz 200, `/api/state` 401, read-only

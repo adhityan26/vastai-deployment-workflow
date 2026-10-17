@@ -185,6 +185,8 @@ export function mountApp(doc: Document, env: Env): App {
         [
           `Price: ${formatPrice(est.dph)}${gpu}.`,
           `Estimated cost if it runs for the full failsafe time (${est.horizon_hours} hours): up to ${formatCost(est.max_cost)}.`,
+          "This estimate covers the failsafe time only; the failsafe can be extended up to the hard cap, which costs more.",
+          "Disk storage is billed separately, per hour, for as long as the instance exists.",
           "You pay while the instance exists, even if nobody generates anything.",
         ],
         "Start and pay",
@@ -205,8 +207,17 @@ export function mountApp(doc: Document, env: Env): App {
         true,
       );
       if (!ok) return;
-      await call("POST", API.destroy, {});
-      showNotice("Destroy requested.");
+      const res = await call("POST", API.destroy, {});
+      const outcome = res !== null && typeof res === "object" ? (res as { outcome?: unknown }).outcome : undefined;
+      if (outcome === "pending") {
+        showNotice(
+          "Destroy is queued: the instance is not visible on Vast yet; it will be destroyed as soon as it appears.",
+        );
+      } else if (outcome === "none") {
+        showNotice("No instance to destroy.");
+      } else {
+        showNotice("Destroy requested.");
+      }
     });
   }
 

@@ -126,6 +126,12 @@ export function loadConfig(env: Record<string, string | undefined>, schemaPath: 
       problems.push(`${spec.name}: ${(e as Error).message}`);
     }
   }
+  // Cross-key rule (apps only): the failsafe deadline can never lie beyond the hard cap.
+  const failsafe = values[camelCase("START_FAILSAFE_HOURS")];
+  const hardCap = values[camelCase("START_HARD_CAP_HOURS")];
+  if (typeof failsafe === "number" && typeof hardCap === "number" && failsafe > hardCap) {
+    problems.push("START_FAILSAFE_HOURS: must not be greater than START_HARD_CAP_HOURS");
+  }
   if (problems.length > 0) throw new ConfigError(problems);
   const secretNames = specs.filter((s) => s.secret).map((s) => s.name);
   return Object.freeze({ ...values, secretNames }) as AppsConfig;

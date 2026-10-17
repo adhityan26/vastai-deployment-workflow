@@ -64,4 +64,16 @@ describe("deploy files", () => {
     expect(lines.some((l) => /^HEALTHCHECK\b/.test(l))).toBe(true);
     expect(lines.some((l) => /^CMD\b.*dist\/main\.js/.test(l))).toBe(true);
   });
+
+  it("compose stop_grace_period covers the shutdown wait plus a destroy retry budget", () => {
+    const keys = (parse(read("contracts/config-schema.yaml")) as { keys: { name: string; default: unknown }[] }).keys;
+    const def = (n: string) => Number(keys.find((k) => k.name === n)?.default);
+    const grace = /^(\d+)s$/.exec(String(svc["stop_grace_period"]));
+    expect(grace).not.toBeNull();
+    const budget =
+      def("WEB_SHUTDOWN_WAIT_S") +
+      (def("WEB_DESTROY_RETRIES") - 1) * def("WEB_DESTROY_BACKOFF_S") +
+      def("WEB_DESTROY_RETRIES") * def("HTTP_TIMEOUT_S_APPS");
+    expect(Number(grace![1])).toBeGreaterThan(budget);
+  });
 });

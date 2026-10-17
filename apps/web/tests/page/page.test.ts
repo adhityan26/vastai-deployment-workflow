@@ -188,6 +188,22 @@ describe("confirmations", () => {
     expect(posts("/api/destroy")).toHaveLength(1);
   });
 
+  it.each([
+    ["destroyed", "Destroy requested."],
+    ["gone", "Destroy requested."],
+    ["pending", "Destroy is queued: the instance is not visible on Vast yet; it will be destroyed as soon as it appears."],
+    ["none", "No instance to destroy."],
+  ])("destroy outcome %s shows its own message", async (outcome, message) => {
+    await mount({ role: "admin" }, { "POST /api/destroy": { body: { outcome, agent_reached: true } } });
+    q("#btn-destroy")!.click();
+    await flush();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/destroy")).toHaveLength(1);
+    expect(q("#notice")!.hidden).toBe(false);
+    expect(q("#notice")!.textContent).toBe(message);
+  });
+
   it("start shows the estimate and requires confirmation", async () => {
     await mount({ role: "admin", state: "none" }, {
       "GET /api/estimate": { body: { offer_id: 1, gpu_name: "RTX 4090", dph: 0.37, horizon_hours: 3, max_cost: 1.11 } },
@@ -201,6 +217,9 @@ describe("confirmations", () => {
     expect(text).toContain("$1.11");
     expect(text).toContain("3 hours");
     expect(text).toContain("RTX 4090");
+    expect(text).toContain("covers the failsafe time only");
+    expect(text).toContain("up to the hard cap");
+    expect(text).toContain("Disk storage is billed separately, per hour");
     expect(posts("/api/start")).toHaveLength(0);
     q("#modal-ok")!.click();
     await flush();

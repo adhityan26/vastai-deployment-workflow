@@ -31,6 +31,7 @@ const PORTAL_PORT = 8188; // config-lint: ok (vastai/comfy portal port, protocol
 const READY_STATES = new Set(["ready", "idle-warning"]);
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
+const VANISH_CONFIRMATIONS = 2; // consecutive lists without the instance before it counts as gone
 
 export class NoOffersError extends Error {
   constructor() {
@@ -213,6 +214,11 @@ export class Lifecycle {
   private starting: Promise<StartResult> | null = null;
   private readonly secrets = new Set<string>();
   private lastDestroyError: { hostname: string; error: string } | null = null;
+  // Hostnames whose destroy() returned "pending" (ambiguous create not yet listed by Vast).
+  // In memory only: after a web restart boot_timeout still destroys the instance once linked.
+  private readonly destroyRequested = new Set<string>();
+  // Consecutive successful Vast lists that omitted a record's instance, per hostname.
+  private readonly vanishMisses = new Map<string, number>();
 
   constructor(private readonly deps: LifecycleDeps) {
     this.cfg = deps.cfg;
@@ -374,7 +380,8 @@ export class Lifecycle {
       const updated = await registry.update(record.tailnet_hostname, {
         status: "booting",
         vast_instance_id: created.id,
-        vast_start_date: this.now(),
+        // Vast's own start timestamp only; reconcile fills it in from the instance list.
+        vast_start_date: null,
       });
       return { record: publicRecord(updated), estimate: this.estimateFor(offer) };
     } catch (err) {
@@ -454,7 +461,9 @@ export class Lifecycle {
           (i) => labelHostname(i.label) === record.tailnet_hostname,
         );
         if (match === undefined) {
-          // Vast does not list it (yet). Keep the record until reconcile's grace period ends.
+          // Vast does not list it (yet). Keep the record and remember the request: reconcile
+          // destroys the instance as soon as it links it by label.
+          this.destroyRequested.add(record.tailnet_hostname);
           return { outcome: "pending", agent_error: null };
         }
         id = match.id;
@@ -534,21 +543,26 @@ export class Lifecycle {
     }
 
     const dph = inst ? inst.dph_total : null;
+    // Vast's start_date when known; otherwise the recorded start or created_at, which is never
+    // later than the true start, so the hard cap and cost err on the safe side.
+    const startedAt =
+      inst && record !== null ? (inst.start_date > 0 ? inst.start_date : (record.vast_start_date ?? record.created_at)) : null;
     let uptime: number | null = null;
-    if (inst && inst.start_date > 0) uptime = Math.max(0, now - inst.start_date);
+    if (startedAt !== null) uptime = Math.max(0, now - startedAt);
     else if (agent?.uptime_s != null) uptime = agent.uptime_s;
     const cost = dph !== null && uptime !== null ? (dph * uptime) / SECONDS_PER_HOUR : null;
 
     const left = (at: number | null | undefined): number | null => (at == null ? null : Math.max(0, at - now));
     let hardCapAt: number | null = agent?.hard_cap_at ?? null;
-    if (inst && inst.start_date > 0) {
-      const byVast = inst.start_date + intCfg(this.cfg, "startHardCapHours", "START_HARD_CAP_HOURS", 1) * SECONDS_PER_HOUR;
+    if (startedAt !== null) {
+      const byVast = startedAt + intCfg(this.cfg, "startHardCapHours", "START_HARD_CAP_HOURS", 1) * SECONDS_PER_HOUR;
       hardCapAt = hardCapAt === null ? byVast : Math.min(hardCapAt, byVast);
     }
 
     let state: string;
     if (record === null) state = "none";
     else if (record.status === "creating") state = "creating";
+    else if (record.status === "stopping") state = "stopping";
     else if (agent?.state) state = agent.state;
     else state = record.status;
 
@@ -629,7 +643,32 @@ export class Lifecycle {
           vast_start_date: match.start_date > 0 ? match.start_date : null,
         });
         report.linked.push({ tailnet_hostname: hostname, vast_instance_id: match.id });
+        if (this.destroyRequested.has(hostname)) {
+          // The user asked to destroy it while Vast did not list it yet: do it now.
+          this.destroyRequested.delete(hostname);
+          try {
+            const result = await this.destroyRecord(record, match.id, "manual");
+            report.destroyed.push({
+              tailnet_hostname: hostname,
+              vast_instance_id: match.id,
+              reason: "destroy_requested",
+              outcome: result.outcome as DestroyOutcome,
+            });
+          } catch (err) {
+            report.destroy_failed.push({
+              tailnet_hostname: hostname,
+              vast_instance_id: match.id,
+              reason: "destroy_requested",
+              error: this.scrub(message(err)),
+            });
+          }
+          report.unknown = instances
+            .filter((i) => isProjectLabel(i.label) && i.id !== match.id)
+            .map(unknownOf);
+          return report;
+        }
       } else if (now - record.created_at >= grace) {
+        this.destroyRequested.delete(hostname);
         await registry.markGone(hostname);
         report.gone.push({ tailnet_hostname: hostname, reason: "never_created" });
         record = null;
@@ -648,14 +687,23 @@ export class Lifecycle {
     this.secrets.add(record.agent_token);
     const inst = instances.find((i) => i.id === id);
 
-    // 3. The record's instance vanished from Vast (after the grace period): gone.
+    // 3. The record's instance vanished from Vast: gone only after the grace period AND two
+    // consecutive successful lists without it (one list may be stale or partial; a failed list
+    // returned early above and never counts). A reappearance resets the counter.
     if (inst === undefined) {
       if (now - record.created_at >= grace) {
-        await registry.markGone(hostname);
-        report.gone.push({ tailnet_hostname: hostname, reason: "vanished" });
+        const misses = (this.vanishMisses.get(hostname) ?? 0) + 1;
+        if (misses >= VANISH_CONFIRMATIONS) {
+          this.vanishMisses.delete(hostname);
+          await registry.markGone(hostname);
+          report.gone.push({ tailnet_hostname: hostname, reason: "vanished" });
+        } else {
+          this.vanishMisses.set(hostname, misses);
+        }
       }
       return report;
     }
+    this.vanishMisses.delete(hostname);
 
     // 4. Read the agent; track readiness and the unreachable timer.
     let agent: AgentStatus | null = null;
@@ -667,23 +715,28 @@ export class Lifecycle {
       agent = null;
     }
     const patch: Partial<Omit<InstanceRecord, "tailnet_hostname">> = {};
-    if (agent !== null) {
-      if (record.unreachable_since != null) patch.unreachable_since = null;
-      if (READY_STATES.has(agent.state ?? "") && record.status === "booting") {
-        patch.status = "ready";
-        report.ready.push(hostname);
-      }
-    } else if (record.unreachable_since == null) {
-      patch.unreachable_since = now;
+    if (agent !== null && READY_STATES.has(agent.state ?? "") && record.status === "booting") {
+      patch.status = "ready";
+      report.ready.push(hostname);
+    }
+    // Spec 7: the unreachable time counts only while Vast says running.
+    const unreachableNow = agent === null && inst.actual_status === "running";
+    if (unreachableNow) {
+      if (record.unreachable_since == null) patch.unreachable_since = now;
+    } else if (record.unreachable_since != null) {
+      patch.unreachable_since = null;
     }
     if (inst.start_date > 0 && record.vast_start_date !== inst.start_date) patch.vast_start_date = inst.start_date;
     if (Object.keys(patch).length > 0) record = await registry.update(hostname, patch);
     report.unreachable_since = record.unreachable_since ?? null;
+    // Vast's start_date when listed; otherwise the recorded start or created_at (never later
+    // than the true start), so a missing start_date never switches the hard cap off.
+    const startedAt = inst.start_date > 0 ? inst.start_date : (record.vast_start_date ?? record.created_at);
 
     // 5. Enforcement.
     let reason: string | null = null;
     if (record.status === "stopping") reason = "destroy_retry";
-    else if (inst.start_date > 0 && now - inst.start_date >= hardCap) reason = "hard_cap";
+    else if (now - startedAt >= hardCap) reason = "hard_cap";
     else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
     else if (
       agent === null &&

@@ -28,6 +28,15 @@ describe("loadConfig", () => {
     expect(cfg.secretNames).toContain("VAST_API_KEY");
   });
 
+  it("rejects a failsafe longer than the hard cap", () => {
+    expect(() => loadConfig({ ...base, START_FAILSAFE_HOURS: "7", START_HARD_CAP_HOURS: "6" }, schema)).toThrow(
+      /START_FAILSAFE_HOURS: must not be greater than START_HARD_CAP_HOURS/,
+    );
+    expect(() => loadConfig({ ...base, START_FAILSAFE_HOURS: "7", START_HARD_CAP_HOURS: "6" }, schema)).toThrow(ConfigError);
+    const equal = loadConfig({ ...base, START_FAILSAFE_HOURS: "6", START_HARD_CAP_HOURS: "6" }, schema);
+    expect(equal["startFailsafeHours"]).toBe(6);
+  });
+
   it("reports every invalid key at once", () => {
     let error: unknown;
     try {
