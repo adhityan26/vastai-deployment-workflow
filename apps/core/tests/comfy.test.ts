@@ -72,6 +72,28 @@ describe("ComfyClient", () => {
     expect(seen).toHaveLength(0);
   });
 
+  it("view rejects NUL, an empty filename and a bad type with zero requests", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 200, {}));
+    await expect(client.view("a\0.png", "", "output")).rejects.toBeInstanceOf(ComfyError);
+    await expect(client.view("", "", "output")).rejects.toBeInstanceOf(ComfyError);
+    await expect(client.view("a.png", "", "models" as unknown as "output")).rejects.toBeInstanceOf(ComfyError);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("history rejects a malformed promptId without a request", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 200, {}));
+    await expect(client.history("../queue")).rejects.toBeInstanceOf(ComfyError);
+    await expect(client.history("")).rejects.toBeInstanceOf(ComfyError);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("a 5xx is a ComfyError, not Unreachable", async () => {
+    const { client } = await fake((_s, res) => json(res, 500, { error: "boom" }));
+    const err = (await client.queue().catch((e: unknown) => e)) as ComfyError;
+    expect(err).toBeInstanceOf(ComfyError);
+    expect(err).not.toBeInstanceOf(Unreachable);
+  });
+
   it("queue returns running and pending", async () => {
     const { client } = await fake((_s, res) => json(res, 200, { queue_running: [1], queue_pending: [] }));
     expect(await client.queue()).toEqual({ running: [1], pending: [] });

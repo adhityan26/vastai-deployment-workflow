@@ -19,6 +19,9 @@ export interface HistoryEntry {
   [k: string]: unknown;
 }
 
+const VIEW_TYPES = ["input", "output", "temp"] as const;
+export type ViewType = (typeof VIEW_TYPES)[number];
+const PROMPT_ID = /^[\w-]+$/;
 const SEGMENT_FORBIDDEN = /[\0\\]/;
 
 /** Reject path traversal and absolute paths in a /view file or folder name. */
@@ -63,6 +66,7 @@ export class ComfyClient {
 
   /** The history entry once the prompt has finished, or null while it has not. */
   async history(promptId: string): Promise<HistoryEntry | null> {
+    if (!PROMPT_ID.test(promptId)) throw new ComfyError(0, "promptId has an invalid format");
     const reply = await this.call("GET", `/history/${encodeURIComponent(promptId)}`);
     if (reply.status !== 200) this.fail("history", reply);
     const body = parseJson(reply.body);
@@ -71,10 +75,10 @@ export class ComfyClient {
     return entry && typeof entry === "object" ? (entry as HistoryEntry) : null;
   }
 
-  async view(filename: string, subfolder: string, type: string): Promise<{ bytes: Buffer; contentType: string }> {
+  async view(filename: string, subfolder: string, type: ViewType): Promise<{ bytes: Buffer; contentType: string }> {
     safeSegment("filename", filename, false);
     safeSegment("subfolder", subfolder, true);
-    if (type === "" || !/^[A-Za-z0-9_-]+$/.test(type)) throw new ComfyError(0, "type must be a plain word");
+    if (!(VIEW_TYPES as readonly string[]).includes(type)) throw new ComfyError(0, "type must be input, output or temp");
     const q = new URLSearchParams({ filename, subfolder, type });
     const reply = await this.call("GET", `/view?${q.toString()}`);
     if (reply.status !== 200) this.fail("view", reply);

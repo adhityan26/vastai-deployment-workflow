@@ -96,6 +96,39 @@ describe("AgentClient", () => {
     expect(err.message).not.toContain(TOKEN);
   });
 
+  it("Unreachable messages omit the token", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, STATUS));
+    server!.close();
+    await new Promise((r) => setTimeout(r, 20));
+    const err = (await client.status().catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(Unreachable);
+    expect(err.message).not.toContain(TOKEN);
+  });
+
+  it("a 5xx is an AgentError, not Unreachable", async () => {
+    const { client } = await fake((_s, res) => json(res, 503, { detail: "busy" }));
+    const err = (await client.status().catch((e: unknown) => e)) as AgentError;
+    expect(err).toBeInstanceOf(AgentError);
+    expect(err).not.toBeInstanceOf(Unreachable);
+    expect(err.status).toBe(503);
+  });
+
+  it("never follows a redirect with the bearer token", async () => {
+    const { client, seen } = await fake((s, res) => {
+      res.writeHead(302, { Location: "/elsewhere" });
+      res.end();
+      void s;
+    });
+    await expect(client.status()).rejects.toThrow();
+    expect(seen.map((s) => s.url)).toEqual(["/status"]);
+  });
+
+  it("destroy rejects a reason outside the enum without a request", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 202, {}));
+    await expect(client.destroy("because" as unknown as "manual")).rejects.toThrow(/manual or watchdog/);
+    expect(seen).toHaveLength(0);
+  });
+
   it("destroy posts the reason", async () => {
     const { client, seen } = await fake((_s, res) => json(res, 202, {}));
     await client.destroy("manual");

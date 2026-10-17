@@ -50,7 +50,7 @@ export async function request(
   body: unknown,
   secret?: string,
 ): Promise<RawReply> {
-  const init: RequestInit = { method, headers: { ...headers }, signal: AbortSignal.timeout(ms) };
+  const init: RequestInit = { method, headers: { ...headers }, signal: AbortSignal.timeout(ms), redirect: "error" };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)["Content-Type"] = "application/json";

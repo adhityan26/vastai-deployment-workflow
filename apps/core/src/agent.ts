@@ -106,7 +106,8 @@ export class AgentClient {
     return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   }
 
-  async destroy(reason: string): Promise<void> {
+  async destroy(reason: "manual" | "watchdog"): Promise<void> {
+    if (reason !== "manual" && reason !== "watchdog") throw new Error("reason must be manual or watchdog");
     const reply = await this.call("POST", "/destroy", { reason });
     if (reply.status < 200 || reply.status >= 300) this.fail("destroy", reply);
   }
