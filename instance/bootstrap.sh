@@ -88,6 +88,29 @@ install_runtime() {
   install_pinned_vastai || { echo "bootstrap: installing the pinned vastai failed; falling back to the stock CLI" >&2; VASTAI_FALLBACK=1; }
 }
 
+# S2: the image has no Tailscale. Download the pinned static tarball (about 2 s) into TAILSCALE_DIR; the two
+# binaries sit at its top level. Reuses an existing install of the same binaries (restart of the container).
+install_tailscale() {
+  local arch tmp url
+  [ -x "$TAILSCALED_BIN" ] && [ -x "$TAILSCALE_BIN" ] && return 0
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo "bootstrap: unsupported architecture for Tailscale: $(uname -m)" >&2; return 1 ;;
+  esac
+  url="$TAILSCALE_URL_BASE/tailscale_${TAILSCALE_VERSION}_${arch}.tgz"
+  tmp="$(mktemp)" || return 1
+  if ! bounded_run "$TAILSCALE_INSTALL_TIMEOUT_S" "$tmp" curl -fsSL -o "$tmp.tgz" "$url"; then
+    echo "bootstrap: downloading $url failed: $(cat "$tmp" 2>/dev/null)" >&2
+    rm -f "$tmp" "$tmp.tgz"
+    return 1
+  fi
+  mkdir -p "$TAILSCALE_DIR" && tar -xzf "$tmp.tgz" -C "$TAILSCALE_DIR" --strip-components=1
+  local rc=$?
+  rm -f "$tmp" "$tmp.tgz"
+  [ "$rc" -eq 0 ] && [ -x "$TAILSCALED_BIN" ] && [ -x "$TAILSCALE_BIN" ]
+}
+
 boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
 
 # Until failsafe.sh runs, a boot step that failed without destroying leaves the GPU running, and the configured
@@ -200,7 +223,8 @@ FAILSAFE_PID=$!
 sleep 1
 kill -0 "$FAILSAFE_PID" 2>/dev/null || failsafe_failed_closed
 
-# Step 4: register tailscaled and agent (rendered with literal values) with the image's running supervisord.
+# Step 4: install Tailscale (S2), then register tailscaled and agent (rendered with literal values) with the image's running supervisord.
+install_tailscale || die_with tailscale_failed
 wait_for_supervisor || die_with supervisor_failed
 boot render-supervisor-conf --env-file "$ENV_FILE" || exit $?
 ctl reread || die_with supervisor_failed
@@ -215,11 +239,8 @@ TS_RC=$?
 rm -f "$AUTH_FILE"
 [ "$TS_RC" -eq 0 ] || die_with tailscale_failed
 boot wipe-key TS_AUTHKEY --env-file "$ENV_FILE" || exit $?
-if [ "$TS_SERVE_ENABLED" = "true" ]; then
-  serve_port() { "$TAILSCALE_BIN" --socket="$TS_SOCKET" serve --bg --tcp="$1" "tcp://$2:$1"; }
-  serve_port "$COMFY_PORT" "$COMFY_HOST" || die_with tailscale_failed
-  serve_port "$AGENT_PORT" "$AGENT_HOST" || die_with tailscale_failed
-fi
+# No "tailscale serve" (S2): userspace mode forwards inbound tailnet connections to localhost; the ACL decides
+# which ports (COMFY_PORT, AGENT_PORT) are reachable.
 
 # Step 6: agent (reachable over Tailscale from here on).
 ctl start agent || die_with agent_start_failed

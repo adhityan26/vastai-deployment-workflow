@@ -121,7 +121,7 @@ def test_boot_done_is_set_after_mark_ready():
 def test_every_step_after_the_trap_is_guarded():
     start = index_of("trap on_exit EXIT") + 1
     end = index_of("BOOT_DONE=1")
-    step_markers = ("boot ", "ctl ", "serve_port ")
+    step_markers = ("boot ", "ctl ")
     for line in lines()[start:end]:
         stripped = line.strip()
         if not stripped.startswith(step_markers):
@@ -664,3 +664,76 @@ def test_disable_comfy_manager_fails_when_the_rename_fails(tmp_path, bindir):
         nodes.chmod(0o755)
     assert result.stdout.strip() == "failed"
     assert (nodes / "ComfyUI-Manager").exists()
+
+
+# --- Tailscale install (S2) ---------------------------------------------------------------------------------
+
+def test_tailscale_is_installed_after_the_failsafe_and_before_its_supervisor_program_is_registered():
+    assert index_of('kill -0 "$FAILSAFE_PID"') < index_of("install_tailscale ||") < index_of("render-supervisor-conf")
+    assert "die_with tailscale_failed" in lines()[index_of("install_tailscale ||")]
+
+
+def test_tailscale_serve_is_gone():
+    text = "\n".join(code_lines())
+    assert "serve" not in text and "TS_SERVE_ENABLED" not in text
+
+
+def tailscale_env(tmp_path, **extra):
+    env = {
+        "TAILSCALE_DIR": str(tmp_path / "ts"), "TAILSCALE_BIN": str(tmp_path / "ts" / "tailscale"),
+        "TAILSCALED_BIN": str(tmp_path / "ts" / "tailscaled"), "TAILSCALE_VERSION": "9.9.9",
+        "TAILSCALE_URL_BASE": "https://pkgs.example/stable", "TAILSCALE_INSTALL_TIMEOUT_S": "5",
+    }
+    env.update(extra)
+    return env
+
+
+def fake_curl(bindir, log, *, rc=0, hang=False):
+    """Writes a real tarball (dir tailscale_9.9.9_amd64/{tailscale,tailscaled}) to the -o target."""
+    body = (
+        '#!/bin/sh\n'
+        f'printf "curl %s\\n" "$*" >> "{log}"\n'
+        + ('sleep 30\n' if hang else '')
+        + f'[ {rc} -eq 0 ] || {{ echo "curl: (22) 404" >&2; exit {rc}; }}\n'
+        'while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+        'd="$(mktemp -d)"; mkdir "$d/tailscale_9.9.9_amd64"\n'
+        'for b in tailscale tailscaled; do printf "#!/bin/sh\\n" > "$d/tailscale_9.9.9_amd64/$b"; '
+        'chmod 755 "$d/tailscale_9.9.9_amd64/$b"; done\n'
+        'tar -czf "$out" -C "$d" tailscale_9.9.9_amd64\n'
+    )
+    return write_exec(bindir / "curl", body)
+
+
+def test_install_tailscale_downloads_the_pinned_tarball_and_extracts_the_binaries(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log, rc=0)
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path))
+    assert result.stdout.strip() == "done", result.stderr
+    assert (tmp_path / "ts" / "tailscaled").stat().st_mode & 0o111
+    assert (tmp_path / "ts" / "tailscale").stat().st_mode & 0o111
+    assert "https://pkgs.example/stable/tailscale_9.9.9_" in log.read_text()
+
+
+def test_install_tailscale_skips_the_download_when_the_binaries_exist(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log, rc=0)
+    ts = tmp_path / "ts"
+    ts.mkdir()
+    write_exec(ts / "tailscale", "#!/bin/sh\n")
+    write_exec(ts / "tailscaled", "#!/bin/sh\n")
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path))
+    assert result.stdout.strip() == "done" and not log.exists()
+
+
+def test_install_tailscale_fails_when_the_download_fails(tmp_path, bindir):
+    fake_curl(bindir, tmp_path / "calls.log", rc=22)
+    result = source_and_run(tmp_path, "install_tailscale && echo done || echo failed", tailscale_env(tmp_path))
+    assert result.stdout.strip() == "failed" and not (tmp_path / "ts" / "tailscaled").exists()
+
+
+def test_install_tailscale_fails_when_the_download_hangs(tmp_path, bindir):
+    fake_curl(bindir, tmp_path / "calls.log", hang=True)
+    started = time.monotonic()
+    result = source_and_run(tmp_path, "install_tailscale && echo done || echo failed",
+                            tailscale_env(tmp_path, TAILSCALE_INSTALL_TIMEOUT_S="1"))
+    assert result.stdout.strip() == "failed" and time.monotonic() - started < 15

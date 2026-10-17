@@ -10,7 +10,6 @@ keys:
   - {name: TS_HOSTNAME, components: [instance], type: str, secret: false, required: true, default: null, description: "Unique tailnet hostname for this instance"}
   - {name: TS_TAG, components: [instance], type: str, secret: false, required: false, default: "tag:gpu", description: "Tailscale tag advertised by the instance"}
   - {name: TS_SOCKET, components: [instance], type: str, secret: false, required: false, default: "/var/run/tailscale/tailscaled.sock", description: "tailscaled socket path"}
-  - {name: TS_SERVE_ENABLED, components: [instance], type: bool, secret: false, required: false, default: false, description: "Run tailscale serve forwards (decided by spike S2)"}
   - {name: REPO_URL, components: [instance], type: str, secret: false, required: true, default: null, description: "Git URL of this repository"}
   - {name: REPO_COMMIT, components: [instance], type: str, secret: false, required: true, default: null, description: "Pinned commit that bootstrap checks out"}
   - {name: PROFILE, components: [instance], type: str, secret: false, required: true, default: null, description: "Profile name, e.g. image"}
@@ -39,8 +38,12 @@ keys:
   - {name: STOCK_VASTAI_BIN, components: [instance], type: str, secret: false, required: false, default: "/opt/instance-tools/bin/vastai", description: "Deprecated vastai CLI shipped in the image (no -y); fallback when the pinned CLI cannot be installed (S1)"}
   - {name: SUPERVISORCTL_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisorctl", description: "supervisorctl binary"}
   - {name: SUPERVISORD_BIN, components: [instance], type: str, secret: false, required: false, default: "supervisord", description: "supervisord binary"}
-  - {name: TAILSCALE_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscale", description: "tailscale CLI binary"}
-  - {name: TAILSCALED_BIN, components: [instance], type: str, secret: false, required: false, default: "tailscaled", description: "tailscaled daemon binary"}
+  - {name: TAILSCALE_BIN, components: [instance], type: str, secret: false, required: false, default: "/opt/tailscale/tailscale", description: "tailscale CLI binary (pinned tarball installed by bootstrap, S2)"}
+  - {name: TAILSCALE_VERSION, components: [instance], type: str, secret: false, required: false, default: "1.104.1", description: "Pinned Tailscale static tarball version installed at boot (S2)"}
+  - {name: TAILSCALE_DIR, components: [instance], type: str, secret: false, required: false, default: "/opt/tailscale", description: "Directory the Tailscale tarball is extracted into (S2)"}
+  - {name: TAILSCALE_URL_BASE, components: [instance], type: str, secret: false, required: false, default: "https://pkgs.tailscale.com/stable", description: "Base URL of the Tailscale static tarballs (S2)"}
+  - {name: TAILSCALE_INSTALL_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 120, description: "Seconds before the Tailscale download is aborted (S2)"}
+  - {name: TAILSCALED_BIN, components: [instance], type: str, secret: false, required: false, default: "/opt/tailscale/tailscaled", description: "tailscaled daemon binary (pinned tarball installed by bootstrap, S2)"}
   - {name: COMFY_PYTHON, components: [instance], type: str, secret: false, required: false, default: "/venv/main/bin/python", description: "Python interpreter of the image ComfyUI venv (S1)"}
   - {name: AGENT_PYTHON, components: [instance], type: str, secret: false, required: false, default: "/opt/vastcomfy-venv/bin/python", description: "Python interpreter of VENV_DIR that runs the agent and the boot CLI (S1)"}
   - {name: NVIDIA_SMI_BIN, components: [instance], type: str, secret: false, required: false, default: "nvidia-smi", description: "nvidia-smi binary"}
