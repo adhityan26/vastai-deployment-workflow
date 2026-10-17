@@ -243,3 +243,96 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
     assert all(len(m.revision) == 40 for m in profile.models) and all(len(n.commit) == 40 for n in profile.nodes)
     for name in profile.workflows:
         assert (instance / "workflows" / name).is_file()
+
+
+# --- generate section ---
+
+import copy
+import json
+from pathlib import Path
+
+import yaml
+
+from vastcomfy_agent.profile import GenerateParams, GenerateSpec, ParamRef, QualityPreset, SizeSpec
+
+REPO = Path(__file__).resolve().parents[3]
+SHIPPED = REPO / "instance" / "profiles" / "image.yaml"
+
+GENERATE = {
+    "workflow": "flow.json",
+    "params": {
+        "prompt": {"node": "5", "input": "text"},
+        "steps": {"node": "8", "input": "steps"},
+        "width": {"node": "7", "input": "width"},
+        "height": {"node": "7", "input": "height"},
+        "seed": {"node": "8", "input": "seed"},
+    },
+    "quality_presets": {"fast": {"steps": 10}, "best": {"steps": 40}},
+    "sizes": [{"name": "1:1", "width": 1024, "height": 1024}, {"name": "16:9", "width": 1344, "height": 768}],
+}
+
+
+def write_with_generate(tmp_path, generate):
+    raw = yaml.safe_load(PROFILE_YAML)
+    raw["generate"] = generate
+    return write_profile(tmp_path, yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_generate_section_loads(tmp_path):
+    profile = load_profile(write_with_generate(tmp_path, GENERATE))
+    assert profile.generate == GenerateSpec(
+        workflow="flow.json",
+        params=GenerateParams(
+            prompt=ParamRef("5", "text"), steps=ParamRef("8", "steps"), width=ParamRef("7", "width"),
+            height=ParamRef("7", "height"), seed=ParamRef("8", "seed"),
+        ),
+        quality_presets=(QualityPreset("fast", 10), QualityPreset("best", 40)),
+        sizes=(SizeSpec("1:1", 1024, 1024), SizeSpec("16:9", 1344, 768)),
+    )
+
+
+def test_profile_without_generate_has_none(tmp_path):
+    assert load_profile(write_profile(tmp_path)).generate is None
+
+
+def _mutate(fn):
+    def apply(gen):
+        fn(gen)
+        return gen
+    return apply
+
+
+BAD_GENERATE = {
+    "unknown_param": lambda g: g["params"].update(cfg={"node": "8", "input": "cfg"}),
+    "missing_param": lambda g: g["params"].pop("seed"),
+    "missing_node": lambda g: g["params"]["prompt"].pop("node"),
+    "missing_input": lambda g: g["params"]["prompt"].pop("input"),
+    "preset_without_steps": lambda g: g["quality_presets"].update(bad={}),
+    "preset_zero_steps": lambda g: g["quality_presets"].update(bad={"steps": 0}),
+    "empty_presets": lambda g: g.update(quality_presets={}),
+    "empty_sizes": lambda g: g.update(sizes=[]),
+    "width_not_32": lambda g: g["sizes"].append({"name": "x", "width": 1000, "height": 1024}),
+    "height_not_32": lambda g: g["sizes"].append({"name": "x", "width": 1024, "height": 1000}),
+    "duplicate_size": lambda g: g["sizes"].append({"name": "1:1", "width": 512, "height": 512}),
+    "workflow_path": lambda g: g.update(workflow="../x.json"),
+    "workflow_no_json": lambda g: g.update(workflow="flow.txt"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_GENERATE))
+def test_generate_rejects_bad_sizes_and_presets(tmp_path, case):
+    generate = copy.deepcopy(GENERATE)
+    BAD_GENERATE[case](generate)
+    with pytest.raises(ProfileError):
+        load_profile(write_with_generate(tmp_path, generate))
+
+
+def test_shipped_profile_generate_matches_workflow_nodes():
+    profile = load_profile(SHIPPED)
+    assert profile.generate is not None
+    assert profile.generate.workflow in profile.workflows
+    workflow = json.loads((REPO / "instance" / "workflows" / profile.generate.workflow).read_text())
+    for key in GenerateParams.__dataclass_fields__:
+        ref = getattr(profile.generate.params, key)
+        assert ref.node in workflow, f"{key}: node {ref.node} missing"
+        assert ref.input in workflow[ref.node]["inputs"], f"{key}: input {ref.input} missing"

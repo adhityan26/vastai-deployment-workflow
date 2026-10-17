@@ -11,3 +11,22 @@ models:
   - {file: text_encoders/qwen3vl_8b_int8_convrot.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/text_encoders/, size_bytes: 9350798360}
   - {file: vae/qwen_image_2.1_vae_bf16.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/vae/, size_bytes: 675509688}
 workflows: [qwen-image-t2i.json]
+# How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
+generate:
+  workflow: qwen-image-t2i.json
+  params:
+    prompt: {node: "5", input: text}
+    steps: {node: "8", input: steps}
+    width: {node: "7", input: width}
+    height: {node: "7", input: height}
+    seed: {node: "8", input: seed}
+  quality_presets:
+    preview: {steps: 10}
+    standard: {steps: 25}
+    high: {steps: 40}
+  sizes:
+    - {name: "1:1", width: 1024, height: 1024}
+    - {name: "3:4", width: 896, height: 1152}
+    - {name: "4:3", width: 1152, height: 896}
+    - {name: "16:9", width: 1344, height: 768}
+    - {name: "9:16", width: 768, height: 1344}

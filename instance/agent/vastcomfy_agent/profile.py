@@ -13,6 +13,7 @@ import yaml
 
 from .files import write_json
 from .paths import StatePaths
+from .workflows import NAME_RE
 
 
 class ProfileError(Exception):
@@ -47,6 +48,42 @@ class ModelSpec:
 
 
 @dataclass(frozen=True)
+class ParamRef:
+    node: str
+    input: str
+
+
+@dataclass(frozen=True)
+class GenerateParams:
+    prompt: ParamRef
+    steps: ParamRef
+    width: ParamRef
+    height: ParamRef
+    seed: ParamRef
+
+
+@dataclass(frozen=True)
+class QualityPreset:
+    name: str
+    steps: int
+
+
+@dataclass(frozen=True)
+class SizeSpec:
+    name: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class GenerateSpec:
+    workflow: str
+    params: GenerateParams
+    quality_presets: tuple[QualityPreset, ...]
+    sizes: tuple[SizeSpec, ...]
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     requires_vram_gb: int
@@ -54,6 +91,7 @@ class Profile:
     nodes: tuple[NodeSpec, ...]
     models: tuple[ModelSpec, ...]
     workflows: tuple[str, ...]
+    generate: GenerateSpec | None = None
 
 
 def _relative(value: str, what: str) -> str:
@@ -67,6 +105,65 @@ def _required(value: str, what: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProfileError(f"{what} must be a non-empty string")
     return value
+
+
+def _mapping(value: object, what: str) -> dict:
+    if not isinstance(value, dict):
+        raise ProfileError(f"{what} must be a mapping")
+    return value
+
+
+def _positive_int(value: object, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ProfileError(f"{what} must be a positive integer")
+    return value
+
+
+def _parse_generate(raw: object) -> GenerateSpec:
+    gen = _mapping(raw, "generate")
+    workflow = _required(gen.get("workflow"), "generate workflow")
+    if not NAME_RE.fullmatch(workflow):
+        raise ProfileError(f"generate workflow is not a valid workflow name: {workflow!r}")
+    params_raw = _mapping(gen.get("params"), "generate params")
+    keys = GenerateParams.__dataclass_fields__.keys()
+    unknown = sorted(str(k) for k in params_raw if k not in keys)
+    if unknown:
+        raise ProfileError(f"generate params has unknown keys: {', '.join(unknown)}")
+    refs = {}
+    for key in keys:
+        if key not in params_raw:
+            raise ProfileError(f"generate params is missing {key}")
+        ref = _mapping(params_raw[key], f"generate param {key}")
+        refs[key] = ParamRef(
+            _required(ref.get("node"), f"generate param {key} node"),
+            _required(ref.get("input"), f"generate param {key} input"),
+        )
+    presets_raw = _mapping(gen.get("quality_presets"), "generate quality_presets")
+    if not presets_raw:
+        raise ProfileError("generate quality_presets must not be empty")
+    presets = []
+    for name, preset in presets_raw.items():
+        presets.append(
+            QualityPreset(
+                _required(name, "preset name"),
+                _positive_int(_mapping(preset, f"preset {name}").get("steps"), f"preset {name} steps"),
+            )
+        )
+    sizes_raw = gen.get("sizes")
+    if not isinstance(sizes_raw, list) or not sizes_raw:
+        raise ProfileError("generate sizes must be a non-empty list")
+    sizes = []
+    for item in sizes_raw:
+        item = _mapping(item, "size")
+        name = _required(item.get("name"), "size name")
+        width = _positive_int(item.get("width"), f"size {name} width")
+        height = _positive_int(item.get("height"), f"size {name} height")
+        if width % 32 or height % 32:
+            raise ProfileError(f"size {name} must be a multiple of 32: {width}x{height}")
+        if any(s.name == name for s in sizes):
+            raise ProfileError(f"duplicate size name {name!r}")
+        sizes.append(SizeSpec(name, width, height))
+    return GenerateSpec(workflow, GenerateParams(**refs), tuple(presets), tuple(sizes))
 
 
 def load_profile(path: Path) -> Profile:
@@ -96,6 +193,7 @@ def load_profile(path: Path) -> Profile:
             nodes=nodes,
             models=tuple(models),
             workflows=tuple(_relative(w, "workflow") for w in raw.get("workflows", [])),
+            generate=_parse_generate(raw["generate"]) if raw.get("generate") is not None else None,
         )
     except ProfileError as exc:
         raise ProfileError(f"{path}: {exc}") from None
