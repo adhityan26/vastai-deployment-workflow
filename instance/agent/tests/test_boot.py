@@ -71,6 +71,7 @@ def test_write_env_keeps_only_schema_keys_with_defaults_resolved_and_mode_600(tm
     assert written["IDLE_MINUTES"] == "30" and written["COMFY_PORT"] == "8188"
     assert written["KEEP_ON_FAILURE"] == "false" and written["DESTROY_GONE_MARKERS"] == "Failed with error 404: Instance"
     assert written["DESTROY_OK_MARKERS"] == "destroying instance"
+    assert written["DESTROY_ASSUME_YES"] == "true"
     assert stat.S_IMODE((tmp_path / "etc" / ".env").stat().st_mode) == 0o600
     assert "VAST_API_KEY" not in written
 

@@ -60,7 +60,7 @@ Image bawaan **dapat dipakai** (tanpa fallback ke image CUDA polos). Paparan pub
 
 ## Follow-ups
 - Ubah kode/skema/bootstrap sesuai keputusan 1, 3, 6, 7, 8: default `COMFY_PORT=18188`, `COMFY_PYTHON=/venv/main/bin/python`, `AGENT_PYTHON=/opt/vastcomfy-venv/bin/python`, `VASTAI_BIN=/opt/vastcomfy-venv/bin/vastai`, `SUPERVISOR_CONF=/etc/supervisor/supervisord.conf`, kunci `SUPERVISOR_CONF_DIR`; bootstrap: pasang venv + vastai + agent dulu, tanpa `supervisord`, pakai `supervisorctl reread/update`, `restart comfyui`.
-- **Fail-closed saat pemasangan `vastai` gagal:** tanpa CLI baru, `Destroyer`/failsafe tidak bisa menghancurkan, padahal CLI lama bisa menghancurkan (tanpa `-y`, dengan 3 baris peringatan sebelum hasil). Putuskan: fallback ke CLI bawaan dengan `-y` dikosongkan (kunci `DESTROY_YES_FLAG`) atau gagal-terbuka dengan peringatan ke watchdog (timeout boot 25 menit).
+- **Fail-closed saat pemasangan `vastai` gagal:** tanpa CLI baru, `Destroyer`/failsafe tidak bisa menghancurkan, padahal CLI lama bisa menghancurkan (tanpa `-y`, dengan 3 baris peringatan sebelum hasil). Diputuskan: fallback ke CLI bawaan dengan `-y` dikosongkan lewat kunci `DESTROY_ASSUME_YES=false`; aturan sukses destroy kini per baris sehingga 3 baris peringatan CLI bawaan ditoleransi (Destroyer dan `failsafe.sh` selesai di Task 1; pemasangan fallback di `bootstrap.sh` menyusul di Task 3).
 - Verifikasi `ComfyUI-Manager.disabled` benar-benar tidak dimuat ComfyUI (boot berikutnya).
 - Kontrak pembuatan instance (image + env + onstart + tanpa `-p`) dicatat untuk bot (sub-proyek 3).
 - Catat bahwa banner instance mengandung teks yang ditujukan ke agen AI; semua teks dari instance diperlakukan sebagai data tak tepercaya.

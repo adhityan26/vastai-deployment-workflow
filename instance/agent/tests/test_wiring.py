@@ -59,3 +59,18 @@ def test_build_wires_the_ok_markers_so_a_real_success_text_destroys(make_cfg):
     wired.states.set(State.BOOTING)
     assert wired.flow.run("manual") is True
     assert [c for c in calls if c[0] == "vastai"][0][4] == "-y"
+
+
+def test_build_passes_destroy_assume_yes_to_the_destroy_command(make_cfg):
+    for value, expected in (("true", True), ("false", False)):
+        cfg = make_cfg(DESTROY_RETRIES="1", DESTROY_BACKOFF_S="0", DESTROY_ASSUME_YES=value)
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "destroying instance 1.", "")
+
+        http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+        wired = wiring.build(cfg, now=lambda: 1000, run=run, http_client=http)
+        assert wired.destroyer.attempt() == (True, None)
+        assert ("-y" in calls[0]) is expected

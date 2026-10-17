@@ -56,6 +56,7 @@ def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_time
         "STATE_DIR": str(state), "CONTAINER_ID": "42", "CONTAINER_API_KEY": key,
         "HARD_CAP_HOURS": str(hard_cap_hours), "FAILSAFE_POLL_S": "1", "VASTAI_BIN": str(tmp_path / "vastai"),
         "DESTROY_GONE_MARKERS": markers, "DESTROY_OK_MARKERS": ok_markers, "DESTROY_TIMEOUT_S": str(timeout_s),
+        "DESTROY_ASSUME_YES": "true",
         "SUPERVISORCTL_BIN": str(tmp_path / "sctl"), "SUPERVISOR_CONF": "/unused/sup.conf", "COMFY_PROGRAM": "comfy",
     }
     if drop_key:
@@ -402,11 +403,72 @@ def test_a_failure_text_containing_the_ok_marker_is_a_failure(tmp_path, procs):
     failing_attempts(state, proc)
 
 
-def test_a_preamble_line_before_the_success_text_reads_as_failure(tmp_path, procs):
-    # Known limitation of the "OK marker must start the output" rule: the retry then finds a 404 (gone).
-    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre="warning: update available")
+STOCK_PREAMBLE = ("WARNING: The python vast.py CLI is deprecated and will be removed.\n"
+                  "         Please run: pip install --upgrade vastai\n\n")
+
+
+def test_the_stock_cli_preamble_before_the_success_line_is_a_success(tmp_path, procs):
+    env, state, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, stub_pre=STOCK_PREAMBLE.rstrip("\n"))
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert len(log.read_text().strip().splitlines()) == 1
+    assert record(state) == {"attempts": 1, "last_error": None, "pending": False}
+
+
+def test_the_stock_cli_preamble_before_a_failure_is_a_failure(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
+                             stub_pre=STOCK_PREAMBLE.rstrip("\n"),
+                             stub_out="Failed with error 500: error destroying instance 42, retry later")
     proc = start(env, procs)
     failing_attempts(state, proc)
+
+
+def test_the_stock_cli_preamble_before_a_plain_404_is_gone(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, fail_times=99,
+                           stub_pre=STOCK_PREAMBLE.rstrip("\n"), stub_out="Failed with error 404: Instance 42 not found.")
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert len(log.read_text().strip().splitlines()) == 1
+
+
+def test_a_failure_line_wins_over_an_ok_line(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, success_out="destroying instance 42.\nFailed with error 500: boom")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+
+
+def test_a_warning_only_output_is_a_failure(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, success_out="WARNING: deprecated")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+
+
+def test_an_ok_marker_in_the_middle_of_a_line_is_not_a_success(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=1, hard_cap=1000, success_out="while destroying instance 42 nothing happened")
+    proc = start(env, procs)
+    failing_attempts(state, proc)
+
+
+def test_assume_yes_false_drops_the_dash_y_from_the_command(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1, hard_cap=1000, overrides={"DESTROY_ASSUME_YES": "false"})
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
+    assert log.read_text().strip() == f"destroy instance 42 --api-key {KEY}"
+
+
+@pytest.mark.parametrize("value", ["yes", "TRUE", "1", ""])
+def test_invalid_assume_yes_exits_2_and_names_the_key(tmp_path, procs, value):
+    env, _, log, _ = setup(tmp_path, deadline=1000, hard_cap=2000, overrides={"DESTROY_ASSUME_YES": value})
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None, timeout=5)
+    assert proc.returncode == 2 and "DESTROY_ASSUME_YES" in proc.stderr.read() and not log.exists()
+
+
+def test_a_missing_assume_yes_key_exits_2_and_names_it(tmp_path, procs):
+    env, _, log, _ = setup(tmp_path, deadline=1000, hard_cap=2000, drop_key="DESTROY_ASSUME_YES")
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None, timeout=5)
+    assert proc.returncode == 2 and "DESTROY_ASSUME_YES" in proc.stderr.read() and not log.exists()
 
 
 def test_a_blank_marker_entry_does_not_match_everything(tmp_path, procs):

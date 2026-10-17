@@ -12,9 +12,10 @@ from .paths import StatePaths
 class Destroyer:
     """Destroys this instance through the vastai CLI with retries (spec 5.4, 10).
 
-    The CLI form and its behaviour come from spike S4: `-y` is required (without a TTY the CLI prints
-    "Aborted." and destroys nothing) and the exit status is always 0, so success is decided from the
-    output text only: an OK marker (destroyed) or a gone marker (404, already gone).
+    The CLI form and its behaviour come from spikes S1/S4: the new CLI needs `-y` (without a TTY it prints
+    "Aborted." and destroys nothing) while the stock CLI in the image does not know `-y` (`assume_yes=False`),
+    the exit status is always 0, and the stock CLI prints a deprecation preamble before its result, so success
+    is decided per output line: see `_is_success_text`.
     """
 
     def __init__(
@@ -29,6 +30,7 @@ class Destroyer:
         gone_markers: Sequence[str],
         ok_markers: Sequence[str],
         state_dir: Path,
+        assume_yes: bool = True,
         run: Callable = subprocess.run,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -41,11 +43,27 @@ class Destroyer:
         self._ok = [m.strip().lower() for m in ok_markers if m.strip()]
         self._gone = [m.strip().lower() for m in gone_markers if m.strip()]
         self._record_path = StatePaths(state_dir).destroy_agent
+        self._assume_yes = assume_yes
         self._run = run
         self._sleep = sleep
 
     def _command(self) -> list[str]:
-        return [self._bin, "destroy", "instance", self._id, "-y", "--api-key", self._key]
+        yes = ["-y"] if self._assume_yes else []
+        return [self._bin, "destroy", "instance", self._id, *yes, "--api-key", self._key]
+
+    def _is_success_text(self, lowered: str) -> bool:
+        """Per-line rule on the id/key-stripped, lowercased text (blank lines ignored):
+        (a) a line with "failed with error" that matches no gone marker -> failure, even if another line is OK;
+        (b) a gone marker anywhere -> success;
+        (c) otherwise success only if some line STARTS with an OK marker (tolerates the stock CLI's leading
+            WARNING lines); anything else is a failure."""
+        lines = [line.strip() for line in lowered.splitlines() if line.strip()]
+        for line in lines:
+            if "failed with error" in line and not any(m in line for m in self._gone):
+                return False
+        if any(m in line for line in lines for m in self._gone):
+            return True
+        return any(line.startswith(m) for line in lines for m in self._ok)
 
     def _redact(self, text: str) -> str:
         return text.replace(self._key, "***") if self._key else text
@@ -67,14 +85,8 @@ class Destroyer:
             for value in (self._id, self._key):
                 if value:
                     scrubbed = scrubbed.replace(value, "")
-            lowered = scrubbed.strip().lower()
             # The exit status carries no information (the CLI always exits 0): only the text decides.
-            if any(marker in lowered for marker in self._gone):
-                return True, None
-            # Any other "Failed with error" is a failure even if it mentions an OK marker; real success
-            # output is exactly "destroying instance <id>.", so an OK marker must START the output
-            # (a preamble line before it reads as a failure and is retried).
-            if "failed with error" not in lowered and any(lowered.startswith(m) for m in self._ok):
+            if self._is_success_text(scrubbed.lower()):
                 return True, None
         return False, self._redact(output)[:500] or "vastai failed without output"
 

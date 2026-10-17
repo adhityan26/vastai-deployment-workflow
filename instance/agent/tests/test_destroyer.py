@@ -33,13 +33,13 @@ class FakeRun:
 
 
 def make(tmp_path, results, retries=3, markers=("failed with error 404",), ok_markers=("destroying instance",),
-         container_id="42", api_key=KEY):
+         container_id="42", api_key=KEY, assume_yes=True):
     run = FakeRun(results)
     sleeps = []
     destroyer = Destroyer(
         vastai_bin="vastai", container_id=container_id, api_key=api_key, retries=retries, backoff_s=7,
         timeout_s=9, gone_markers=list(markers), ok_markers=list(ok_markers), state_dir=tmp_path, run=run,
-        sleep=sleeps.append,
+        sleep=sleeps.append, assume_yes=assume_yes,
     )
     return destroyer, run, sleeps
 
@@ -226,10 +226,47 @@ def test_a_failure_text_containing_an_ok_marker_is_a_failed_attempt(tmp_path):
     assert len(run.calls) == 2
 
 
-def test_the_ok_marker_must_start_the_output_so_a_preamble_line_reads_as_failure(tmp_path):
-    # Known limitation: a warning line before the success text is treated as a failure (and retried; the
-    # next attempt finds the instance gone, a 404, which counts as success).
-    destroyer, _, _ = make(tmp_path, [proc(0, out="warning: update available\ndestroying instance 42.")], retries=1)
+PREAMBLE = ("WARNING: The python vast.py CLI is deprecated and will be removed.\n"
+            "         Please run: pip install --upgrade vastai\n\n")
+
+
+def test_the_command_has_no_dash_y_when_assume_yes_is_false(tmp_path):
+    destroyer, run, _ = make(tmp_path, [proc(0, out=OK)], assume_yes=False)
+    assert destroyer.destroy() is True
+    assert run.calls[0][0] == ["vastai", "destroy", "instance", "42", "--api-key", KEY]
+
+
+def test_the_stock_cli_preamble_before_the_success_line_is_a_success(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out=PREAMBLE + OK)], retries=1)
+    assert destroyer.destroy() is True
+
+
+def test_the_stock_cli_preamble_before_a_failure_is_a_failure(tmp_path):
+    text = PREAMBLE + "Failed with error 500: error destroying instance 42, retry later"
+    destroyer, _, _ = make(tmp_path, [proc(0, out=text)], retries=1)
+    assert destroyer.destroy() is False
+
+
+def test_the_stock_cli_preamble_before_a_plain_404_is_gone(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out=PREAMBLE + GONE)], retries=1,
+                           markers=("Failed with error 404: Instance",))
+    assert destroyer.destroy() is True
+
+
+def test_a_failure_line_wins_over_an_ok_line_in_the_same_output(tmp_path):
+    text = OK + "\nFailed with error 500: backend exploded"
+    destroyer, _, _ = make(tmp_path, [proc(0, out=text)], retries=1)
+    assert destroyer.destroy() is False
+
+
+def test_a_warning_only_output_is_a_failure(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out=PREAMBLE)], retries=1)
+    assert destroyer.destroy() is False
+
+
+def test_an_ok_marker_in_the_middle_of_a_line_is_not_a_success(tmp_path):
+    destroyer, _, _ = make(tmp_path, [proc(0, out="warning: while destroying instance 42 nothing happened")],
+                           retries=1)
     assert destroyer.destroy() is False
 
 

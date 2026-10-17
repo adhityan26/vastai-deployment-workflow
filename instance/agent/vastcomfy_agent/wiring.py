@@ -66,6 +66,7 @@ def build(
         gone_markers=cfg.destroy_gone_markers,
         ok_markers=cfg.destroy_ok_markers,
         state_dir=state_dir,
+        assume_yes=cfg.destroy_assume_yes,
         run=run,
     )
     flow = DestroyFlow(states, destroyer, make_stop_comfy(cfg, run))

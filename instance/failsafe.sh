@@ -19,7 +19,7 @@ fi
 env_get() { grep -m1 "^$1=" "$ENV_FILE" | cut -d= -f2-; }
 
 for key in STATE_DIR CONTAINER_ID CONTAINER_API_KEY HARD_CAP_HOURS FAILSAFE_POLL_S VASTAI_BIN \
-           DESTROY_GONE_MARKERS DESTROY_OK_MARKERS DESTROY_TIMEOUT_S SUPERVISORCTL_BIN SUPERVISOR_CONF COMFY_PROGRAM; do
+           DESTROY_GONE_MARKERS DESTROY_OK_MARKERS DESTROY_ASSUME_YES DESTROY_TIMEOUT_S SUPERVISORCTL_BIN SUPERVISOR_CONF COMFY_PROGRAM; do
   if [ -z "$(env_get "$key")" ]; then
     echo "failsafe: missing $key in $ENV_FILE" >&2
     exit 2
@@ -35,6 +35,7 @@ VASTAI_BIN="$(env_get VASTAI_BIN)"
 GONE_MARKERS="$(env_get DESTROY_GONE_MARKERS)"
 OK_MARKERS="$(env_get DESTROY_OK_MARKERS)"
 TIMEOUT_S="$(env_get DESTROY_TIMEOUT_S)"
+ASSUME_YES="$(env_get DESTROY_ASSUME_YES)"
 SUPERVISORCTL_BIN="$(env_get SUPERVISORCTL_BIN)"
 SUPERVISOR_CONF="$(env_get SUPERVISOR_CONF)"
 COMFY_PROGRAM="$(env_get COMFY_PROGRAM)"
@@ -51,6 +52,10 @@ for key in HARD_CAP_HOURS FAILSAFE_POLL_S DESTROY_TIMEOUT_S; do
     exit 2
   fi
 done
+case "$ASSUME_YES" in
+  true|false) ;;
+  *) echo "failsafe: DESTROY_ASSUME_YES must be true or false (got '$ASSUME_YES')" >&2; exit 2 ;;
+esac
 HARD_CAP_HOURS=$((10#$HARD_CAP_HOURS))
 POLL_S=$((10#$POLL_S))
 TIMEOUT_S=$((10#$TIMEOUT_S))
@@ -119,21 +124,31 @@ run_with_timeout() {  # seconds outfile command...
   wait "$pid"
 }
 
-# Success rule (the CLI always exits 0, so only the text decides): trimmed, case-insensitive text that
-#  (1) contains a gone marker (404) -> success; (2) otherwise contains "failed with error" -> failure,
-#  even if it mentions an OK marker; (3) otherwise STARTS with an OK marker -> success (real output is
-#  exactly "destroying instance <id>."; a preamble line before it reads as a failure and is retried).
+# Success rule (the CLI always exits 0, so only the text decides), applied per line to the trimmed,
+# lowercased text with blank lines ignored:
+#  (a) a line containing "failed with error" that matches no gone marker -> failure, even if another
+#      line is an OK marker; (b) a gone marker anywhere -> success; (c) otherwise success only if some
+#      line STARTS with an OK marker (tolerates the stock CLI's leading WARNING lines); else failure.
 is_success_text() {
-  local text marker
-  text="$(lower "$(trim "$1")")"
-  for marker in ${GONE_LIST[@]+"${GONE_LIST[@]}"}; do
-    case "$text" in *"$marker"*) return 0 ;; esac
-  done
-  case "$text" in *"failed with error"*) return 1 ;; esac
-  for marker in ${OK_LIST[@]+"${OK_LIST[@]}"}; do
-    case "$text" in "$marker"*) return 0 ;; esac
-  done
-  return 1
+  local text line marker found_gone=0 found_ok=0 matched
+  text="$(lower "$1")"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim "$line")"
+    [ -z "$line" ] && continue
+    matched=0
+    for marker in ${GONE_LIST[@]+"${GONE_LIST[@]}"}; do
+      case "$line" in *"$marker"*) matched=1 ;; esac
+    done
+    if [ "$matched" -eq 1 ]; then
+      found_gone=1
+    else
+      case "$line" in *"failed with error"*) return 1 ;; esac
+    fi
+    for marker in ${OK_LIST[@]+"${OK_LIST[@]}"}; do
+      case "$line" in "$marker"*) found_ok=1 ;; esac
+    done
+  done <<< "$text"
+  [ "$found_gone" -eq 1 ] || [ "$found_ok" -eq 1 ]
 }
 
 attempts=0
@@ -143,7 +158,9 @@ destroy_once() {
   if [ "$attempts" -eq 1 ]; then
     run_with_timeout "$TIMEOUT_S" /dev/null "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" stop "$COMFY_PROGRAM" || true
   fi
-  run_with_timeout "$TIMEOUT_S" "$OUT_FILE" "$VASTAI_BIN" destroy instance "$CONTAINER_ID" -y --api-key "$API_KEY"
+  local yes_flag=()
+  if [ "$ASSUME_YES" = "true" ]; then yes_flag=(-y); fi
+  run_with_timeout "$TIMEOUT_S" "$OUT_FILE" "$VASTAI_BIN" destroy instance "$CONTAINER_ID" ${yes_flag[@]+"${yes_flag[@]}"} --api-key "$API_KEY"
   local rc=$? out
   out="$(cat "$OUT_USED" 2>/dev/null)"
   case "$OUT_USED" in "$OUT_FILE"|/dev/null) ;; *) rm -f "$OUT_USED" ;; esac
