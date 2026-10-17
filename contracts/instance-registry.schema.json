@@ -6,7 +6,7 @@
   "required": ["vast_instance_id", "created_at", "profile", "agent_token", "tailnet_hostname", "status"],
   "additionalProperties": false,
   "properties": {
-    "vast_instance_id": {"type": "integer"},
+    "vast_instance_id": {"type": ["integer", "null"], "description": "null only while creating, or gone for a create that never reached Vast"},
     "created_at": {"type": "integer", "description": "epoch UTC seconds on the homelab clock"},
     "vast_start_date": {"type": ["number", "null"], "description": "Vast's own start timestamp, the independent source for the hard cap"},
     "profile": {"type": "string"},
@@ -14,5 +14,7 @@
     "tailnet_hostname": {"type": "string"},
     "status": {"enum": ["creating", "booting", "ready", "stopping", "gone", "anomaly"]},
     "unreachable_since": {"type": ["integer", "null"]}
-  }
+  },
+  "if": {"properties": {"status": {"enum": ["booting", "ready", "stopping", "anomaly"]}}},
+  "then": {"properties": {"vast_instance_id": {"type": "integer"}}}
 }

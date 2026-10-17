@@ -42,3 +42,19 @@ def test_registry_schema_is_valid_and_accepts_a_sample_record():
         except jsonschema.ValidationError:
             continue
         raise AssertionError("schema accepted a broken record")
+
+
+def test_registry_null_vast_id_only_while_creating():
+    schema = json.loads((CONTRACTS / "instance-registry.schema.json").read_text())
+    record = {
+        "vast_instance_id": None, "created_at": 1_700_000_000, "profile": "image",
+        "agent_token": "x" * 32, "tailnet_hostname": "vast-ab12", "status": "creating",
+    }
+    jsonschema.validate(record, schema)
+    jsonschema.validate({**record, "status": "gone"}, schema)  # create failed before Vast
+    for status in ("booting", "ready", "stopping", "anomaly"):
+        try:
+            jsonschema.validate({**record, "status": status}, schema)
+        except jsonschema.ValidationError:
+            continue
+        raise AssertionError(f"null id accepted for status {status}")
