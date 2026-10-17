@@ -70,6 +70,7 @@ keys:
   - {name: WORKFLOW_MAX_BYTES, components: [instance], type: int, secret: false, required: false, default: 1048576, min: 1, description: "Max accepted workflow size"}
   - {name: COMFY_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 300, min: 1, description: "Wait for ComfyUI to answer"}
   - {name: AGENT_START_TIMEOUT_S, components: [instance], type: int, secret: false, required: false, default: 60, min: 1, description: "Wait for the agent to answer"}
+  - {name: SUPERVISOR_WAIT_S, components: [instance], type: int, secret: false, required: false, default: 120, min: 1, description: "Seconds bootstrap waits for the image supervisord (started in the background by the entrypoint) to answer supervisorctl pid before supervisor_failed (S1)"}
   # --- apps (homelab, sub-projects 2-3; listed so the schema is the single registry) ---
   - {name: VAST_API_KEY, components: [apps], type: str, secret: true, required: true, default: null, description: "Main Vast API key, lives on the homelab only"}
   - {name: VAST_API_URL, components: [apps], type: str, secret: false, required: false, default: "https://console.vast.ai/api/v0", description: "Vast REST API base URL"}

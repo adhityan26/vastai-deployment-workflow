@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,7 @@ def test_safety_nets_come_before_anything_that_can_fail():
         index_of("emergency_destroy() {"), index_of("-m venv"),
         index_of('"vastai=='), index_of_call("install_runtime"),
         index_of("write-env"), index_of("trap on_exit EXIT"), index_of("set-key VASTAI_BIN"),
-        index_of("boot begin"), index_of("init-times"), index_of("failsafe.sh"), index_of("kill -0"),
+        index_of("boot begin"), index_of("init-times"), index_of("failsafe.sh"), index_of('kill -0 "$FAILSAFE_PID"'),
         index_of("render-supervisor-conf"), index_of("ctl reread"), index_of("ctl update"),
         index_of("start tailscaled"), index_of("wipe-key TS_AUTHKEY"), index_of("start agent"),
         index_of("--target agent"), index_of("install-nodes"), index_of("install-models"), index_of("copy-workflows"),
@@ -232,7 +233,8 @@ def source_and_run(tmp_path, snippet, extra_env=None):
     bindir = tmp_path / "bin"
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "VENV_DIR": str(tmp_path / "venv"),
-        "CONTAINER_ID": "42", "CONTAINER_API_KEY": KEY,
+        "CONTAINER_ID": "42", "CONTAINER_API_KEY": KEY, "DESTROY_BACKOFF_S": "0",
+        "STOCK_VASTAI_BIN": str(tmp_path / "no-stock-vastai"),
     }
     env.update(extra_env or {})
     return subprocess.run([BASH, "-c", f'. "$1"; {snippet}', "_", str(SCRIPT)], env=env, capture_output=True,
@@ -259,15 +261,16 @@ def test_sourcing_only_defines_functions_and_runs_nothing(tmp_path, bindir):
     assert not log.exists() and not (tmp_path / "venv").exists()
 
 
-@pytest.mark.parametrize("output", ["WARNING: deprecated\\n\\ndestroying instance 42.\\n",
-                                    f"Failed with error 401: key {KEY} lacks privileges\\n"])
-def test_emergency_destroy_calls_the_stock_cli_without_y_hides_the_key_and_always_fails(tmp_path, bindir, output):
+@pytest.mark.parametrize("output,attempts", [("WARNING: deprecated\\n\\ndestroying instance 42.\\n", 1),
+                                             (f"Failed with error 401: key {KEY} lacks privileges\\n", 3)])
+def test_emergency_destroy_calls_the_stock_cli_without_y_hides_the_key_and_always_fails(tmp_path, bindir, output,
+                                                                                         attempts):
     log = tmp_path / "vastai.log"
     fake_vastai(bindir, log, output)
     result = source_and_run(tmp_path, "emergency_destroy agent_install_failed; echo not-reached")
     assert result.returncode != 0
     assert "not-reached" not in result.stdout
-    assert log.read_text().splitlines() == [f"destroy instance 42 --api-key {KEY}"]
+    assert log.read_text().splitlines() == [f"destroy instance 42 --api-key {KEY}"] * attempts
     assert KEY not in result.stdout + result.stderr
     assert "agent_install_failed" in result.stderr
 
@@ -419,3 +422,245 @@ def test_already_handled_begin_or_init_times_codes_exit_without_a_second_destroy
     result = run_script_lines(tmp_path, "boot begin", "boot init-times")
     assert result.returncode == rc and "reached" not in result.stdout
     assert not log.exists()
+
+
+# --- cross-task review wave ---------------------------------------------------------------------------------
+
+DESTROY_CALL = f"destroy instance 42 --api-key {KEY}"
+
+
+def sequenced_vastai(bindir, tmp_path, outputs):
+    """Fake stock CLI: attempt n prints outputs[n-1] ('HANG' sleeps instead); always exits 0 like the real one."""
+    count = tmp_path / "vastai.count"
+    log = tmp_path / "vastai.log"
+    cases = "".join(
+        f"  {n}) exec sleep 30;;\n" if text == "HANG" else f"  {n}) printf '{text}';;\n"
+        for n, text in enumerate(outputs, 1)
+    )
+    write_exec(bindir / "vastai",
+               f'#!/bin/sh\nn=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"\n'
+               f'printf "%s\\n" "$*" >> "{log}"\ncase "$n" in\n{cases}esac\nexit 0\n')
+    return log
+
+
+# I2: bounded, retried emergency destroy
+
+def test_emergency_destroy_retries_until_a_success_text(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, [f"WARNING: x\\nFailed with error 500: key {KEY} busy\\n",
+                                              "WARNING: deprecated\\n\\nDestroying instance 42.\\n",
+                                              "destroying instance 42.\\n"])
+    result = source_and_run(tmp_path, "emergency_destroy x; echo not-reached")
+    assert result.returncode != 0 and "not-reached" not in result.stdout
+    assert log.read_text().splitlines() == [DESTROY_CALL] * 2
+    assert KEY not in result.stdout + result.stderr
+
+
+def test_emergency_destroy_stops_on_the_gone_marker(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, ["Failed with error 404: Instance 42 not found.\\n"] * 3)
+    result = source_and_run(tmp_path, "emergency_destroy x")
+    assert result.returncode != 0
+    assert log.read_text().splitlines() == [DESTROY_CALL]
+
+
+def test_a_hanging_emergency_destroy_is_killed_at_the_timeout_and_retried(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, ["HANG", "destroying instance 42.\\n"])
+    started = time.monotonic()
+    result = source_and_run(tmp_path, "emergency_destroy x", {"DESTROY_TIMEOUT_S": "1"})
+    assert time.monotonic() - started < 15
+    assert result.returncode != 0
+    assert log.read_text().splitlines() == [DESTROY_CALL] * 2
+
+
+def test_all_emergency_attempts_failing_still_exits_non_zero_without_printing_the_key(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, [f"Failed with error 401: {KEY}\\n"] * 5)
+    result = source_and_run(tmp_path, "emergency_destroy x; echo not-reached")
+    assert result.returncode != 0 and "not-reached" not in result.stdout
+    assert log.read_text().splitlines() == [DESTROY_CALL] * 3
+    assert KEY not in result.stdout + result.stderr
+
+
+def test_the_key_is_removed_before_the_success_text_is_matched(tmp_path, bindir):
+    # "destroying instance" must start a line once the id and the key are removed from the output.
+    log = sequenced_vastai(bindir, tmp_path, [f"{KEY} destroying instance 42?\\n"] * 3)
+    result = source_and_run(tmp_path, "emergency_destroy x")
+    assert result.returncode != 0
+    assert len(log.read_text().splitlines()) == 1  # the key is stripped, so the line then starts with the marker
+
+
+def test_without_vastai_on_path_the_stock_fallback_path_is_used(tmp_path, bindir):
+    stock = tmp_path / "stock"
+    stock.mkdir()
+    log = sequenced_vastai(stock, tmp_path, ["destroying instance 42.\\n"])
+    result = source_and_run(tmp_path, "emergency_destroy x", {"STOCK_VASTAI_BIN": str(stock / "vastai")})
+    assert result.returncode != 0
+    assert log.read_text().splitlines() == [DESTROY_CALL]
+
+
+def test_emergency_destroy_static_shape():
+    body = "\n".join(function_body("emergency_destroy"))
+    assert '${STOCK_VASTAI_BIN:-/opt/instance-tools/bin/vastai}' in body
+    assert '${DESTROY_TIMEOUT_S:-60}' in body and '${DESTROY_BACKOFF_S:-5}' in body
+    assert "bounded_run" in body and " -y" not in body
+    helper = "\n".join(function_body("bounded_run"))
+    assert "kill -0" in helper and "kill -9" in helper and "sleep 1" in helper and "timeout " not in helper
+
+
+# I1: dead failsafe, env-export failure, runtime binaries
+
+def test_a_dead_failsafe_also_runs_the_emergency_destroy():
+    assert lines()[index_of('kill -0 "$FAILSAFE_PID"')].strip() == \
+        'kill -0 "$FAILSAFE_PID" 2>/dev/null || failsafe_failed_closed'
+    body = [line.strip() for line in function_body("failsafe_failed_closed")]
+    assert body.index("HANDLED=1") < next(i for i, l in enumerate(body) if l.startswith("boot fail failsafe_failed"))
+    assert next(i for i, l in enumerate(body) if l.startswith("boot fail failsafe_failed")) < \
+        next(i for i, l in enumerate(body) if l.startswith("emergency_destroy failsafe_failed"))
+
+
+def test_failsafe_failed_closed_runs_boot_fail_then_the_stock_cli(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, ["destroying instance 42.\\n"])
+    fake_boot_venv(tmp_path, {"fail": 12})
+    boot_log = tmp_path / "boot.log"
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.write_text(venv_python.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho "$*" >> "{boot_log}"\n', 1))
+    result = source_and_run(tmp_path, 'ENV_FILE=/x/.env; failsafe_failed_closed; echo "not-reached"')
+    assert result.returncode != 0 and "not-reached" not in result.stdout
+    assert boot_log.read_text().splitlines() == ["-m vastcomfy_agent.boot fail failsafe_failed --env-file /x/.env"]
+    assert log.read_text().splitlines() == [DESTROY_CALL]
+
+
+def test_env_export_failure_is_explicit():
+    text = SCRIPT.read_text()
+    assert 'eval "$(boot env-export' not in text
+    line = lines()[index_of("boot env-export")].strip()
+    assert line == 'EXPORTS="$(boot env-export --env-file "$ENV_FILE")" || emergency_destroy env_export_failed'
+    assert lines()[index_of("boot env-export") + 1].strip().startswith('eval "$EXPORTS"')
+
+
+def test_a_failing_env_export_destroys_with_the_stock_cli(tmp_path, bindir):
+    log = sequenced_vastai(bindir, tmp_path, ["destroying instance 42.\\n"])
+    fake_boot_venv(tmp_path, {"env-export": 1})
+    result = run_script_lines(tmp_path, "boot env-export")
+    assert result.returncode != 0 and "reached" not in result.stdout
+    assert log.read_text().splitlines() == [DESTROY_CALL]
+
+
+def test_runtime_binaries_are_cross_checked_before_the_failsafe():
+    check = index_of("check_runtime_binaries || emergency_destroy runtime_binaries_missing")
+    assert index_of("boot env-export") < check < index_of("failsafe.sh")
+    body = " ".join(function_body("check_runtime_binaries"))
+    assert 'command -v "$VASTAI_BIN"' in body and 'command -v "$AGENT_PYTHON"' in body
+
+
+@pytest.mark.parametrize("vastai,agent,ok", [
+    ("{bin}/vastai", "{bin}/python3", True), ("vastai", "python3", True),
+    ("{tmp}/missing/vastai", "{bin}/python3", False), ("{bin}/vastai", "{tmp}/plain-file", False),
+    ("no-such-cli", "python3", False),
+])
+def test_check_runtime_binaries_resolves_names_and_paths(tmp_path, bindir, vastai, agent, ok):
+    write_exec(bindir / "vastai", "#!/bin/sh\n")
+    write_exec(bindir / "python3", "#!/bin/sh\n")
+    (tmp_path / "plain-file").write_text("not executable")
+    fill = {"bin": bindir, "tmp": tmp_path}
+    result = source_and_run(tmp_path, "check_runtime_binaries && echo ok || echo missing",
+                            {"VASTAI_BIN": vastai.format(**fill), "AGENT_PYTHON": agent.format(**fill)})
+    assert result.stdout.strip() == ("ok" if ok else "missing"), result.stderr
+
+
+# I3: wait for the image supervisord
+
+def test_supervisord_is_waited_for_before_the_programs_are_registered():
+    wait = index_of("wait_for_supervisor || die_with supervisor_failed")
+    assert index_of('kill -0 "$FAILSAFE_PID"') < wait < index_of("render-supervisor-conf") < index_of("ctl reread")
+    body = " ".join(function_body("wait_for_supervisor"))
+    assert "ctl pid" in body and "$SUPERVISOR_WAIT_S" in body and "sleep 1" in body
+
+
+def test_supervisor_wait_is_a_schema_key():
+    from vastcomfy_agent.config import load_schema
+
+    spec = next(s for s in load_schema() if s.name == "SUPERVISOR_WAIT_S")
+    assert spec.components == ("instance",) and spec.type == "int" and spec.default == 120 and spec.min == 1
+    assert not spec.secret and not spec.required and "S1" in spec.description
+
+
+def fake_supervisorctl(bindir, tmp_path, failures, ok_output="603"):
+    count = tmp_path / "sctl.count"
+    return write_exec(bindir / "sctl",
+                      f'#!/bin/sh\necho "$*" >> "{tmp_path}/sctl.log"\n'
+                      f'n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"\n'
+                      f'if [ "$n" -le {failures} ]; then echo "unix:///var/run/supervisor.sock no such file"; exit 2; fi\n'
+                      f'echo "{ok_output}"\n')
+
+
+def supervisor_env(bindir, wait_s):
+    return {"SUPERVISORCTL_BIN": str(bindir / "sctl"), "SUPERVISOR_CONF": "/x/supervisord.conf",
+            "SUPERVISOR_WAIT_S": str(wait_s)}
+
+
+def test_wait_for_supervisor_succeeds_once_the_daemon_answers(tmp_path, bindir):
+    fake_supervisorctl(bindir, tmp_path, failures=2)
+    result = source_and_run(tmp_path, "wait_for_supervisor && echo up", supervisor_env(bindir, 10))
+    assert result.stdout.strip() == "up", result.stderr
+    assert (tmp_path / "sctl.log").read_text().splitlines() == ["-c /x/supervisord.conf pid"] * 3
+
+
+@pytest.mark.parametrize("ok_output", ["603", "unix:///var/run/supervisor.sock refused connection"])
+def test_wait_for_supervisor_gives_up_after_supervisor_wait_s(tmp_path, bindir, ok_output):
+    # supervisorctl 3.x exits 0 even when it cannot connect, so only a numeric pid counts as up.
+    fake_supervisorctl(bindir, tmp_path, failures=100 if ok_output == "603" else 0, ok_output=ok_output)
+    started = time.monotonic()
+    result = source_and_run(tmp_path, "wait_for_supervisor && echo up || echo gave-up", supervisor_env(bindir, 2))
+    assert time.monotonic() - started < 10
+    assert result.stdout.strip() == "gave-up"
+    assert 2 <= len((tmp_path / "sctl.log").read_text().splitlines()) <= 4
+
+
+# I5: ComfyUI-Manager re-checked before the ComfyUI restart
+
+def test_manager_is_rechecked_right_before_the_comfyui_restart():
+    check = index_of("disable_comfy_manager || die_with comfyui_start_failed")
+    assert index_of("copy-workflows") < check < index_of('restart "$COMFY_PROGRAM"')
+    assert check + 1 == index_of('restart "$COMFY_PROGRAM"')
+
+
+def comfy_tree(tmp_path, manager=True, stale=False):
+    nodes = tmp_path / "ComfyUI" / "custom_nodes"
+    nodes.mkdir(parents=True)
+    if manager:
+        (nodes / "ComfyUI-Manager").mkdir()
+        (nodes / "ComfyUI-Manager" / "__init__.py").write_text("")
+    if stale:
+        (nodes / "ComfyUI-Manager.disabled").mkdir()
+        (nodes / "ComfyUI-Manager.disabled" / "old").write_text("")
+    return nodes
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_disable_comfy_manager_renames_a_present_manager(tmp_path, bindir, stale):
+    nodes = comfy_tree(tmp_path, stale=stale)
+    result = source_and_run(tmp_path, "disable_comfy_manager && echo done", {"COMFY_DIR": str(tmp_path / "ComfyUI")})
+    assert result.stdout.strip() == "done", result.stderr
+    assert not (nodes / "ComfyUI-Manager").exists()
+    assert sorted(p.name for p in (nodes / "ComfyUI-Manager.disabled").iterdir()) == ["__init__.py"]
+    assert len([l for l in result.stderr.splitlines() if "ComfyUI-Manager" in l]) == 1
+    assert "found" in result.stderr
+
+
+def test_disable_comfy_manager_logs_an_absent_manager(tmp_path, bindir):
+    comfy_tree(tmp_path, manager=False)
+    result = source_and_run(tmp_path, "disable_comfy_manager && echo done", {"COMFY_DIR": str(tmp_path / "ComfyUI")})
+    assert result.stdout.strip() == "done"
+    assert len([l for l in result.stderr.splitlines() if "ComfyUI-Manager" in l]) == 1 and "absent" in result.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_disable_comfy_manager_fails_when_the_rename_fails(tmp_path, bindir):
+    nodes = comfy_tree(tmp_path)
+    nodes.chmod(0o555)
+    try:
+        result = source_and_run(tmp_path, "disable_comfy_manager && echo done || echo failed",
+                                {"COMFY_DIR": str(tmp_path / "ComfyUI")})
+    finally:
+        nodes.chmod(0o755)
+    assert result.stdout.strip() == "failed"
+    assert (nodes / "ComfyUI-Manager").exists()
