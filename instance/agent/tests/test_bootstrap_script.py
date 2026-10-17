@@ -61,7 +61,8 @@ def test_safety_nets_come_before_anything_that_can_fail():
         index_of("render-supervisor-conf"), index_of("ctl reread"), index_of("ctl update"),
         index_of("start tailscaled"), index_of("wipe-key TS_AUTHKEY"), index_of("start agent"),
         index_of("--target agent"), index_of("install-nodes"), index_of("install-models"), index_of("copy-workflows"),
-        index_of('restart "$COMFY_PROGRAM"'), index_of("--target comfy"), index_of("mark-ready"), index_of("BOOT_DONE=1"),
+        index_of('restart "$COMFY_PROGRAM"'), index_of("--target comfy"), index_of("boot verify-nodes"),
+        index_of("mark-ready"), index_of("BOOT_DONE=1"),
     ]
     assert order == sorted(order) and len(set(order)) == len(order)
 
@@ -112,6 +113,16 @@ def test_trap_placement_check_catches_a_misplaced_trap(monkeypatch):
     mutant.insert(position + 1, "trap on_exit EXIT")
     monkeypatch.setattr(sys.modules[__name__], "lines", lambda: mutant)
     assert not (index_of("write-env") < index_of("trap on_exit EXIT") < index_of("init-times"))
+
+
+def test_node_classes_are_verified_after_comfyui_answers_and_right_before_ready():
+    verify = index_of("boot verify-nodes")
+    assert index_of("--target comfy") < verify < index_of("mark-ready")
+    line = lines()[verify].strip()
+    assert line == 'boot verify-nodes --env-file "$ENV_FILE" || exit $?', line
+    # Nothing but comments between it and mark-ready: no step may slip in between the check and `ready`.
+    between = [l for l in lines()[verify + 1:index_of("mark-ready")] if l.strip() and not l.lstrip().startswith("#")]
+    assert between == []
 
 
 def test_boot_done_is_set_after_mark_ready():

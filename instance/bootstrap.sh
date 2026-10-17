@@ -256,6 +256,8 @@ boot copy-workflows --env-file "$ENV_FILE" || exit $?
 disable_comfy_manager || die_with comfyui_start_failed
 ctl restart "$COMFY_PROGRAM" || die_with comfyui_start_failed
 boot wait --target comfy --env-file "$ENV_FILE" || exit $?
+# The node classes the profile provides must be registered (a node whose import failed must not look ready).
+boot verify-nodes --env-file "$ENV_FILE" || exit $?
 
 # Step 10: ready (starts the idle timer).
 boot mark-ready --env-file "$ENV_FILE" || exit $?

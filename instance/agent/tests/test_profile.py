@@ -175,41 +175,44 @@ class FakeRun:
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
+PY = "/venv/main/bin/python"  # COMFY_PYTHON: the ComfyUI venv interpreter
+
+
 def node_profile():
     return Profile("p", 24, 40, (NodeSpec("city96/ComfyUI-GGUF", "abc123"),), (), ())
 
 
 def test_install_nodes_clones_checks_out_the_pinned_commit_and_installs_requirements(tmp_path):
     run = FakeRun(tmp_path)
-    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
     dest = str(tmp_path / "custom_nodes" / "ComfyUI-GGUF")
     assert run.cmds[0] == ["git", "clone", "https://git.test/city96/ComfyUI-GGUF", dest]
     assert ["git", "-C", dest, "checkout", "--detach", "abc123"] in run.cmds
-    assert ["pip", "install", "-r", dest + "/requirements.txt"] in run.cmds
+    assert [PY, "-m", "pip", "install", "-r", dest + "/requirements.txt"] in run.cmds
 
 
 def test_install_nodes_skips_a_node_already_at_the_pinned_commit(tmp_path):
     (tmp_path / "custom_nodes" / "ComfyUI-GGUF").mkdir(parents=True)
     run = FakeRun(tmp_path, head="abc123")
-    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
     assert all("clone" not in c and "checkout" not in c for c in run.cmds)
 
 
 def test_install_nodes_failure_raises_with_the_command_context(tmp_path):
     with pytest.raises(NodeInstallError, match="clone"):
-        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip",
+        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY,
                       run=FakeRun(tmp_path, fail_on="clone"))
 
 
 def test_install_nodes_reruns_pip_when_a_previous_pip_install_failed(tmp_path):
     run = FakeRun(tmp_path, fail_on="pip")
     with pytest.raises(NodeInstallError, match="pip"):
-        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
     run.fail_on = None
     run.cmds.clear()
-    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
     dest = str(tmp_path / "custom_nodes" / "ComfyUI-GGUF")
-    assert ["pip", "install", "-r", dest + "/requirements.txt"] in run.cmds
+    assert [PY, "-m", "pip", "install", "-r", dest + "/requirements.txt"] in run.cmds
     assert all("clone" not in c and "checkout" not in c for c in run.cmds)
 
 
@@ -228,7 +231,7 @@ def test_install_nodes_recovers_from_a_broken_checkout(tmp_path):
             return super().__call__(cmd, **kwargs)
 
     run = BrokenRun(tmp_path)
-    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
     assert not (dest / "garbage").exists() and sibling.exists()
     assert any("clone" in c for c in run.cmds) and any("checkout" in c for c in run.cmds)
 
@@ -336,3 +339,58 @@ def test_shipped_profile_generate_matches_workflow_nodes():
         ref = getattr(profile.generate.params, key)
         assert ref.node in workflow, f"{key}: node {ref.node} missing"
         assert ref.input in workflow[ref.node]["inputs"], f"{key}: input {ref.input} missing"
+
+
+# --- node requirements go into the ComfyUI venv (first real boot: bare pip hit another environment) ---
+
+def test_every_requirements_install_runs_the_comfyui_venv_python_never_a_bare_pip(tmp_path):
+    run = FakeRun(tmp_path)
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
+    run.cmds.clear()  # second boot: node already at the pinned commit, requirements are installed again
+    install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", comfy_python=PY, run=run)
+    dest = str(tmp_path / "custom_nodes" / "ComfyUI-GGUF")
+    installs = [c for c in run.cmds if "install" in c]
+    assert installs == [[PY, "-m", "pip", "install", "-r", dest + "/requirements.txt"]]
+    assert not any(c[0] in ("pip", "pip3") for c in run.cmds)
+
+
+def test_install_nodes_no_longer_accepts_a_pip_binary(tmp_path):
+    with pytest.raises(TypeError):
+        install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip",
+                      run=FakeRun(tmp_path))
+
+
+def test_pip_bin_is_gone_from_the_schema_and_comfy_python_is_the_image_venv():
+    from vastcomfy_agent.config import load_schema
+
+    specs = {s.name: s for s in load_schema()}
+    assert "PIP_BIN" not in specs
+    assert specs["COMFY_PYTHON"].default == "/venv/main/bin/python"
+
+
+# --- provides_node_classes ---
+
+def test_provides_node_classes_defaults_to_empty(tmp_path):
+    assert load_profile(write_profile(tmp_path)).provides_node_classes == ()
+
+
+def test_provides_node_classes_is_read_in_order(tmp_path):
+    text = PROFILE_YAML + "provides_node_classes: [UnetLoaderGGUF, CLIPLoaderGGUF]\n"
+    assert load_profile(write_profile(tmp_path, text)).provides_node_classes == ("UnetLoaderGGUF", "CLIPLoaderGGUF")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["UnetLoaderGGUF", "{a: 1}", "['']", "[1]", "[null]", "['a/b']", "['../x']", "['x y']", "['1Abc']",
+     "['_x']", "['a?b']", "['a%2Fb']", "[" + "A" * 129 + "]", "[A, A]"],
+)
+def test_invalid_provides_node_classes_are_rejected(tmp_path, value):
+    with pytest.raises(ProfileError, match="provides_node_classes"):
+        load_profile(write_profile(tmp_path, PROFILE_YAML + f"provides_node_classes: {value}\n"))
+
+
+def test_the_shipped_image_profile_declares_the_gguf_loader_class():
+    from pathlib import Path
+
+    instance = Path(__file__).resolve().parents[2]
+    assert load_profile(instance / "profiles" / "image.yaml").provides_node_classes == ("UnetLoaderGGUF",)

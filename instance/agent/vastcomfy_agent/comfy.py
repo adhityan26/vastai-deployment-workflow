@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import subprocess
 from typing import Callable
+from urllib.parse import quote
 
 import httpx
+
+
+class ComfyUnavailable(Exception):
+    """ComfyUI could not be asked (unreachable, HTTP error or a non-JSON answer)."""
 
 
 class ComfyClient:
@@ -20,6 +25,17 @@ class ComfyClient:
             return len(data["queue_running"]), len(data["queue_pending"])
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             return None
+
+    def node_class_registered(self, name: str) -> bool:
+        """True when ComfyUI registered the node class: GET /object_info/<name> answers with that key
+        (ComfyUI answers {} for an unknown class, e.g. one whose module failed to import)."""
+        try:
+            response = self._client.get(f"{self._base}/object_info/{quote(name, safe='')}")
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ComfyUnavailable(f"object_info/{name}: {type(exc).__name__}: {exc}") from None
+        return isinstance(data, dict) and name in data
 
     def ready(self) -> bool:
         try:

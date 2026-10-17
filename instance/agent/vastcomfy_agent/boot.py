@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 import httpx
 
 from .clock import utc_now
+from .comfy import ComfyUnavailable
 from .config import ConfigError, KeySpec, _coerce, default_text, load_config, load_schema, parse_env_file
 from .deadlines import DeadlineStore
 from .files import atomic_write
@@ -125,7 +126,7 @@ def cmd_install_nodes(b: Boot) -> int:
     try:
         profile = b.profile()
         install_nodes(profile, Path(b.cfg.comfy_dir), git_host=b.cfg.git_host_url, git_bin=b.cfg.git_bin,
-                      pip_bin=b.cfg.pip_bin, run=b.run)
+                      comfy_python=b.cfg.comfy_python, run=b.run)
     except (ProfileError, NodeInstallError) as exc:
         print(f"boot: {exc}", file=sys.stderr)
         return b.fail("node_install_failed")
@@ -190,6 +191,21 @@ def cmd_wait(b: Boot, target: str) -> int:
         if b.now() >= deadline:
             return b.fail(reason)
         b.sleep(1)
+
+
+def cmd_verify_nodes(b: Boot) -> int:
+    """After the ComfyUI restart answers: every node class the profile provides must be registered, so a node
+    whose import failed (e.g. a missing Python dependency) never ends in a healthy-looking `ready`."""
+    try:
+        names = b.profile().provides_node_classes
+        missing = [name for name in names if not b.wired.comfy.node_class_registered(name)]
+    except (ProfileError, ComfyUnavailable) as exc:
+        print(f"boot: node verification failed: {exc}", file=sys.stderr)
+        return b.fail("node_import_failed")
+    if missing:
+        print(f"boot: ComfyUI did not register node classes: {', '.join(missing)}", file=sys.stderr)
+        return b.fail("node_import_failed")
+    return EXIT_OK
 
 
 def cmd_mark_ready(b: Boot) -> int:
@@ -266,7 +282,7 @@ def main(
     parser = argparse.ArgumentParser(prog="vastcomfy_agent.boot")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("write-env")
-    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "mark-ready", "env-export", "render-supervisor-conf"):
+    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "verify-nodes", "mark-ready", "env-export", "render-supervisor-conf"):
         sub.add_parser(name).add_argument("--env-file", type=Path, required=True)
     p = sub.add_parser("fail")
     p.add_argument("reason")
@@ -341,6 +357,8 @@ def run_boot_command(b: Boot, args) -> int:
         return cmd_wait(b, args.target)
     if args.command == "render-supervisor-conf":
         return cmd_render_supervisor_conf(b)
+    if args.command == "verify-nodes":
+        return cmd_verify_nodes(b)
     return cmd_mark_ready(b)
 
 

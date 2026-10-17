@@ -514,3 +514,120 @@ def test_render_supervisor_conf_rejects_a_value_with_whitespace_with_exit_13_and
     assert code == boot.EXIT_CONFIG and not (conf_dir / "vc.conf").exists()
     assert states(tmp_path).get().reason == "config_invalid" and any(c[0] == "vastai" for c in runner.cmds)
     assert "Traceback" not in capsys.readouterr().err
+
+
+# --- install-nodes uses COMFY_PYTHON, verify-nodes checks ComfyUI registered the profile's node classes ---
+
+def test_install_nodes_installs_requirements_with_the_configured_comfy_python(tmp_path):
+    environ = prepared(tmp_path, COMFY_PYTHON="/venv/custom/bin/python")
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    with_profile_nodes(tmp_path)
+
+    class Cloning(Runner):
+        def __call__(self, cmd, **kwargs):
+            if "clone" in cmd:
+                from pathlib import Path
+
+                Path(cmd[-1]).mkdir(parents=True)
+                (Path(cmd[-1]) / "requirements.txt").write_text("gguf\n")
+            return super().__call__(cmd, **kwargs)
+
+    code, runner = run_boot(tmp_path, ["install-nodes", "--env-file", ef], environ=environ, runner=Cloning())
+    assert code == 0
+    requirements = str(tmp_path / "comfy" / "custom_nodes" / "n" / "requirements.txt")
+    assert ["/venv/custom/bin/python", "-m", "pip", "install", "-r", requirements] in runner.cmds
+    assert not any(c[0] in ("pip", "pip3") for c in runner.cmds)
+
+
+def with_node_classes(tmp_path, classes="[UnetLoaderGGUF]"):
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(PROFILE + f"provides_node_classes: {classes}\n")
+
+
+def fake_comfy(registered, seen):
+    """A fake ComfyUI: /object_info/<class> answers {class: ...} for a registered class, {} otherwise."""
+    def handler(request):
+        seen.append(request.url.path)
+        name = request.url.path.rsplit("/", 1)[-1]
+        if request.url.path.startswith("/object_info/"):
+            return httpx.Response(200, json={name: {"input": {}}} if name in registered else {})
+        return httpx.Response(404)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def verify_prepared(tmp_path, classes="[UnetLoaderGGUF]", **extra):
+    environ = prepared(tmp_path, **extra)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    states(tmp_path).set(State.DOWNLOADING)
+    with_node_classes(tmp_path, classes)
+    return environ, ef
+
+
+def test_verify_nodes_passes_when_every_declared_class_is_registered(tmp_path):
+    environ, ef = verify_prepared(tmp_path, "[UnetLoaderGGUF, OtherNode]")
+    seen = []
+    code, runner = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                            http_client=fake_comfy({"UnetLoaderGGUF", "OtherNode"}, seen))
+    assert code == 0 and runner.cmds == []
+    assert seen == ["/object_info/UnetLoaderGGUF", "/object_info/OtherNode"]
+    assert states(tmp_path).get().state == State.DOWNLOADING
+
+
+def test_verify_nodes_fails_and_self_destroys_when_a_class_is_missing(tmp_path, capsys):
+    environ, ef = verify_prepared(tmp_path, "[UnetLoaderGGUF, OtherNode]")
+    code, runner = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                            http_client=fake_comfy({"OtherNode"}, []))
+    assert code == 12
+    record = states(tmp_path).get()
+    assert record.state == State.STOPPING and record.reason == "node_import_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)
+    assert "UnetLoaderGGUF" in capsys.readouterr().err
+
+
+def test_verify_nodes_fails_when_comfyui_is_unreachable(tmp_path):
+    environ, ef = verify_prepared(tmp_path)
+
+    def refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    code, runner = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                            http_client=httpx.Client(transport=httpx.MockTransport(refuse)))
+    assert code == 12 and states(tmp_path).get().reason == "node_import_failed"
+    assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+@pytest.mark.parametrize("response", [httpx.Response(500), httpx.Response(200, content=b"not json"),
+                                      httpx.Response(200, json=["UnetLoaderGGUF"])])
+def test_verify_nodes_fails_on_an_error_or_nonsense_answer(tmp_path, response):
+    environ, ef = verify_prepared(tmp_path)
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: response))
+    code, _ = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ, http_client=client)
+    assert code == 12 and states(tmp_path).get().reason == "node_import_failed"
+
+
+def test_verify_nodes_honours_keep_on_failure(tmp_path):
+    environ, ef = verify_prepared(tmp_path, KEEP_ON_FAILURE="true")
+    code, runner = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                            http_client=fake_comfy(set(), []))
+    record = states(tmp_path).get()
+    assert code == 12 and (record.state, record.reason) == (State.FAILED, "node_import_failed")
+    assert runner.cmds == []
+
+
+def test_verify_nodes_without_declared_classes_asks_nothing(tmp_path):
+    environ = prepared(tmp_path)
+    ef = env_file(tmp_path)
+    with_profile(tmp_path)
+    seen = []
+    code, _ = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ, http_client=fake_comfy(set(), seen))
+    assert code == 0 and seen == []
+
+
+def test_node_import_failed_is_a_known_reason():
+    from vastcomfy_agent.state import REASONS
+
+    assert "node_import_failed" in REASONS

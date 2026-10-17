@@ -31,6 +31,14 @@ describe("loadProfile", () => {
     expect(profile.generate.workflow).toBe("qwen-image-t2i.json");
   });
 
+  it("still loads the shipped profile with instance-only fields such as provides_node_classes", () => {
+    const doc = parse(readFileSync(shipped, "utf8")) as Doc;
+    expect(doc["provides_node_classes"]).toEqual(["UnetLoaderGGUF"]);
+    expect(loadProfile(shipped).generate.sizes.length).toBeGreaterThan(0);
+    const extra = writeProfile((d) => (d.provides_node_classes = ["UnetLoaderGGUF", "OtherNode"]));
+    expect(loadProfile(extra).name).toBe("image");
+  });
+
   // Mirrors BAD_GENERATE in instance/agent/tests/test_profile.py: both loaders reject the same inputs.
   const bad: Record<string, (g: Doc) => void> = {
     unknown_param: (g) => (g.params.cfg = { node: "8", input: "cfg" }),

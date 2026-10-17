@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -30,6 +31,11 @@ class DownloadError(Exception):
 
 class NodeInstallError(Exception):
     pass
+
+
+# Node class names a profile declares (provides_node_classes) are put into a ComfyUI URL path, so only plain
+# identifiers are accepted.
+NODE_CLASS_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}")
 
 
 @dataclass(frozen=True)
@@ -92,6 +98,7 @@ class Profile:
     models: tuple[ModelSpec, ...]
     workflows: tuple[str, ...]
     generate: GenerateSpec | None = None
+    provides_node_classes: tuple[str, ...] = ()
 
 
 def _relative(value: str, what: str) -> str:
@@ -166,6 +173,21 @@ def _parse_generate(raw: object) -> GenerateSpec:
     return GenerateSpec(workflow, GenerateParams(**refs), tuple(presets), tuple(sizes))
 
 
+def _parse_node_classes(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ProfileError("provides_node_classes must be a list")
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not NODE_CLASS_RE.fullmatch(item):
+            raise ProfileError(f"provides_node_classes has an invalid node class name: {item!r}")
+        if item in names:
+            raise ProfileError(f"provides_node_classes lists {item!r} twice")
+        names.append(item)
+    return tuple(names)
+
+
 def load_profile(path: Path) -> Profile:
     try:
         raw = yaml.safe_load(Path(path).read_text())
@@ -194,6 +216,7 @@ def load_profile(path: Path) -> Profile:
             models=tuple(models),
             workflows=tuple(_relative(w, "workflow") for w in raw.get("workflows", [])),
             generate=_parse_generate(raw["generate"]) if raw.get("generate") is not None else None,
+            provides_node_classes=_parse_node_classes(raw.get("provides_node_classes")),
         )
     except ProfileError as exc:
         raise ProfileError(f"{path}: {exc}") from None
@@ -307,14 +330,17 @@ def _clone(run: Callable, git_bin: str, git_host: str, node: NodeSpec, name: str
     _run_checked(run, [git_bin, "clone", f"{git_host.rstrip('/')}/{node.repo}", str(dest)], f"clone {name}")
 
 
-def _install_requirements(run: Callable, pip_bin: str, dest: Path, name: str) -> None:
+def _install_requirements(run: Callable, comfy_python: str, dest: Path, name: str) -> None:
+    # Always `<ComfyUI venv python> -m pip`: a bare `pip` resolves to another environment, and ComfyUI then
+    # fails to import the node (seen on the first real boot: ModuleNotFoundError for gguf).
     requirements = dest / "requirements.txt"
     if requirements.exists():
-        _run_checked(run, [pip_bin, "install", "-r", str(requirements)], f"pip install {name}")
+        _run_checked(run, [comfy_python, "-m", "pip", "install", "-r", str(requirements)], f"pip install {name}")
 
 
 def install_nodes(
-    profile: Profile, comfy_dir: Path, *, git_host: str, git_bin: str, pip_bin: str, run: Callable = subprocess.run
+    profile: Profile, comfy_dir: Path, *, git_host: str, git_bin: str, comfy_python: str,
+    run: Callable = subprocess.run,
 ) -> None:
     for node in profile.nodes:
         name = node.repo.rsplit("/", 1)[-1]
@@ -326,11 +352,11 @@ def install_nodes(
                 shutil.rmtree(dest)
                 _clone(run, git_bin, git_host, node, name, dest)
             elif head.stdout.strip() == node.commit:
-                _install_requirements(run, pip_bin, dest, name)
+                _install_requirements(run, comfy_python, dest, name)
                 continue
             else:
                 _run_checked(run, [git_bin, "-C", str(dest), "fetch", "--all", "--tags"], f"fetch {name}")
         else:
             _clone(run, git_bin, git_host, node, name, dest)
         _run_checked(run, [git_bin, "-C", str(dest), "checkout", "--detach", node.commit], f"checkout {name}")
-        _install_requirements(run, pip_bin, dest, name)
+        _install_requirements(run, comfy_python, dest, name)
