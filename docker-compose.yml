@@ -67,7 +67,11 @@ services:
         limits:
           cpus: "0.50"
           memory: 256M
+          # Same value as pids_limit below: Compose 5.x rejects a service-level pids_limit
+          # next to deploy.resources.limits unless both agree.
           pids: 128
+    # Service-level form, honoured by every Compose version.
+    pids_limit: 128
 
 volumes:
   vast-comfy-registry:

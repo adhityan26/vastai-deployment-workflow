@@ -27,7 +27,10 @@ Compose file: `docker-compose.yml` at the repository root. Env template: `.env.e
 
 ## Deploying (from the laptop)
 
-The Docker daemon is remote. Run everything from the laptop checkout:
+The Docker daemon is remote. Use the `docker compose` plugin (Compose v2 or newer); legacy v1
+`docker-compose` is not supported (it ignores the `deploy.*` limits). `tcp://192.168.88.113:2375` is an
+unauthenticated, unencrypted Docker API: acceptable only on a trusted LAN. Run everything from the
+laptop checkout:
 
     DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build
 
@@ -106,10 +109,15 @@ service use the instance 100.x IP. `network_mode: host` is not recommended.
 ## Smoke checks
 
 1. `docker inspect -f '{{.State.Health.Status}}' vast-comfy-web` becomes `healthy`.
-2. `curl -sI https://gen.3dprintingbandung.my.id/api/state` returns 401 with a JSON body, NOT a redirect.
-3. The page shows the login button; logging in as an `authentik Admins` user shows the app.
-4. A user without a role group (if you temporarily unbind the policy to test) sees `access_denied`.
-5. `docker logs vast-comfy-web` shows no secret values and no "FAIL-CLOSED" line.
+2. `docker inspect -f '{{.HostConfig.PidsLimit}} {{.HostConfig.Memory}}' vast-comfy-web` prints
+   `128 268435456` (the pids and memory limits are applied).
+3. `curl -sI https://gen.3dprintingbandung.my.id/api/state` returns 401 with a JSON body, NOT a redirect.
+4. The page shows the login button; logging in as an `authentik Admins` user shows the app.
+5. A user in neither role group is stopped by Authentik's own denial page and never reaches the app,
+   because only the two groups are bound. The app's `access_denied` path is reachable only if the
+   policy binding is removed, which opens login to EVERY Authentik user: do that only briefly, or
+   test with a user in a third group that is bound to the application.
+6. `docker logs vast-comfy-web` shows no secret values and no "FAIL-CLOSED" line.
 
 ## Rollback
 
@@ -130,12 +138,15 @@ service use the instance 100.x IP. `network_mode: host` is not recommended.
 - Env keys: see `.env.example`. `COMFY_PORT` and `AGENT_PORT` are fixed (not sent to the
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_BOT_TOKEN`.
 
+## Already verified
+
+The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
+
 ## NOT verified yet
 
 - The `groups` claim in a real Authentik ID token (and RS256 signing).
 - The Cloudflare tunnel hostname `gen.` -> `192.168.88.113:3400`.
 - Container-to-tailnet reachability from the homelab host, and bare MagicDNS names resolving
   inside the container.
-- The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 - The image was built and smoke-tested locally only; never run against the real Authentik,
   Cloudflare or Tailscale.

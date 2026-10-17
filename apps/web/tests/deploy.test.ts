@@ -52,6 +52,12 @@ describe("deploy files", () => {
     expect(svc["security_opt"]).toContain("no-new-privileges:true");
     expect(svc["healthcheck"]).toBeDefined();
     expect(svc["networks"]).toBeUndefined();
+    expect(compose).not.toHaveProperty("networks");
+    expect(svc["pids_limit"]).toBe(128);
+    const limits = (svc["deploy"] as { resources: { limits: Record<string, unknown> } }).resources.limits;
+    expect(limits["memory"]).toBe("256M");
+    expect(limits["cpus"]).toBe("0.50");
+    expect(compose.volumes["vast-comfy-keys"]).toEqual({ external: true, name: "vast-comfy-keys" });
     const volumes = svc["volumes"] as string[];
     expect(volumes).toContain("vast-comfy-keys:/run/secrets:ro");
     // The daemon is remote: no host path may be bind-mounted.
