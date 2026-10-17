@@ -1,0 +1,79 @@
+# Deployment of the vast-comfy web service on the homelab Docker host.
+#
+# The Docker daemon is REMOTE. Deploy from the laptop (build context and ".env" are read on the
+# laptop; host paths in this file would resolve on the homelab, so none are used):
+#
+#   DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build
+#
+# The real ".env" is never committed; copy ".env.example" and fill it in. See
+# deploy/web/README.md for the full runbook.
+services:
+  vast-comfy-web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: vast-comfy-web:local
+    container_name: vast-comfy-web
+    restart: unless-stopped
+    # On "docker stop" the service drains for WEB_SHUTDOWN_WAIT_S (default 15 s) and a Destroy
+    # already in flight needs its Vast retry budget: 3 attempts (WEB_DESTROY_RETRIES) of up to
+    # 10 s each (HTTP_TIMEOUT_S_APPS) with 2 x 5 s backoff (WEB_DESTROY_BACKOFF_S) = 40 s.
+    # 15 + 40 = 55 s, so 60 s lets Docker wait instead of SIGKILLing the process in the middle
+    # of a destroy. Raise it if you raise any of those keys.
+    stop_grace_period: 60s
+    env_file: .env
+    environment:
+      # Paths inside the container (not secrets). The registry lives on the named volume.
+      REGISTRY_PATH: /data/registry.json
+      WEB_PORT: "3000"
+    # The only published port. The Cloudflare tunnel (and the LAN) reach the app here; the app
+    # enforces login itself (OIDC), so there is no proxy in front of it.
+    ports:
+      - "3400:3000"
+    volumes:
+      - vast-comfy-registry:/data
+      # Tailscale auth key (TS_AUTHKEY_FILE=/run/secrets/ts-authkey in .env). It lives on a named
+      # volume, NOT a host path, because the daemon is remote. Populate it once (see README).
+      - vast-comfy-keys:/run/secrets:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Default compose network. Authentik is reached through its public URL (code exchange and
+    # JWKS go out to AUTHENTIK_ISSUER), so no shared Authentik network is needed.
+    #
+    # Tailnet instances are reached THROUGH THE HOST: the host runs tailscaled and Docker's bridge
+    # NAT lets the container use the host's 100.64.0.0/10 routes. Bare MagicDNS names (vast-xxxx)
+    # may NOT resolve inside the container; UNVERIFIED until the first real boot. Check:
+    #   docker exec vast-comfy-web node -e "require('dns').lookup('vast-xxxx',console.log)"
+    # Fallback, only if that check fails (also UNVERIFIED): uncomment the lines below, or make the
+    # service use the instance 100.x IP.
+    # dns:
+    #   - 100.100.100.100
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+
+volumes:
+  vast-comfy-registry:
+  # Created and filled BEFORE the first "up" (README, step "Tailscale auth key"), under exactly
+  # this name. "external" makes compose use it as is (no project-name prefix) and fail loudly
+  # if it is missing.
+  vast-comfy-keys:
+    external: true
+    name: vast-comfy-keys

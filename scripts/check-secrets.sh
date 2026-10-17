@@ -8,7 +8,9 @@ staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
 
 blocked=$(printf '%s\n' "$staged_files" | grep -E \
   '(^|/)(\.env(\..*)?|\.npmrc|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|credentials.*\.json|secrets/.*)$|\.(key|pem|p12|pfx)$' \
+  | grep -vE '(^|/)\.env\.example$' \
   || true)
+# (.env.example holds key names and placeholders only; tests assert it has no secret values.)
 
 if [ -n "$blocked" ]; then
   echo "ERROR: config/secret files are staged:" >&2

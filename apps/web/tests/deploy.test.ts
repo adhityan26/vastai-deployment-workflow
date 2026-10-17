@@ -11,6 +11,7 @@ const schemaKeys = new Set(schema.keys.map((k) => k.name));
 // Names that are intentionally not config-schema keys.
 const NOT_SCHEMA = new Set<string>([
   "NODE_ENV", // Node runtime mode, set by the Dockerfile
+  "DOCKER_HOST", // Docker client variable used in README commands
 ]);
 const ENV_NAME = /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$|^NODE_ENV$/;
 
@@ -34,23 +35,68 @@ describe("deploy files", () => {
     }
   });
 
-  const compose = parse(read("deploy/web/compose.snippet.yml")) as {
+  const composeText = read("docker-compose.yml");
+  const compose = parse(composeText) as {
     services: Record<string, Record<string, unknown>>;
+    volumes: Record<string, unknown>;
   };
   const svc = Object.values(compose.services)[0] ?? {};
 
-  it("compose snippet uses only schema keys, has no ports and no literal secrets", () => {
-    expect(Object.keys(compose.services)).toHaveLength(1);
-    expect(svc).not.toHaveProperty("ports");
+  it("compose parses as YAML with one service, one published port and the hardening", () => {
+    expect(Object.keys(compose.services)).toEqual(["vast-comfy-web"]);
+    expect(svc["ports"]).toEqual(["3400:3000"]);
     expect(svc["env_file"]).toBe(".env");
     expect(svc["restart"]).toBe("unless-stopped");
     expect(svc["read_only"]).toBe(true);
+    expect(svc["cap_drop"]).toEqual(["ALL"]);
+    expect(svc["security_opt"]).toContain("no-new-privileges:true");
+    expect(svc["healthcheck"]).toBeDefined();
+    expect(svc["networks"]).toBeUndefined();
+    const volumes = svc["volumes"] as string[];
+    expect(volumes).toContain("vast-comfy-keys:/run/secrets:ro");
+    // The daemon is remote: no host path may be bind-mounted.
+    for (const v of volumes) expect(v.startsWith("/") || v.startsWith("."), v).toBe(false);
+    expect(Object.keys(compose.volumes)).toEqual(expect.arrayContaining(["vast-comfy-registry", "vast-comfy-keys"]));
+  });
+
+  it("env names in .env.example, compose and README all exist in the schema", () => {
+    const check = (names: string[], where: string) => {
+      for (const n of names) {
+        if (NOT_SCHEMA.has(n)) continue;
+        expect(schemaKeys.has(n), `${n} (${where}) is not in the schema`).toBe(true);
+      }
+    };
+    const example = read(".env.example")
+      .split("\n")
+      .map((l) => /^#?\s*([A-Z][A-Z0-9_]*)=/.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined);
+    expect(example).toEqual(expect.arrayContaining(["VAST_API_KEY", "AUTHENTIK_ISSUER", "WEB_SESSION_SECRET", "TS_AUTHKEY_FILE"]));
+    check(example, ".env.example");
     const env = (svc["environment"] ?? {}) as Record<string, string>;
-    for (const k of Object.keys(env)) expect(schemaKeys.has(k) || NOT_SCHEMA.has(k), k).toBe(true);
-    const text = read("deploy/web/compose.snippet.yml");
-    expect(text).not.toMatch(/^\s*ports:/m);
-    expect(text).not.toMatch(/(VAST_API_KEY|AUTHKEY|TOKEN|SECRET|PASSWORD)\s*[:=]\s*["']?[A-Za-z0-9]{8,}/);
-    for (const k of ["VAST_API_KEY", "DISCORD_BOT_TOKEN", "TS_API_CREDENTIAL"]) expect(env).not.toHaveProperty(k);
+    check(Object.keys(env), "compose environment");
+    for (const k of ["VAST_API_KEY", "DISCORD_BOT_TOKEN", "TS_API_CREDENTIAL", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"])
+      expect(env).not.toHaveProperty(k);
+  });
+
+  it("compose and .env.example carry no literal secrets", () => {
+    const secretLike = /\b[0-9a-f]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9])/;
+    for (const text of [composeText, read(".env.example")]) {
+      expect(text).not.toMatch(/tskey-|ghp_/);
+      expect(text).not.toMatch(secretLike);
+    }
+    const example = read(".env.example");
+    for (const name of ["VAST_API_KEY", "AUTHENTIK_CLIENT_ID", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"])
+      expect(example).toMatch(new RegExp(`^${name}=$`, "m"));
+    expect(example).toMatch(/^WEB_PUBLIC_URL=https:\/\/gen\.3dprintingbandung\.my\.id$/m);
+    expect(example).toMatch(/^TS_AUTHKEY_FILE=\/run\/secrets\/ts-authkey$/m);
+  });
+
+  it("README documents the redirect URI and the issuer trailing slash", () => {
+    const readme = read("deploy/web/README.md");
+    expect(readme).toContain("https://gen.3dprintingbandung.my.id/auth/callback");
+    expect(readme).toMatch(/trailing slash/);
+    expect(readme).toContain("192.168.88.113:3400");
+    expect(readme).not.toContain("compose.snippet");
   });
 
   it("Dockerfile runs as non-root after the last install and has a HEALTHCHECK", () => {

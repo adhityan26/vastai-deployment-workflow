@@ -1,6 +1,7 @@
 # secrets and local config: never commit
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 secrets/
@@ -18,3 +19,6 @@ dist/
 # generated page bundle
 apps/web/public/app.js
 apps/web/public/app.js.map
+
+# macOS
+.DS_Store
