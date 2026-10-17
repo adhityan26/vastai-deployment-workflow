@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AppsConfig } from "../src/config.js";
-import { DestroyError, VastClient, VastError, offerFiltersFromConfig, type CreateRequest } from "../src/vast.js";
+import { CreateRejected, DestroyError, VastClient, VastError, offerFiltersFromConfig, type CreateRequest } from "../src/vast.js";
 
 const KEY = "k".repeat(40) + "SECRET";
 
@@ -112,6 +112,32 @@ describe("VastClient", () => {
     const { client } = await fake((_r, res) => json(res, 200, { success: false, msg: "no longer available" }));
     await expect(client.createInstance(1, { ...request, env: { "-p 80:80": "1" } })).rejects.toThrow(VastError);
     await expect(client.createInstance(1, request)).rejects.toThrow(/no longer available/);
+  });
+
+  it("create classifies definite refusals apart from ambiguous failures", async () => {
+    let status = 400;
+    let body: unknown = { msg: "bad request" };
+    const { client } = await fake((_r, res) => json(res, status, body));
+    // Definite: nothing was created.
+    await expect(client.createInstance(1, request)).rejects.toBeInstanceOf(CreateRejected);
+    status = 200;
+    body = { success: false, msg: "no longer available" };
+    await expect(client.createInstance(1, request)).rejects.toBeInstanceOf(CreateRejected);
+    await expect(client.createInstance(0, request)).rejects.toBeInstanceOf(CreateRejected);
+    // Ambiguous: the instance may exist.
+    for ([status, body] of [
+      [500, { msg: "oops" }],
+      [502, "bad gateway"],
+      [200, { success: true }],
+    ] as [number, unknown][]) {
+      const err = (await client.createInstance(1, request).catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(VastError);
+      expect(err).not.toBeInstanceOf(CreateRejected);
+    }
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("socket hang up")));
+    const err = (await client.createInstance(1, request).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(VastError);
+    expect(err).not.toBeInstanceOf(CreateRejected);
   });
 
   it("list returns instances across pages", async () => {

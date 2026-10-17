@@ -29,6 +29,18 @@ export class DestroyError extends VastError {
   }
 }
 
+/**
+ * Vast definitely did not create an instance: the request was refused before sending, or Vast
+ * answered 4xx or 2xx with success:false. Every other create failure (timeout, network error,
+ * 5xx, a 2xx without an id) is ambiguous: the instance may exist.
+ */
+export class CreateRejected extends VastError {
+  constructor(message: string) {
+    super(message);
+    this.name = "CreateRejected";
+  }
+}
+
 export interface OfferFilters {
   minVramGb: number;
   maxDph: number;
@@ -203,10 +215,10 @@ export class VastClient {
   }
 
   async createInstance(offerId: number, req: CreateRequest): Promise<{ id: number }> {
-    if (!Number.isInteger(offerId) || offerId <= 0) throw new VastError("offer id must be a positive integer");
+    if (!Number.isInteger(offerId) || offerId <= 0) throw new CreateRejected("offer id must be a positive integer");
     for (const name of Object.keys(req.env)) {
       // Vast reads "-p ..." style env keys as port mappings; the contract maps none.
-      if (name.startsWith("-") || name === "") throw new VastError("env keys must be plain variable names");
+      if (name.startsWith("-") || name === "") throw new CreateRejected("env keys must be plain variable names");
     }
     const payload = {
       client_id: "me",
@@ -219,6 +231,11 @@ export class VastClient {
       cancel_unavail: true, // fail instead of creating a stopped instance when scheduling fails
     };
     const reply = await this.send("PUT", this.url(`asks/${offerId}/`), payload);
+    const body = reply.json as Record<string, unknown> | null;
+    const refused =
+      (reply.status >= 400 && reply.status < 500) ||
+      (reply.status >= 200 && reply.status < 300 && body !== null && typeof body === "object" && body["success"] === false);
+    if (refused) throw new CreateRejected(`create instance was refused (HTTP ${reply.status}): ${this.describe(reply)}`);
     this.failIfNotOk("create instance", reply);
     const id = (reply.json as { new_contract?: unknown } | null)?.new_contract;
     if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) {

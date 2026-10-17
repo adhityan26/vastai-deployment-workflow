@@ -113,3 +113,6 @@ keys:
   - {name: GENERATE_TIMEOUT_S, components: [apps], type: int, secret: false, required: false, default: 600, min: 1, description: "Seconds before a generation is given up"}
   - {name: HTTP_TIMEOUT_S_APPS, components: [apps], type: int, secret: false, required: false, default: 10, min: 1, description: "Timeout of outbound HTTP calls from the web process"}
   - {name: START_RATE_LIMIT_PER_HOUR, components: [apps], type: int, secret: false, required: false, default: 3, min: 1, description: "Maximum Start requests per hour"}
+  - {name: RECONCILE_GRACE_MIN, components: [apps], type: int, secret: false, required: false, default: 10, min: 1, description: "Minutes after a record is created during which reconcile leaves it alone when Vast does not (yet) list its instance; after that a creating record without an instance, or a record whose instance vanished, becomes gone"}
+  - {name: WEB_DESTROY_RETRIES, components: [apps], type: int, secret: false, required: false, default: 3, min: 1, description: "Vast destroy attempts per web destroy or reconcile cycle before reporting destroy_failed"}
+  - {name: WEB_DESTROY_BACKOFF_S, components: [apps], type: int, secret: false, required: false, default: 5, min: 0, description: "Seconds between Vast destroy attempts made by the web process"}
