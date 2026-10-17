@@ -1,0 +1,14 @@
+{
+  "name": "vast-comfy",
+  "private": true,
+  "workspaces": ["apps/core", "apps/web"],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p apps/core --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
