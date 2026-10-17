@@ -1,7 +1,7 @@
 # S1: Image ComfyUI bawaan Vast
 
 - Date: 2026-10-17
-- Instance: (1) template resmi ComfyUI (id 264313, image `vastai/comfy`, tag otomatis `v0.41.0-cuda-12.9-py312`), RTX 3060 12 GB Korea, $0,091/jam; (2) `vastai/comfy:v0.41.0-cuda-12.9-py312` dibuat sendiri tanpa `-p`, GTX/RTX murah (offer 25225034). Keduanya dihancurkan: ya. Biaya akhir S1: **~$0,05** (kredit $4,9902 → $4,9383, termasuk S4-fix tidak ada biaya).
+- Instance: (1) template resmi ComfyUI (id 264313, image `vastai/comfy`, tag otomatis `v0.41.0-cuda-12.9-py312`), RTX 3060 12 GB Korea, $0,091/jam; (2) `vastai/comfy:v0.41.0-cuda-12.9-py312` dibuat sendiri tanpa `-p`, GTX/RTX murah (offer 25225034). Keduanya dihancurkan: ya. Biaya akhir S1: **~$0,05** (kredit $4,9834 → $4,9374, kedua instance).
 - Spec sections affected: 5.1, 5.3 (langkah 3-9), 9, 14 (default path/port/binary), 16, 17 (pertanyaan terbuka onstart)
 
 ## Question
