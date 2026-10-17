@@ -94,6 +94,12 @@ keys:
   - {name: AUTHENTIK_JWKS_URL, components: [apps], type: str, secret: false, required: false, default: "", description: "Authentik JWKS URL used to verify identity tokens"}
   - {name: AUTHENTIK_ISSUER, components: [apps], type: str, secret: false, required: false, default: "", description: "Expected issuer of the Authentik identity token"}
   - {name: AUTHENTIK_AUDIENCE, components: [apps], type: str, secret: false, required: false, default: "", description: "Expected audience of the Authentik identity token"}
+  - {name: AUTHENTIK_CLIENT_ID, components: [apps], type: str, secret: false, required: false, default: "", description: "OIDC client id of the web app's Authentik provider; also the required audience of its ID tokens"}
+  - {name: AUTHENTIK_CLIENT_SECRET, components: [apps], type: str, secret: true, required: false, default: "", description: "OIDC client secret of the web app's Authentik provider, used only for the server-side code exchange"}
+  - {name: WEB_PUBLIC_URL, components: [apps], type: str, secret: false, required: false, default: "", description: "Public origin of the web app (https, or http only for localhost/127.0.0.1); the OIDC redirect_uri is this origin plus /auth/callback"}
+  - {name: WEB_SESSION_SECRET, components: [apps], type: str, secret: true, required: false, default: "", description: "Key (at least 32 bytes) that signs the session and login-transaction cookies"}
+  - {name: WEB_SESSION_TTL_H, components: [apps], type: int, secret: false, required: false, default: 8, min: 1, max: 168, description: "Hours a login session cookie stays valid"}
+  - {name: WEB_OIDC_SKEW_S, components: [apps], type: int, secret: false, required: false, default: 0, min: 0, max: 120, description: "Clock skew in seconds tolerated when checking ID token times"}
   - {name: REGISTRY_PATH, components: [apps], type: str, secret: false, required: false, default: "registry.json", description: "File that holds the single active instance record"}
   - {name: VAST_IMAGE, components: [apps], type: str, secret: false, required: false, default: "vastai/comfy:v0.41.0-cuda-12.9-py312", description: "Docker image rented on Vast"}
   - {name: VAST_DISK_GB, components: [apps], type: int, secret: false, required: false, default: 50, min: 1, description: "Disk size in GB requested for the instance"}
