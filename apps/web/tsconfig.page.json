@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist-page", "rootDir": ".", "noEmit": true, "lib": ["ES2023", "DOM", "DOM.Iterable"], "types": ["node"] },
+  "include": ["public", "tests/page"]
+}

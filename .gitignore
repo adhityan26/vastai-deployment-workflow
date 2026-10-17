@@ -14,3 +14,7 @@ dist/
 .worktrees/
 .superpowers/
 *.egg-info/
+
+# generated page bundle
+apps/web/public/app.js
+apps/web/public/app.js.map

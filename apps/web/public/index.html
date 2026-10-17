@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Image generator</title>
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Generator">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Image generator</h1>
+    <span id="role" class="chip" hidden></span>
+  </header>
+
+  <div id="banner" class="alert bad" role="alert" hidden></div>
+  <div id="notice" class="alert ok" role="status" hidden></div>
+
+  <section class="card" aria-labelledby="status-title">
+    <h2 id="status-title">Status</h2>
+    <p id="state-line" class="state" aria-live="polite" data-tone="idle">Loading</p>
+    <div id="progress-box" hidden>
+      <progress id="progress" max="100" value="0" aria-label="Download progress"></progress>
+      <p id="progress-file" class="muted"></p>
+    </div>
+    <div id="alert-agent" class="alert warn" role="alert" hidden>
+      The instance is running but the agent cannot be reached. It may be starting up or broken.
+    </div>
+    <div id="alert-failed" class="alert bad" role="alert" hidden>
+      <strong>Failed.</strong> <span id="failed-reason"></span>
+    </div>
+    <div id="alert-destroy-failed" class="alert bad" role="alert" hidden>
+      <strong>Could not destroy the instance.</strong> It may still be running and costing money.
+      <span id="destroy-failed-error"></span>
+    </div>
+    <dl class="facts">
+      <div><dt>Uptime</dt><dd id="f-uptime">&mdash;</dd></div>
+      <div><dt>Cost so far</dt><dd id="f-cost">&mdash;</dd></div>
+      <div><dt>Price</dt><dd id="f-price">&mdash;</dd></div>
+      <div><dt>Idle shutdown in</dt><dd id="f-idle">&mdash;</dd></div>
+      <div><dt>Failsafe in</dt><dd id="f-failsafe">&mdash;</dd></div>
+      <div><dt>Hard cap in</dt><dd id="f-hardcap">&mdash;</dd></div>
+      <div><dt>Queue</dt><dd id="f-queue">&mdash;</dd></div>
+      <div><dt>VRAM</dt><dd id="f-vram">&mdash;</dd></div>
+    </dl>
+  </section>
+
+  <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>
+
+  <section class="card" aria-labelledby="gen-title">
+    <h2 id="gen-title">Generate</h2>
+    <p id="gen-hint" class="muted" role="status"></p>
+    <form id="gen-form" novalidate>
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
+      <p id="prompt-count" class="muted">0 characters</p>
+
+      <fieldset>
+        <legend>Quality</legend>
+        <div id="presets" class="seg"></div>
+      </fieldset>
+
+      <label for="size">Size</label>
+      <select id="size" name="size"></select>
+
+      <label for="seed">Seed (optional)</label>
+      <input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="random">
+
+      <p id="form-error" class="alert bad" role="alert" hidden></p>
+      <button id="btn-generate" type="submit" class="primary" disabled>Generate</button>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="hist-title">
+    <h2 id="hist-title">Results</h2>
+    <p id="hist-empty" class="muted">Nothing yet. Results stay here until you reload the page.</p>
+    <div id="history"></div>
+  </section>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title"></h2>
+    <div id="modal-body"></div>
+    <div class="row">
+      <button id="modal-cancel" type="button">Cancel</button>
+      <button id="modal-ok" type="button" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

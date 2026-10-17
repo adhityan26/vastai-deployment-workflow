@@ -1,10 +1,13 @@
 {
   "name": "vast-comfy",
   "private": true,
-  "workspaces": ["apps/core", "apps/web"],
+  "workspaces": [
+    "apps/core",
+    "apps/web"
+  ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p apps/core --noEmit && tsc -p apps/web --noEmit"
+    "typecheck": "tsc -p apps/core --noEmit && npm run typecheck -w @vast-comfy/web"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
