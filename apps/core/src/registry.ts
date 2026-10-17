@@ -74,6 +74,16 @@ export class Registry {
     return record as InstanceRecord;
   }
 
+  // Cross-record rules, shared by load and save so we never write a file the loader refuses.
+  private invariants(records: InstanceRecord[]): void {
+    const seen = new Set<string>();
+    for (const r of records) {
+      if (seen.has(r.tailnet_hostname)) throw new Error(`duplicate hostname ${r.tailnet_hostname}`);
+      seen.add(r.tailnet_hostname);
+    }
+    if (records.filter((r) => r.status !== "gone").length > 1) throw new Error("more than one non-gone record");
+  }
+
   private load(): InstanceRecord[] {
     if (!existsSync(this.filePath)) return [];
     let data: unknown;
@@ -83,7 +93,6 @@ export class Registry {
       throw new RegistryCorruptError((err as Error).message);
     }
     if (!Array.isArray(data)) throw new RegistryCorruptError("top level is not a list");
-    const seen = new Set<string>();
     const records = data.map((item) => {
       try {
         return this.check(item);
@@ -91,18 +100,23 @@ export class Registry {
         throw new RegistryCorruptError((err as Error).message);
       }
     });
-    for (const r of records) {
-      if (seen.has(r.tailnet_hostname)) throw new RegistryCorruptError(`duplicate hostname ${r.tailnet_hostname}`);
-      seen.add(r.tailnet_hostname);
-    }
-    if (records.filter((r) => r.status !== "gone").length > 1) {
-      throw new RegistryCorruptError("more than one non-gone record");
+    try {
+      this.invariants(records);
+    } catch (err) {
+      throw new RegistryCorruptError((err as Error).message);
     }
     return records;
   }
 
   private save(records: InstanceRecord[]): void {
     records.forEach((r) => this.check(r));
+    try {
+      this.invariants(records);
+    } catch (err) {
+      throw new RegistryValidationError((err as Error).message);
+    }
+    // Atomic against process crashes (temp file + rename). No fsync of the temp file or the
+    // directory, so this is not durable across power loss.
     const dir = dirname(this.filePath);
     mkdirSync(dir, { recursive: true });
     const tmp = join(dir, `.${basename(this.filePath)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -145,12 +159,16 @@ export class Registry {
     });
   }
 
-  update(hostname: string, patch: Partial<InstanceRecord>): Promise<InstanceRecord> {
+  update(hostname: string, patch: Partial<Omit<InstanceRecord, "tailnet_hostname">>): Promise<InstanceRecord> {
     return this.serial(() => {
       const records = this.load();
       const index = records.findIndex((r) => r.tailnet_hostname === hostname);
       const current = records[index];
       if (current === undefined) throw new RecordNotFoundError(hostname);
+      if ("tailnet_hostname" in patch) throw new RegistryValidationError("tailnet_hostname cannot be changed");
+      if (current.status === "gone" && patch.status !== undefined && patch.status !== "gone") {
+        throw new RegistryValidationError("a gone record cannot be revived");
+      }
       const next = this.check({ ...current, ...patch });
       records[index] = next;
       this.save(records);

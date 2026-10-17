@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -45,6 +45,9 @@ describe("Registry", () => {
     const { reg } = fresh();
     const results = await Promise.allSettled([1, 2, 3, 4, 5].map((i) => reg.begin(rec(`h${i}`))));
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(rejected).toHaveLength(4);
+    for (const r of rejected) expect((r as PromiseRejectedResult).reason).toBeInstanceOf(AlreadyActiveError);
     expect(await reg.all()).toHaveLength(1);
   });
 
@@ -106,5 +109,31 @@ describe("Registry", () => {
   it("update of an unknown hostname fails", async () => {
     const { reg } = fresh();
     await expect(reg.update("nope", { status: "ready" })).rejects.toThrow(/no registry record/);
+  });
+
+  it("rejects reviving a gone record and a hostname change, leaving the file untouched", async () => {
+    const { reg, file } = fresh();
+    await reg.begin(rec("old"));
+    await reg.markGone("old");
+    await reg.begin(rec("cur"));
+    const before = readFileSync(file, "utf8");
+    await expect(reg.update("old", { status: "booting", vast_instance_id: 5 })).rejects.toBeInstanceOf(RegistryValidationError);
+    await expect(reg.update("cur", { tailnet_hostname: "old" } as never)).rejects.toBeInstanceOf(RegistryValidationError);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(await reg.all()).toHaveLength(2);
+  });
+
+  it("a failed write leaves no temp file and the original untouched", async () => {
+    const { reg, file, dir } = fresh();
+    await reg.begin(rec("a"));
+    const before = readFileSync(file, "utf8");
+    chmodSync(dir, 0o500);
+    try {
+      await expect(reg.update("a", { vast_instance_id: 1, status: "booting" })).rejects.toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(readdirSync(dir)).toEqual(["registry.json"]);
+    expect(readFileSync(file, "utf8")).toBe(before);
   });
 });
