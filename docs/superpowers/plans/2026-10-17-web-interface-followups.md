@@ -7,7 +7,7 @@ Triage from the final whole-branch review (2026-10-17). Everything here is CAN-W
 - Vast accepting `:` in the label `vastcomfy:<hostname>`; read the label back after create. If Vast rewrites it, an ambiguous create becomes invisible to reconcile.
 - The v1 `/instances/` response shape (`start_date` present, units) and pagination.
 - Container-to-tailnet reachability and single-label MagicDNS names (`vast-xxxx`) from the web container.
-- Authentik outpost: `X-authentik-jwt` header, `groups` claim, and the JWKS/issuer/audience values.
+- Authentik: the proxy-outpost JWT header path was replaced by in-app OIDC login (docs/superpowers/plans/2026-10-18-oidc-login.md); verify the `groups` claim in the ID token, the issuer value and the client id/secret at the first real login.
 
 ## From the first real boot (docs/spikes/T13-boot-end-to-end.md)
 - Re-measure /view download speed from the homelab (the laptop was saturated during the test); keep `WEB_CONNECTION_TIMEOUT_S` larger than `WEB_IMAGE_TIMEOUT_S`.

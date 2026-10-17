@@ -201,6 +201,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     return active !== null && active.tailnet_hostname === job.hostname;
   };
 
+  // Who is signed in: display fields and the role only (no subject, email or group list).
+  app.get("/api/me", member, async (req) => ({
+    name: req.identity?.name ?? null,
+    username: req.identity?.username ?? "",
+    role: req.role,
+  }));
+
   app.get("/api/state", member, async (req) => {
     const view = await deps.lifecycle.view();
     const isAdmin = req.role === "admin";

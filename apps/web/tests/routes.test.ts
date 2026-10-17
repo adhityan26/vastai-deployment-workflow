@@ -1,12 +1,12 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWK } from "jose";
-import type { FastifyInstance } from "fastify";
+import { decodeJwt } from "jose";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import {
   AgentClient,
   ComfyClient,
@@ -20,8 +20,12 @@ import {
   type Offer,
   type VastInstance,
 } from "@vast-comfy/core";
-import { createAuth } from "../src/auth.js";
+import { createAuthStack } from "../src/auth.js";
+import { LOGIN_ERROR_CODES } from "../src/auth-routes.js";
+import { SESSION_COOKIE, TRANSACTION_COOKIE, cookieNames, type Sessions } from "../src/session.js";
+import type { OidcIdentity } from "../src/oidc.js";
 import { buildServer, registeredRoutes } from "../src/server.js";
+import { CLIENT_ID, CLIENT_SECRET, startFakeIdp, type FakeIdp } from "./fake-idp.js";
 
 const repo = (p: string) => fileURLToPath(new URL(`../../../${p}`, import.meta.url));
 const REGISTRY_SCHEMA = repo("contracts/instance-registry.schema.json");
@@ -30,9 +34,9 @@ const OPENAPI = repo("contracts/web.openapi.json");
 const profile = loadProfile(repo("instance/profiles/image.yaml"));
 const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.generate.workflow}`), "utf8"));
 
-const ISSUER = "https://sso.example.test/application/o/vast/"; // config-lint: ok (test fixture)
-const AUDIENCE = "vast-web";
-const KID = "k1";
+const PUBLIC_ORIGIN = "https://comfy.example.test"; // config-lint: ok (test fixture)
+const SESSION_SECRET = "test-session-secret-0123456789abcdef";
+const NAMES = cookieNames(true);
 const ADMIN_GROUP = "authentik Admins";
 const MEMBER_GROUP = "member";
 
@@ -44,28 +48,75 @@ const VAST_ID = 900;
 const NOW_S = 1_800_000_000;
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("UNIQUE-IMAGE-MARKER-7f3a")]);
 
-let signing: CryptoKey;
-let resolver: ReturnType<typeof createLocalJWKSet>;
+let idp: FakeIdp;
+/** Every ID token the fake IdP minted in this file (they must never leave the server). */
+const mintedTokens: string[] = [];
 
 beforeAll(async () => {
-  const pair = await generateKeyPair("RS256");
-  signing = pair.privateKey;
-  const jwk: JWK = { ...(await exportJWK(pair.publicKey)), kid: KID, alg: "RS256", use: "sig" };
-  resolver = createLocalJWKSet({ keys: [jwk] });
+  idp = await startFakeIdp();
 });
 
-async function jwt(sub: string, groups: string[]): Promise<string> {
-  return new SignJWT({ groups, preferred_username: sub })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
-    .setIssuer(ISSUER)
-    .setAudience(AUDIENCE)
-    .setSubject(sub)
-    .setExpirationTime("5m")
-    .sign(signing);
+afterAll(async () => {
+  await idp.close();
+});
+
+// ---- login through the fake IdP (the real /auth/login and /auth/callback routes) ----
+
+type Res = LightMyRequestResponse;
+
+function setCookies(res: Res): string[] {
+  const v = res.headers["set-cookie"];
+  return v === undefined ? [] : [v].flat().map(String);
 }
-const as = async (sub: string, groups: string[]) => ({ "x-authentik-jwt": await jwt(sub, groups) });
+/** "name=value" of a Set-Cookie line. */
+const pairOf = (line: string) => line.split(";")[0]!;
+/** The session cookie a response sets (not a clearing one), or undefined. */
+const sessionSet = (res: Res) => setCookies(res).find((c) => c.startsWith(`${NAMES.session}=`) && !c.startsWith(`${NAMES.session}=;`));
+
+interface Flow { start: Res; cb: Res; tx: string; code: string; state: string }
+
+/** Browser round trip: /auth/login -> (IdP) -> /auth/callback. `edit` may tamper with the callback. */
+async function loginFlow(
+  groups: string[],
+  opts: { sub?: string; next?: string; claims?: Record<string, unknown>; edit?: (q: { code: string; state: string; cookie: string }) => { query: string; cookie?: string } } = {},
+): Promise<Flow> {
+  const sub = opts.sub ?? "user-1";
+  const next = opts.next === undefined ? "" : `?next=${encodeURIComponent(opts.next)}`;
+  const start = await h.app.inject({ method: "GET", url: `/auth/login${next}` });
+  expect(start.statusCode).toBe(302);
+  const tx = pairOf(setCookies(start)[0] ?? "");
+  const { code, state } = idp.authorize(String(start.headers.location), {}, {
+    idToken: async (nonce) => {
+      const t = await idp.mint({ nonce, sub, claims: { groups, preferred_username: sub, ...(opts.claims ?? {}) } });
+      mintedTokens.push(t);
+      return t;
+    },
+  });
+  const edited = opts.edit?.({ code, state, cookie: tx });
+  const query = edited?.query ?? `code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+  const cookie = edited ? edited.cookie : tx;
+  const cb = await h.app.inject({ method: "GET", url: `/auth/callback?${query}`, headers: cookie === undefined ? {} : { cookie } });
+  return { start, cb, tx, code, state };
+}
+
+type Creds = { cookie: string; origin: string };
+
+/** Log in and return the headers a same-origin page request would carry. */
+async function loginAs(groups: string[], sub = "user-1"): Promise<Creds> {
+  const { cb } = await loginFlow(groups, { sub });
+  const session = sessionSet(cb);
+  if (session === undefined) throw new Error(`login failed: ${String(cb.headers.location)}`);
+  return { cookie: pairOf(session), origin: PUBLIC_ORIGIN };
+}
+const as = (sub: string, groups: string[]) => loginAs(groups, sub);
 const admin = () => as("root", [ADMIN_GROUP]);
 const member = (sub = "ayu") => as(sub, [MEMBER_GROUP]);
+
+/** A session cookie minted directly (for identities the login refuses, e.g. role none). */
+async function cookieOf(groups: string[], sub = "user-1"): Promise<Creds> {
+  const identity: OidcIdentity = { subject: sub, username: sub, name: null, email: null, groups };
+  return { cookie: `${NAMES.session}=${await h.sessions!.issue(identity)}`, origin: PUBLIC_ORIGIN };
+}
 
 // ---- fake HTTP servers (agent and ComfyUI) ----
 
@@ -142,6 +193,8 @@ interface Harness {
   setAgent(h: Handler): void;
   setComfy(h: Handler): void;
   clock: { ms: number };
+  sessions: Sessions | null;
+  logs: string[];
 }
 
 let h: Harness;
@@ -160,9 +213,13 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
   const publicDir = join(dir, "public");
   mkdirSync(publicDir);
   const cfg = {
-    authentikJwksUrl: "https://sso.example.test/jwks/", // config-lint: ok (test fixture)
-    authentikIssuer: ISSUER,
-    authentikAudience: AUDIENCE,
+    authentikIssuer: idp.issuer,
+    authentikClientId: CLIENT_ID,
+    authentikClientSecret: CLIENT_SECRET,
+    webPublicUrl: PUBLIC_ORIGIN,
+    webSessionSecret: SESSION_SECRET,
+    webSessionTtlH: 8,
+    webOidcSkewS: 0,
     webAdminGroup: ADMIN_GROUP,
     webMemberGroup: MEMBER_GROUP,
     vastApiKey: VAST_KEY,
@@ -202,7 +259,7 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     webJobTtlS: 3600,
     webExtendMaxMinutes: 120,
     webGenerateRateLimitPerHour: 50,
-    secretNames: ["VAST_API_KEY"],
+    secretNames: ["VAST_API_KEY", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...opts.cfg,
   } as unknown as AppsConfig;
 
@@ -226,23 +283,26 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     await registry.update(HOST, { status: "ready", vast_instance_id: VAST_ID, vast_start_date: NOW_S });
     vast.instances.push({ id: VAST_ID, label: `vastcomfy:${HOST}`, actual_status: "running", start_date: NOW_S, dph_total: 0.3 });
   }
-  const auth = createAuth(cfg, resolver, { onMisconfigured: () => undefined });
+  const logs: string[] = [];
+  const { auth, oidc, sessions } = createAuthStack(cfg, { onMisconfigured: (m) => logs.push(`error ${m}`), now: () => clock.ms });
   const app = buildServer({
     cfg,
     auth,
+    login: { configured: auth.configured, oidc, sessions },
     lifecycle,
     registry,
     comfyFor: () => new ComfyClient("127.0.0.1", cfg),
     profile,
     template,
     publicDir,
-    secrets: () => [VAST_KEY, AUTH_KEY],
+    secrets: () => [VAST_KEY, AUTH_KEY, CLIENT_SECRET, SESSION_SECRET],
     now: () => clock.ms,
+    log: (level, message) => void logs.push(`${level} ${message}`),
   });
   apps.push(app);
   await app.ready();
   return {
-    app, vast, registry, dir, publicDir, clock,
+    app, vast, registry, dir, publicDir, clock, sessions, logs,
     agentSeen: agent.seen,
     comfySeen: comfy.seen,
     setAgent: (fn) => (agentHandler = fn),
@@ -300,11 +360,25 @@ describe("auth gate", () => {
     expect((await call("GET", "/API/state")).statusCode).toBe(401);
   });
 
-  it("401 for forged plain identity headers and for a user outside both groups (403)", async () => {
+  it("401 for forged identity headers (including a valid IdP JWT in the old X-authentik-jwt header)", async () => {
     const forged = await call("GET", "/api/state", { "x-authentik-username": "root", "x-authentik-groups": ADMIN_GROUP });
     expect(forged.statusCode).toBe(401);
-    const outsider = await call("GET", "/api/state", await as("eve", ["authentik Read-only"]));
-    expect(outsider.statusCode).toBe(403);
+    const jwt = await idp.mint({ claims: { groups: [ADMIN_GROUP] } });
+    const attempts: Record<string, string>[] = [{ "x-authentik-jwt": jwt }, { authorization: `Bearer ${jwt}` }, { cookie: `${NAMES.session}=${jwt}` }];
+    for (const headers of attempts) {
+      expect((await call("GET", "/api/state", headers)).statusCode).toBe(401);
+    }
+  });
+
+  it("403 on every /api route for a session whose groups map to role none", async () => {
+    const outsider = await cookieOf(["authentik Read-only"], "eve");
+    for (const r of registeredRoutes(h.app).filter((x) => x.url.startsWith("/api/"))) {
+      const url = r.url.replace(":id", "p-1").replace(":index", "0");
+      const res = await call(r.method as Method, url, outsider, r.method === "POST" ? {} : undefined);
+      expect(res.statusCode, `${r.method} ${r.url}`).toBe(403);
+      expect(res.json().error.code).toBe("forbidden");
+    }
+    expect(h.vast.creates).toBe(0);
   });
 
   it("403 for a member on start, estimate, destroy, extend and destroy-unknown", async () => {
@@ -698,6 +772,337 @@ describe("generate", () => {
   });
 });
 
+// ---- login, sessions, logout and CSRF ----
+
+const location = (res: Res) => String(res.headers.location ?? "");
+const loginError = (res: Res) => new URL(location(res), PUBLIC_ORIGIN).searchParams.get("login_error");
+
+describe("login flow", () => {
+  it("login -> callback -> cookie -> /api/state 200 with role; /api/me shows only name, username and role", async () => {
+    expect((await call("GET", "/api/state")).statusCode).toBe(401);
+    const { start, cb } = await loginFlow([ADMIN_GROUP, "staff"], { sub: "root", claims: { name: "Root User" } });
+    // /auth/login: a redirect to the IdP's authorize endpoint and a short-lived transaction cookie
+    expect(location(start).startsWith(`${idp.base}/application/o/authorize/?`)).toBe(true);
+    expect(new URL(location(start)).searchParams.get("redirect_uri")).toBe(`${PUBLIC_ORIGIN}/auth/callback`);
+    const txSet = setCookies(start);
+    expect(txSet).toHaveLength(1);
+    expect(txSet[0]!.startsWith(`${NAMES.transaction}=`)).toBe(true);
+    expect(txSet[0]!.split("; ")).toEqual(expect.arrayContaining(["HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=600"]));
+    expect(start.headers["cache-control"]).toBe("no-store");
+    expect(start.headers["referrer-policy"]).toBe("no-referrer");
+    // /auth/callback: session cookie set, transaction cookie cleared, back to "/"
+    expect(cb.statusCode).toBe(302);
+    expect(location(cb)).toBe("/");
+    expect(cb.headers["cache-control"]).toBe("no-store");
+    const session = sessionSet(cb)!;
+    expect(session.split("; ")).toEqual(expect.arrayContaining(["HttpOnly", "Secure", "SameSite=Lax", "Path=/", `Max-Age=${8 * 3600}`]));
+    expect(session).not.toMatch(/Domain=/i);
+    expect(setCookies(cb)).toContainEqual(expect.stringMatching(new RegExp(`^${NAMES.transaction}=; .*Max-Age=0`)));
+    // Only the groups that map to a role are stored in the cookie.
+    expect(decodeJwt(pairOf(session).split("=")[1]!).groups).toEqual([ADMIN_GROUP]);
+    const headers = { cookie: pairOf(session) };
+    const state = await call("GET", "/api/state", headers);
+    expect(state.statusCode).toBe(200);
+    expect(state.json().role).toBe("admin");
+    const me = await call("GET", "/api/me", headers);
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toEqual({ name: "Root User", username: "root", role: "admin" });
+    expect(h.logs).toContain("info login ok");
+  });
+
+  it("a member logs in too; a huge group list is filtered to the role groups", async () => {
+    const many = Array.from({ length: 400 }, (_, i) => `group-with-a-long-name-${i}`);
+    const { cb } = await loginFlow([...many, MEMBER_GROUP], { sub: "ayu" });
+    expect(location(cb)).toBe("/");
+    const me = await call("GET", "/api/me", { cookie: pairOf(sessionSet(cb)!) });
+    expect(me.json()).toEqual({ name: "Ayu", username: "ayu", role: "member" });
+  });
+
+  it("a user whose groups map to no role is refused at the callback with access_denied and gets no session", async () => {
+    const { cb } = await loginFlow(["authentik Read-only"]);
+    expect(location(cb)).toBe("/?login_error=access_denied");
+    expect(sessionSet(cb)).toBeUndefined();
+    expect(h.logs).toContain("warn login failed: access_denied");
+  });
+
+  it("an over-size session is a clean session_too_large redirect with no cookie", async () => {
+    const { cb } = await loginFlow([MEMBER_GROUP], { claims: { name: "n".repeat(4000) } });
+    expect(cb.statusCode).toBe(302);
+    expect(location(cb)).toBe("/?login_error=session_too_large");
+    expect(sessionSet(cb)).toBeUndefined();
+  });
+
+  it("callback with wrong or missing state redirects with login_error and sets NO session cookie", async () => {
+    idp.tokenRequests.length = 0;
+    const tries: Array<(q: { code: string; state: string; cookie: string }) => { query: string; cookie?: string }> = [
+      (q) => ({ query: `code=${q.code}&state=${q.state}x`, cookie: q.cookie }),
+      (q) => ({ query: `code=${q.code}`, cookie: q.cookie }),
+      (q) => ({ query: `code=${q.code}&state=`, cookie: q.cookie }),
+      (q) => ({ query: `code=${q.code}&state=${q.state}&state=${q.state}`, cookie: q.cookie }),
+      (q) => ({ query: `code=${q.code}&state=${q.state}` }), // no transaction cookie
+    ];
+    for (const edit of tries) {
+      const { cb } = await loginFlow([ADMIN_GROUP], { edit });
+      expect(cb.statusCode).toBe(302);
+      expect(loginError(cb)).toBe("state_mismatch");
+      expect(sessionSet(cb)).toBeUndefined();
+      expect(setCookies(cb)).toEqual([expect.stringMatching(new RegExp(`^${NAMES.transaction}=; `))]);
+      expect(location(cb)).toBe("/?login_error=state_mismatch");
+    }
+    expect(idp.tokenRequests).toHaveLength(0); // nothing was exchanged
+  });
+
+  it("maps a provider error param (after a valid state) without echoing it", async () => {
+    let r = await loginFlow([ADMIN_GROUP], { edit: (q) => ({ query: `state=${q.state}&error=access_denied`, cookie: q.cookie }) });
+    expect(location(r.cb)).toBe("/?login_error=access_denied");
+    r = await loginFlow([ADMIN_GROUP], { edit: (q) => ({ query: `state=${q.state}&error=server_error&error_description=%3Cscript%3E`, cookie: q.cookie }) });
+    expect(location(r.cb)).toBe("/?login_error=provider_error");
+    expect(r.cb.body).toBe("");
+    // A provider error with a wrong state is a state mismatch, not a trusted provider message.
+    r = await loginFlow([ADMIN_GROUP], { edit: (q) => ({ query: `state=nope&error=access_denied`, cookie: q.cookie }) });
+    expect(location(r.cb)).toBe("/?login_error=state_mismatch");
+  });
+
+  it("callback replay: with the cleared cookie it is a state mismatch; with a kept cookie the one-time code fails", async () => {
+    const first = await loginFlow([ADMIN_GROUP]);
+    expect(sessionSet(first.cb)).toBeDefined();
+    const url = `/auth/callback?code=${encodeURIComponent(first.code)}&state=${encodeURIComponent(first.state)}`;
+    const cleared = pairOf(setCookies(first.cb).find((c) => c.startsWith(`${NAMES.transaction}=`))!);
+    const replayCleared = await h.app.inject({ method: "GET", url, headers: { cookie: cleared } });
+    expect(loginError(replayCleared)).toBe("state_mismatch");
+    expect(sessionSet(replayCleared)).toBeUndefined();
+    const replayKept = await h.app.inject({ method: "GET", url, headers: { cookie: first.tx } });
+    expect(loginError(replayKept)).toBe("exchange_failed");
+    expect(sessionSet(replayKept)).toBeUndefined();
+  });
+
+  it("a transaction cookie from another login, a tampered one or a plain-name one creates no session", async () => {
+    const other = await h.app.inject({ method: "GET", url: "/auth/login" });
+    const otherTx = pairOf(setCookies(other)[0]!);
+    const tampered = (q: { cookie: string }) => {
+      const [name, value] = q.cookie.split("=");
+      const [hd, p, sig] = value!.split(".");
+      return `${name}=${hd}.${p!.slice(0, -2)}AA.${sig}`;
+    };
+    const variants: Array<(q: { code: string; state: string; cookie: string }) => { query: string; cookie?: string }> = [
+      (q) => ({ query: `code=${q.code}&state=${q.state}`, cookie: otherTx }),
+      (q) => ({ query: `code=${q.code}&state=${q.state}`, cookie: tampered(q) }),
+      (q) => ({ query: `code=${q.code}&state=${q.state}`, cookie: q.cookie.replace(NAMES.transaction, TRANSACTION_COOKIE) }),
+      (q) => ({ query: `code=${q.code}&state=${q.state}`, cookie: `${q.cookie}; ${otherTx}` }),
+    ];
+    for (const edit of variants) {
+      const { cb } = await loginFlow([ADMIN_GROUP], { edit });
+      expect(loginError(cb)).toBe("state_mismatch");
+      expect(sessionSet(cb)).toBeUndefined();
+    }
+  });
+
+  it("next open-redirect attempts all end at /; same-site paths are kept (percent-encoded)", async () => {
+    const hostile = [
+      "//evil.example", "https://evil.example/x", "/\\evil.example", "\\\\evil.example", "/..//evil.example",
+      "/.//evil.example", "javascript:alert(1)", "evil.example", "/\t/evil.example", " /x", "http:/evil.example",
+    ];
+    for (const next of hostile) {
+      const { cb } = await loginFlow([MEMBER_GROUP], { next });
+      expect(location(cb), JSON.stringify(next)).toBe("/");
+    }
+    expect(location((await loginFlow([MEMBER_GROUP], { next: "/gallery?x=1#top" })).cb)).toBe("/gallery?x=1#top");
+    expect(location((await loginFlow([MEMBER_GROUP], { next: "/中" })).cb)).toBe("/%E4%B8%AD");
+    // A repeated next parameter is not a string: "/".
+    const twice = await h.app.inject({ method: "GET", url: "/auth/login?next=/a&next=//evil.example" });
+    const { code, state } = idp.authorize(location(twice));
+    const cb = await h.app.inject({ method: "GET", url: `/auth/callback?code=${code}&state=${state}`, headers: { cookie: pairOf(setCookies(twice)[0]!) } });
+    expect(location(cb)).toBe("/");
+  });
+
+  it("an unreachable IdP at /auth/login is a provider_error redirect, not an error page", async () => {
+    idp.discovery = 503;
+    h = await harness();
+    const res = await h.app.inject({ method: "GET", url: "/auth/login" });
+    expect(res.statusCode).toBe(302);
+    expect(location(res)).toBe("/?login_error=provider_error");
+    expect(sessionSet(res)).toBeUndefined();
+    idp.discovery = {
+      issuer: idp.issuer,
+      authorization_endpoint: `${idp.base}/application/o/authorize/`,
+      token_endpoint: `${idp.base}/application/o/token/`,
+      jwks_uri: `${idp.issuer}jwks/`,
+      code_challenge_methods_supported: ["plain", "S256"],
+    };
+  });
+
+  it("every login_error the server can emit is in the allowlist", async () => {
+    const seen = h.logs.concat();
+    for (const line of seen.filter((l) => l.startsWith("warn login failed: "))) {
+      expect(LOGIN_ERROR_CODES).toContain(line.slice("warn login failed: ".length));
+    }
+    expect(LOGIN_ERROR_CODES).toEqual(expect.arrayContaining(["access_denied", "state_mismatch", "session_too_large", "failed"]));
+  });
+});
+
+describe("session cookie", () => {
+  it("role matrix: admin, member, none", async () => {
+    const a = await admin();
+    const m = await member();
+    const none = await cookieOf(["staff"]);
+    expect((await call("GET", "/api/estimate", a)).statusCode).toBe(200);
+    expect((await call("GET", "/api/estimate", m)).statusCode).toBe(403);
+    expect((await call("GET", "/api/state", m)).statusCode).toBe(200);
+    expect((await call("GET", "/api/me", none)).statusCode).toBe(403);
+    expect((await call("GET", "/api/state", none)).statusCode).toBe(403);
+  });
+
+  it("tampered and expired session cookies are 401", async () => {
+    const { cookie } = await member();
+    const [name, value] = cookie.split("=");
+    const [hd, p, sig] = value!.split(".");
+    const payload = { ...JSON.parse(Buffer.from(p!, "base64url").toString()), groups: [ADMIN_GROUP] };
+    const forged = `${name}=${hd}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${sig}`;
+    expect((await call("GET", "/api/state", { cookie: forged })).statusCode).toBe(401);
+    expect((await call("GET", "/api/state", { cookie: `${cookie}x` })).statusCode).toBe(401);
+    expect((await call("GET", "/api/state", { cookie })).statusCode).toBe(200);
+    h.clock.ms += 8 * 3_600_000 + 1000;
+    expect((await call("GET", "/api/state", { cookie })).statusCode).toBe(401);
+  });
+
+  it("a plain-name session cookie is ignored in secure mode", async () => {
+    const { cookie } = await admin();
+    const plain = cookie.replace(NAMES.session, SESSION_COOKIE);
+    expect(plain.startsWith(`${SESSION_COOKIE}=`)).toBe(true);
+    expect((await call("GET", "/api/state", { cookie: plain })).statusCode).toBe(401);
+  });
+
+  it("logout clears both cookies with 204 (also without a session) and applies the Origin rule", async () => {
+    const { cookie } = await member();
+    const json = { "content-type": "application/json" };
+    const ok = await h.app.inject({ method: "POST", url: "/auth/logout", headers: { ...json, cookie, origin: PUBLIC_ORIGIN }, payload: {} });
+    expect(ok.statusCode).toBe(204);
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    const cleared = setCookies(ok);
+    expect(cleared).toHaveLength(2);
+    expect(cleared).toContainEqual(expect.stringMatching(new RegExp(`^${NAMES.session}=; .*Max-Age=0.*Secure`)));
+    expect(cleared).toContainEqual(expect.stringMatching(new RegExp(`^${NAMES.transaction}=; .*Max-Age=0`)));
+    const anon = await h.app.inject({ method: "POST", url: "/auth/logout", headers: { ...json, "sec-fetch-site": "same-origin" }, payload: {} });
+    expect(anon.statusCode).toBe(204);
+    for (const headers of [{ origin: "https://evil.example.test" }, {}, { "sec-fetch-site": "cross-site" }]) {
+      const res = await h.app.inject({ method: "POST", url: "/auth/logout", headers: { ...json, cookie, ...headers }, payload: {} });
+      expect(res.statusCode, JSON.stringify(headers)).toBe(403);
+      expect(res.json().error.code).toBe("csrf");
+      expect(setCookies(res)).toEqual([]);
+    }
+    const text = await h.app.inject({ method: "POST", url: "/auth/logout", headers: { cookie, origin: PUBLIC_ORIGIN, "content-type": "text/plain" }, payload: "x" });
+    expect(text.statusCode).toBe(415);
+  });
+});
+
+describe("CSRF: Origin and Sec-Fetch-Site on state-changing requests", () => {
+  it("POST /api/start: cross-site Origin 403; matching Origin ok; no Origin + same-origin ok; anything else 403", async () => {
+    h = await harness({ ready: false });
+    const { cookie } = await admin();
+    const start = (headers: Record<string, string>) =>
+      h.app.inject({ method: "POST", url: "/api/start", headers: { cookie, "content-type": "application/json", ...headers }, payload: { confirm: true } });
+    const refused: Record<string, string>[] = [
+      { origin: "https://evil.example.test" },
+      { origin: "null" },
+      { origin: "https://sub.comfy.example.test" },
+      { origin: "http://comfy.example.test" },
+      { origin: `${PUBLIC_ORIGIN}:443x` },
+      {},
+      { "sec-fetch-site": "none" },
+      { "sec-fetch-site": "same-site" },
+      { "sec-fetch-site": "cross-site" },
+      { origin: PUBLIC_ORIGIN, "sec-fetch-site": "cross-site" },
+      { origin: "https://evil.example.test", "sec-fetch-site": "same-origin" },
+    ];
+    for (const headers of refused) {
+      const res = await start(headers);
+      expect(res.statusCode, JSON.stringify(headers)).toBe(403);
+      expect(res.json().error.code).toBe("csrf");
+    }
+    expect(h.vast.creates).toBe(0);
+    const matching = await start({ origin: PUBLIC_ORIGIN });
+    expect(matching.statusCode).toBe(200);
+    const sameOrigin = await start({ "sec-fetch-site": "same-origin" });
+    expect(sameOrigin.statusCode).toBe(409); // passed the gate; refused only because one is active
+    expect(h.vast.creates).toBe(1);
+  });
+
+  it("GET navigations are exempt; anonymous POSTs are still 401 first", async () => {
+    expect((await call("GET", "/api/state", { ...(await member()), origin: "https://evil.example.test" })).statusCode).toBe(200);
+    expect((await h.app.inject({ method: "GET", url: "/auth/login", headers: { "sec-fetch-site": "cross-site" } })).statusCode).toBe(302);
+    expect((await post("/api/start", { origin: "https://evil.example.test" }, { confirm: true })).statusCode).toBe(401);
+  });
+});
+
+describe("unconfigured auth fails closed", () => {
+  for (const [label, over] of [
+    ["client secret empty", { authentikClientSecret: "" }],
+    ["issuer empty", { authentikIssuer: "" }],
+    ["public URL empty", { webPublicUrl: "" }],
+    ["session secret too short", { webSessionSecret: "too-short" }],
+  ] as const) {
+    it(`${label}: every /api route 401 (even with a cookie that would be valid), /auth/login 503`, async () => {
+      const valid = (await admin()).cookie; // from the configured harness, same secret
+      h = await harness({ cfg: over });
+      expect(h.logs.filter((l) => l.includes("FAIL-CLOSED"))).toHaveLength(1);
+      for (const r of registeredRoutes(h.app).filter((x) => x.url.startsWith("/api/"))) {
+        const url = r.url.replace(":id", "p-1").replace(":index", "0");
+        const res = await call(r.method as Method, url, { cookie: valid, origin: PUBLIC_ORIGIN }, r.method === "POST" ? {} : undefined);
+        expect(res.statusCode, `${r.method} ${r.url}`).toBe(401);
+      }
+      for (const url of ["/auth/login", "/auth/callback?code=c&state=s"]) {
+        const res = await h.app.inject({ method: "GET", url });
+        expect(res.statusCode).toBe(503);
+        expect(res.json()).toEqual({ error: { code: "auth_not_configured", message: expect.any(String) } });
+        expect(res.headers["set-cookie"]).toBeUndefined();
+      }
+      expect((await call("GET", "/healthz")).statusCode).toBe(200);
+      writeFileSync(join(h.publicDir, "index.html"), "<!doctype html><title>x</title>");
+      expect((await call("GET", "/")).statusCode).toBe(200);
+    });
+  }
+});
+
+describe("secrecy across the login flow", () => {
+  it("no secret, token, code, state or cookie value in any body, non-cookie header or log line", async () => {
+    const seen: string[] = [];
+    const spies = (["log", "error", "warn", "info", "debug"] as const).map((m) => {
+      const original = console[m];
+      console[m] = (...args: unknown[]) => void seen.push(args.map(String).join(" "));
+      return () => (console[m] = original);
+    });
+    try {
+      mintedTokens.length = 0;
+      const ok = await loginFlow([ADMIN_GROUP, MEMBER_GROUP], { sub: "root" });
+      const bad = await loginFlow([ADMIN_GROUP], { edit: (q) => ({ query: `code=${q.code}&state=${q.state}x`, cookie: q.cookie }) });
+      const session = pairOf(sessionSet(ok.cb)!);
+      const headers = { cookie: session, origin: PUBLIC_ORIGIN };
+      const responses = [
+        ok.start, ok.cb, bad.start, bad.cb,
+        await call("GET", "/api/state", headers),
+        await call("GET", "/api/me", headers),
+        await h.app.inject({ method: "POST", url: "/auth/logout", headers: { ...headers, "content-type": "application/json" }, payload: {} }),
+      ];
+      const sensitive = [
+        CLIENT_SECRET, SESSION_SECRET, ok.code, bad.code, ...mintedTokens,
+        session.split("=")[1]!, ok.tx.split("=")[1]!, bad.tx.split("=")[1]!, "fake-access-token",
+      ];
+      for (const res of responses) {
+        const { "set-cookie": _cookies, location: loc, ...rest } = res.headers;
+        const dump = `${res.body}\n${JSON.stringify(rest)}`;
+        for (const value of sensitive) expect(dump).not.toContain(value);
+        // Only the IdP redirect may carry state/nonce (by design); never a secret or a code.
+        for (const value of [CLIENT_SECRET, SESSION_SECRET, ok.code, bad.code, ...mintedTokens]) expect(String(loc ?? "")).not.toContain(value);
+      }
+      const logText = `${h.logs.join("\n")}\n${seen.join("\n")}`;
+      for (const value of [...sensitive, ok.state, bad.state]) expect(logText).not.toContain(value);
+      for (const line of h.logs) expect(line.length).toBeLessThan(200);
+    } finally {
+      spies.forEach((restore) => restore());
+    }
+  });
+});
+
 describe("server timeouts", () => {
   it("come from config", () => {
     expect(h.app.initialConfig).toMatchObject({ requestTimeout: 30_000, connectionTimeout: 60_000, keepAliveTimeout: 75_000 });
@@ -713,6 +1118,15 @@ describe("OpenAPI contract", () => {
       .flatMap(([path, ops]) => Object.keys(ops).filter((k) => k !== "parameters").map((m) => `${m.toUpperCase()} ${path}`))
       .sort();
     expect(documented).toEqual(registered);
+    for (const route of ["GET /auth/login", "GET /auth/callback", "POST /auth/logout", "GET /api/me"]) expect(documented).toContain(route);
+  });
+
+  it("documents the cookie scheme and exactly the allowlisted login_error codes", () => {
+    const text = readFileSync(OPENAPI, "utf8");
+    const doc = JSON.parse(text);
+    expect(text).not.toMatch(/authentik-jwt|authentikJwt/i);
+    expect(doc.components.securitySchemes.sessionCookie).toMatchObject({ type: "apiKey", in: "cookie", name: NAMES.session });
+    expect(doc.components.schemas.LoginError.enum).toEqual([...LOGIN_ERROR_CODES]);
   });
 });
 

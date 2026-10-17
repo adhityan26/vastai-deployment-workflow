@@ -91,9 +91,7 @@ keys:
   - {name: WEB_REPO_DIR, components: [apps], type: str, secret: false, required: false, default: ".", description: "Directory that contains instance/profiles and instance/workflows for the web process"}
   - {name: WEB_ADMIN_GROUP, components: [apps], type: str, secret: false, required: false, default: "authentik Admins", description: "Authentik group allowed to start, extend and destroy"}
   - {name: WEB_MEMBER_GROUP, components: [apps], type: str, secret: false, required: false, default: "member", description: "Authentik group allowed to generate and read status"}
-  - {name: AUTHENTIK_JWKS_URL, components: [apps], type: str, secret: false, required: false, default: "", description: "Authentik JWKS URL used to verify identity tokens"}
-  - {name: AUTHENTIK_ISSUER, components: [apps], type: str, secret: false, required: false, default: "", description: "Expected issuer of the Authentik identity token"}
-  - {name: AUTHENTIK_AUDIENCE, components: [apps], type: str, secret: false, required: false, default: "", description: "Expected audience of the Authentik identity token"}
+  - {name: AUTHENTIK_ISSUER, components: [apps], type: str, secret: false, required: false, default: "", description: "OIDC issuer of the web app's Authentik provider (https://<authentik>/application/o/<slug>/); discovery and the ID token iss must match it exactly"}
   - {name: AUTHENTIK_CLIENT_ID, components: [apps], type: str, secret: false, required: false, default: "", description: "OIDC client id of the web app's Authentik provider; also the required audience of its ID tokens"}
   - {name: AUTHENTIK_CLIENT_SECRET, components: [apps], type: str, secret: true, required: false, default: "", description: "OIDC client secret of the web app's Authentik provider, used only for the server-side code exchange"}
   - {name: WEB_PUBLIC_URL, components: [apps], type: str, secret: false, required: false, default: "", description: "Public origin of the web app (https, or http only for localhost/127.0.0.1); the OIDC redirect_uri is this origin plus /auth/callback"}

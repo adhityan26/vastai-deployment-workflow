@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
 import {
   AgentClient,
   ComfyClient,
@@ -16,7 +15,7 @@ import {
   type AppsConfig,
   type InstanceRecord,
 } from "@vast-comfy/core";
-import { createAuth } from "./auth.js";
+import { createAuthStack } from "./auth.js";
 import { buildServer } from "./server.js";
 
 // Process entry: wire config, registry, Vast, lifecycle, auth and the reconcile loop, then
@@ -99,22 +98,9 @@ async function main(): Promise<void> {
     newHostname: () => `${HOSTNAME_PREFIX}${randomBytes(HOSTNAME_ID_BYTES).toString("hex")}`,
   });
 
-  // The remote JWKS is created only when auth is configured; otherwise auth stays fail-closed
-  // and the resolver is never called.
-  let remote: JWTVerifyGetKey | null = null;
-  let configured = false;
-  const resolver: JWTVerifyGetKey = (header, token) => {
-    if (!configured) throw new Error("auth is not configured");
-    remote ??= createRemoteJWKSet(new URL(str(cfg, "authentikJwksUrl")));
-    return remote(header, token);
-  };
-  const auth = createAuth(cfg, resolver, {
-    onMisconfigured: (message) => log("error", message),
-    onReject: (reason) => {
-      if (reason !== "missing" && reason !== "unconfigured") log("warn", `identity rejected: ${reason}`);
-    },
-  });
-  configured = auth.configured;
+  // Login: OIDC client + signed session cookies. Fail-closed and loud when anything is missing:
+  // createAuthStack logs which keys (never their values) and every /api request is then 401.
+  const { auth, oidc, sessions } = createAuthStack(cfg, { onMisconfigured: (message) => log("error", message) });
 
   const app = buildServer({
     cfg,
@@ -124,6 +110,7 @@ async function main(): Promise<void> {
     comfyFor: (hostname) => new ComfyClient(hostname, cfg),
     profile,
     template,
+    login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,
     secrets: () => [...seenSecrets],
     log,

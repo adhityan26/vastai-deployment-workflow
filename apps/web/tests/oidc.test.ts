@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { SignJWT } from "jose";
+import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWK } from "jose";
 import type { AppsConfig } from "@vast-comfy/core";
 import { OidcError, createOidc, parsePublicUrl, sanitizeNext, type LoginTransaction, type OidcDeps } from "../src/oidc.js";
 import { CLIENT_ID, CLIENT_SECRET, startFakeIdp, type FakeIdp } from "./fake-idp.js";
@@ -285,6 +285,61 @@ describe("finish", () => {
     expect((await lenient.oidc.finish({ code: lenient.code, state: lenient.state }, lenient.transaction)).subject).toBe("user-1");
   });
 
+  /** An ID token for this login, signed with any key/alg and with explicit times (seconds). */
+  async function signed(nonce: string, o: { key?: CryptoKey; alg?: string; kid?: string; iat?: number; nbf?: number; exp?: number } = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    const jwt = new SignJWT({ nonce, preferred_username: "ayu", groups: ["member"] })
+      .setProtectedHeader({ alg: o.alg ?? "RS256", kid: o.kid ?? "fake-k1" })
+      .setIssuer(idp.issuer)
+      .setAudience(CLIENT_ID)
+      .setSubject("user-1")
+      .setIssuedAt(o.iat ?? now)
+      .setExpirationTime(o.exp ?? now + 300);
+    if (o.nbf !== undefined) jwt.setNotBefore(o.nbf);
+    return jwt.sign(o.key ?? idp.signing);
+  }
+
+  /** A JWKS that serves one public key WITHOUT an `alg` member, so only our pin limits the algorithm. */
+  async function jwksWithoutAlg(alg: string, kid: string) {
+    const pair = await generateKeyPair(alg, { extractable: true });
+    const jwk: JWK = { ...(await exportJWK(pair.publicKey)), kid, use: "sig" };
+    expect(jwk.alg).toBeUndefined();
+    return { privateKey: pair.privateKey, jwks: createLocalJWKSet({ keys: [jwk] }) };
+  }
+
+  it("accepts an ES256 token from a JWK without an alg member", async () => {
+    const ec = await jwksWithoutAlg("ES256", "ec-1");
+    const r = await login(config(), {}, { jwks: ec.jwks }, (nonce) => signed(nonce, { key: ec.privateKey, alg: "ES256", kid: "ec-1" }));
+    expect((await r.oidc.finish({ code: r.code, state: r.state }, r.transaction)).subject).toBe("user-1");
+  });
+
+  for (const alg of ["PS256", "RS512"]) {
+    it(`rejects a ${alg} token signed with an RSA key served from a JWK without an alg member (algorithm pin)`, async () => {
+      const rsa = await jwksWithoutAlg(alg, "rsa-1");
+      const r = await login(config(), {}, { jwks: rsa.jwks }, (nonce) => signed(nonce, { key: rsa.privateKey, alg, kid: "rsa-1" }));
+      expect(await codeOf(r.oidc.finish({ code: r.code, state: r.state }, r.transaction))).toBe("token_invalid");
+    });
+  }
+
+  it("rejects a future nbf, a future iat and an old iat; accepts a recent iat", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const bad: Array<Parameters<typeof signed>[1]> = [
+      { nbf: now + 60 },
+      { iat: now + 60 },
+      { iat: now - 3600, exp: now + 300 },
+      { iat: now - 301, exp: now + 300 },
+    ];
+    for (const times of bad) {
+      const r = await login(config(), {}, {}, (nonce) => signed(nonce, times));
+      expect(await codeOf(r.oidc.finish({ code: r.code, state: r.state }, r.transaction)), JSON.stringify(times)).toBe("token_invalid");
+    }
+    const ok = await login(config(), {}, {}, (nonce) => signed(nonce, { iat: now - 60 }));
+    expect((await ok.oidc.finish({ code: ok.code, state: ok.state }, ok.transaction)).subject).toBe("user-1");
+    // The configured skew widens the iat window by exactly that much.
+    const lenient = await login(config({ webOidcSkewS: 60 }), {}, {}, (nonce) => signed(nonce, { iat: now - 330 }));
+    expect((await lenient.oidc.finish({ code: lenient.code, state: lenient.state }, lenient.transaction)).subject).toBe("user-1");
+  });
+
   it("groups claim as a string or with non-strings is sanitized to []", async () => {
     for (const groups of ["authentik Admins", { 0: "authentik Admins" }, ["authentik Admins", 1], [null], undefined]) {
       const r = await login(config(), { groups });
@@ -360,6 +415,21 @@ describe("sanitizeNext", () => {
     expect(sanitizeNext("/a")).toBe("/a");
     expect(sanitizeNext("/a/b?c=1#d")).toBe("/a/b?c=1#d");
     expect(sanitizeNext("/")).toBe("/");
+  });
+
+  it("returns the parsed, percent-encoded path (safe in a Location header), never the raw input", () => {
+    expect(sanitizeNext("/中")).toBe("/%E4%B8%AD");
+    expect(sanitizeNext("/a?q=中#中")).toBe("/a?q=%E4%B8%AD#%E4%B8%AD");
+    expect(sanitizeNext("/a/../b")).toBe("/b");
+    // An encoded slash stays encoded: a single-slash same-origin path, not protocol-relative.
+    expect(sanitizeNext("/%2f/evil")).toBe("/%2f/evil");
+    expect(sanitizeNext("/..//evil")).toBe("/");
+    expect(sanitizeNext("/.//evil")).toBe("/");
+    for (const raw of ["/中", "/%2f/evil", "/a?q=中", "/é"]) {
+      const out = sanitizeNext(raw);
+      expect(out, raw).toMatch(/^\/(?!\/)[\x21-\x7e]*$/);
+      expect(() => new Headers({ location: out })).not.toThrow();
+    }
   });
 
   it("turns everything else into /", () => {

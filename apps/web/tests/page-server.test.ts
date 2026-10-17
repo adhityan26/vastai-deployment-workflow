@@ -75,6 +75,18 @@ describe("GET / under the strict CSP", () => {
     expect(JSON.parse(manifest.body).start_url).toBe("/");
   });
 
+  it("keeps form-action 'self' and no-referrer; without login wiring /auth/login is 503 JSON and the page still loads", async () => {
+    const app = await server();
+    const page = await app.inject({ method: "GET", url: "/" });
+    expect(String(page.headers["content-security-policy"])).toContain("form-action 'self'");
+    expect(page.headers["referrer-policy"]).toBe("no-referrer");
+    const login = await app.inject({ method: "GET", url: "/auth/login" });
+    expect(login.statusCode).toBe(503);
+    expect(login.json().error.code).toBe("auth_not_configured");
+    expect(login.headers["cache-control"]).toBe("no-store");
+    expect(login.headers["content-security-policy"]).toBe(page.headers["content-security-policy"]);
+  });
+
   it("serves the bundled script as javascript when it has been built", async () => {
     const app = await server();
     const res = await app.inject({ method: "GET", url: "/app.js" });

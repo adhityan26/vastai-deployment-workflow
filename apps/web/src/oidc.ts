@@ -8,6 +8,12 @@ import type { AppsConfig } from "@vast-comfy/core";
 
 /** Only asymmetric algorithms, pinned: rules out `none` and HS* forged with the public key text. */
 const ID_TOKEN_ALGORITHMS = ["RS256", "ES256"];
+/**
+ * Oldest ID token accepted, by its `iat`: the token is minted during the code exchange a moment
+ * before we verify it, so a few minutes is generous. jose adds the configured clock skew
+ * (WEB_OIDC_SKEW_S) on top of this, and also rejects an `iat` or `nbf` in the future beyond it.
+ */
+const MAX_ID_TOKEN_AGE_S = 300;
 /** Scopes requested from the provider; Authentik's `profile` scope carries the `groups` claim. */
 const SCOPES = "openid profile email";
 /** Path of the callback route, appended to the WEB_PUBLIC_URL origin (never taken from a request). */
@@ -138,7 +144,8 @@ export function parsePublicUrl(raw: string): { origin: string; secure: boolean }
 /**
  * Same-site relative return path, or "/". Accepts only a path that starts with a single "/", with no
  * backslash, no control characters and no scheme, that still resolves to the same origin and does not
- * normalise into a protocol-relative ("//host") path.
+ * normalise into a protocol-relative ("//host") path. The result is the parsed URL's percent-encoded
+ * path, query and fragment (never the raw input), so it is always safe in a Location header.
  */
 export function sanitizeNext(next: unknown): string {
   if (typeof next !== "string" || next === "" || next.length > MAX_NEXT_LENGTH) return "/";
@@ -151,7 +158,9 @@ export function sanitizeNext(next: unknown): string {
     return "/";
   }
   if (url.origin !== new URL(PARSE_BASE).origin || url.pathname.startsWith("//")) return "/";
-  return next;
+  const out = `${url.pathname}${url.search}${url.hash}`;
+  if (!out.startsWith("/") || out.startsWith("//") || out.length > MAX_NEXT_LENGTH) return "/";
+  return out;
 }
 
 /** Discovery URL per OpenID Connect Discovery 1.0 section 4: drop a terminating "/" then append the suffix. */
@@ -355,6 +364,7 @@ export function createOidc(cfg: AppsConfig, deps: OidcDeps = {}): Oidc {
         audience: clientId,
         algorithms: ID_TOKEN_ALGORITHMS,
         requiredClaims: ["exp", "iat"],
+        maxTokenAge: MAX_ID_TOKEN_AGE_S,
         clockTolerance: skewS,
         currentDate: new Date(now()),
       }));

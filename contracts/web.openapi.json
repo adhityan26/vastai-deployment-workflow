@@ -3,15 +3,15 @@
   "info": {
     "title": "vast-comfy web API",
     "version": "1",
-    "description": "Hand-kept contract of apps/web (apps/web/tests/routes.test.ts fails when it and the registered Fastify routes diverge). Every /api route needs a verified Authentik JWT in X-authentik-jwt (401 without, 403 for the wrong role); POSTs need Content-Type application/json; unknown routes are 404; errors are {error: {code, message}}. The static route is listed as /{path}; Fastify registers it as the wildcard /*."
+    "description": "Hand-kept contract of apps/web (apps/web/tests/routes.test.ts fails when it and the registered Fastify routes diverge). Identity is a signed session cookie set by GET /auth/callback after an OIDC login at Authentik (authorization code flow with PKCE); every /api route needs it (401 without, 403 for the wrong role or for an account whose groups map to no role). Public routes are exactly /healthz, the static files and /auth/login, /auth/callback, /auth/logout. CSRF rule for every POST (/api/* and /auth/logout): an Origin header, when present, must equal the origin of WEB_PUBLIC_URL; a Sec-Fetch-Site header, when present, must be same-origin; without Origin the request needs Sec-Fetch-Site: same-origin; otherwise 403 csrf. POSTs need Content-Type application/json (415). /api and /auth responses carry Cache-Control: no-store. Unknown routes are 404; errors are {error: {code, message}}. The static route is listed as /{path}; Fastify registers it as the wildcard /*."
   },
   "components": {
     "securitySchemes": {
-      "authentikJwt": {
+      "sessionCookie": {
         "type": "apiKey",
-        "in": "header",
-        "name": "X-authentik-jwt",
-        "description": "Signed JWT forwarded by the Authentik proxy outpost"
+        "in": "cookie",
+        "name": "__Host-vc_session",
+        "description": "HttpOnly, Secure, SameSite=Lax, Path=/ session cookie (an HS256-signed token with sub, username, name, email, the role groups, iat and exp; lifetime WEB_SESSION_TTL_H) set by GET /auth/callback. With an http://localhost WEB_PUBLIC_URL (development only) the name is vc_session without Secure; each mode ignores the other name."
       }
     },
     "schemas": {
@@ -401,12 +401,52 @@
             }
           }
         }
+      },
+      "LoginError": {
+        "description": "Values of the login_error query parameter that /auth/login and /auth/callback put on the redirect to /. Never provider text. access_denied: the provider refused, or the account's groups map to no role (no session is issued); state_mismatch: missing, mismatched, expired or replayed login transaction; provider_error: the provider reported an error or could not be reached; exchange_failed: the code exchange failed (also a replayed code); token_invalid: the ID token failed verification; nonce_mismatch; no_subject; session_too_large: the session would not fit in a cookie; failed: anything else.",
+        "enum": [
+          "access_denied",
+          "state_mismatch",
+          "provider_error",
+          "exchange_failed",
+          "token_invalid",
+          "nonce_mismatch",
+          "no_subject",
+          "session_too_large",
+          "failed"
+        ]
+      },
+      "Me": {
+        "type": "object",
+        "required": [
+          "name",
+          "username",
+          "role"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "member"
+            ]
+          }
+        }
       }
     }
   },
   "security": [
     {
-      "authentikJwt": []
+      "sessionCookie": []
     }
   ],
   "paths": {
@@ -478,13 +518,222 @@
         }
       }
     },
+    "/auth/login": {
+      "get": {
+        "operationId": "login",
+        "summary": "Start an OIDC login at Authentik (public; a browser navigation)",
+        "security": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "next",
+            "required": false,
+            "description": "Same-site relative return path (one leading /, no //, no backslash, no scheme); anything else becomes /",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the provider's authorization endpoint (code flow, PKCE S256, state, nonce; redirect_uri is WEB_PUBLIC_URL + /auth/callback). Sets the short-lived (10 min) signed HttpOnly login-transaction cookie __Host-vc_login. If the provider cannot be reached: redirect to /?login_error=provider_error instead.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Login is not configured on this server (code auth_not_configured); auth is fail-closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "operationId": "loginCallback",
+        "summary": "Finish the OIDC login (public; the provider's redirect)",
+        "security": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Success: sets the session cookie (see sessionCookie), clears the transaction cookie and redirects to the sanitized next path (default /). Failure: see LoginError; redirects to /?login_error=<code>, clears the transaction cookie, sets no session.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Login is not configured on this server (code auth_not_configured); auth is fail-closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Clear the session cookie (public; the CSRF rule and the JSON rule apply)",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Session and transaction cookies cleared (Max-Age=0)",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or not {} (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "operationId": "me",
+        "summary": "The signed-in user: display name, username and role (member or admin)",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/state": {
       "get": {
         "operationId": "state",
         "summary": "Instance status view (member or admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "responses": {
@@ -499,7 +748,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -509,7 +758,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
             "content": {
               "application/json": {
                 "schema": {
@@ -527,7 +776,7 @@
         "summary": "Cheapest matching offer and its upper-bound cost (admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "responses": {
@@ -542,7 +791,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -552,7 +801,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
             "content": {
               "application/json": {
                 "schema": {
@@ -590,7 +839,7 @@
         "summary": "Start the instance after the user confirmed the estimate (admin; rate limited by START_RATE_LIMIT_PER_HOUR)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "requestBody": {
@@ -643,7 +892,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -653,7 +902,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
             "content": {
               "application/json": {
                 "schema": {
@@ -741,7 +990,7 @@
         "summary": "Destroy the active instance (admin; idempotent)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "requestBody": {
@@ -785,7 +1034,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -795,7 +1044,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
             "content": {
               "application/json": {
                 "schema": {
@@ -853,7 +1102,7 @@
         "summary": "Extend the idle or failsafe deadline (admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "requestBody": {
@@ -914,7 +1163,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -924,7 +1173,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1002,7 +1251,7 @@
         "summary": "Destroy a project-labelled instance the registry does not own (admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "requestBody": {
@@ -1048,7 +1297,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1058,7 +1307,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1126,7 +1375,7 @@
         "summary": "Submit a generation filled into the profile workflow (member or admin; per-identity rate limit)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "requestBody": {
@@ -1187,7 +1436,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1197,7 +1446,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1285,7 +1534,7 @@
         "summary": "Job state; polls ComfyUI once per request (owner or admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "parameters": [
@@ -1311,7 +1560,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1321,7 +1570,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1369,7 +1618,7 @@
         "summary": "Image bytes relayed from ComfyUI; nothing is stored (owner or admin)",
         "security": [
           {
-            "authentikJwt": []
+            "sessionCookie": []
           }
         ],
         "parameters": [
@@ -1403,7 +1652,7 @@
             }
           },
           "401": {
-            "description": "No verified Authentik identity (code unauthenticated)",
+            "description": "No valid session cookie (code unauthenticated)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1413,7 +1662,7 @@
             }
           },
           "403": {
-            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
             "content": {
               "application/json": {
                 "schema": {

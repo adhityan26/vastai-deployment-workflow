@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { SignJWT, decodeJwt, decodeProtectedHeader } from "jose";
-import { SESSION_COOKIE, TRANSACTION_COOKIE, cookieValues, createSessions } from "../src/session.js";
+import { SESSION_COOKIE, TRANSACTION_COOKIE, clearCookies, cookieNames, cookieValues, createSessions } from "../src/session.js";
+
+// Default (secure) mode names; the plain names are only for http://localhost.
+const SECURE = cookieNames(true);
 import type { LoginTransaction, OidcIdentity } from "../src/oidc.js";
 
 const SECRET = "s".repeat(32);
@@ -16,7 +19,7 @@ const identity: OidcIdentity = {
 
 const tx: LoginTransaction = { state: "state-abc", nonce: "nonce-abc", verifier: "verifier-abc", next: "/gallery" };
 
-const header = (value: string, name = SESSION_COOKIE) => `other=1; ${name}=${value}; theme=dark`;
+const header = (value: string, name = SECURE.session) => `other=1; ${name}=${value}; theme=dark`;
 
 describe("session cookie", () => {
   it("sign/verify round trip", async () => {
@@ -27,7 +30,7 @@ describe("session cookie", () => {
 
   it("carries only sub, username, name, email, groups, iat and exp, with the configured lifetime", async () => {
     const t = 1_800_000_000_000;
-    const s = createSessions(SECRET, 8, () => t);
+    const s = createSessions(SECRET, 8, { now: () => t });
     const value = await s.issue({ ...identity, extra: "x" } as OidcIdentity);
     const claims = decodeJwt(value);
     expect(Object.keys(claims).sort()).toEqual(["email", "exp", "groups", "iat", "name", "sub", "username"]);
@@ -55,7 +58,7 @@ describe("session cookie", () => {
 
   it("rejects an expired cookie", async () => {
     let t = 1_800_000_000_000;
-    const s = createSessions(SECRET, 1, () => t);
+    const s = createSessions(SECRET, 1, { now: () => t });
     const value = await s.issue(identity);
     t += 3600 * 1000 - 1000;
     expect(await s.read(header(value))).not.toBeNull();
@@ -76,7 +79,7 @@ describe("session cookie", () => {
 
   it("rejects garbage, empty and missing cookies", async () => {
     const s = createSessions(SECRET, 8);
-    for (const h of [undefined, "", "garbage", `${SESSION_COOKIE}=`, `${SESSION_COOKIE}=not.a.jwt`, `${SESSION_COOKIE}=a.b`, `${SESSION_COOKIE}="x"`]) {
+    for (const h of [undefined, "", "garbage", `${SECURE.session}=`, `${SECURE.session}=not.a.jwt`, `${SECURE.session}=a.b`, `${SECURE.session}="x"`]) {
       expect(await s.read(h)).toBeNull();
     }
   });
@@ -85,9 +88,9 @@ describe("session cookie", () => {
     const s = createSessions(SECRET, 8);
     const a = await s.issue(identity);
     const b = await s.issue({ ...identity, subject: "user-2" });
-    expect(await s.read(`${SESSION_COOKIE}=${a}; ${SESSION_COOKIE}=${b}`)).toBeNull();
-    expect(await s.read(`${SESSION_COOKIE}=${a}; ${SESSION_COOKIE}=${a}`)).toBeNull();
-    expect(cookieValues(`${SESSION_COOKIE}=1; x${SESSION_COOKIE}=2; ${SESSION_COOKIE}x=3`, SESSION_COOKIE)).toEqual(["1"]);
+    expect(await s.read(`${SECURE.session}=${a}; ${SECURE.session}=${b}`)).toBeNull();
+    expect(await s.read(`${SECURE.session}=${a}; ${SECURE.session}=${a}`)).toBeNull();
+    expect(cookieValues(`${SECURE.session}=1; x${SECURE.session}=2; ${SECURE.session}x=3`, SECURE.session)).toEqual(["1"]);
   });
 
   it("does not accept a login-transaction cookie as a session (and vice versa)", async () => {
@@ -95,30 +98,59 @@ describe("session cookie", () => {
     const txValue = await s.issueTransaction(tx);
     expect(await s.read(header(txValue))).toBeNull();
     const sessionValue = await s.issue(identity);
-    expect(await s.readTransaction(header(sessionValue, TRANSACTION_COOKIE))).toBeNull();
+    expect(await s.readTransaction(header(sessionValue, SECURE.transaction))).toBeNull();
   });
 
-  it("cookie flags (HttpOnly, SameSite=Lax, Path=/, Secure when https)", async () => {
+  it("cookie flags (HttpOnly, SameSite=Lax, Path=/, Secure, no Domain) with the __Host- name by default", async () => {
     const s = createSessions(SECRET, 8);
     const value = await s.issue(identity);
-    const secure = s.serialize(value, { secure: true });
-    expect(secure.startsWith(`${SESSION_COOKIE}=${value}; `)).toBe(true);
+    const secure = s.serialize(value);
+    expect(SECURE.session).toBe(`__Host-${SESSION_COOKIE}`);
+    expect(s.names).toEqual(SECURE);
+    expect(secure.startsWith(`${SECURE.session}=${value}; `)).toBe(true);
     const attrs = secure.split("; ").slice(1);
     expect(attrs).toEqual(expect.arrayContaining(["Path=/", "HttpOnly", "SameSite=Lax", "Secure", `Max-Age=${8 * 3600}`]));
     expect(secure).not.toMatch(/Domain=/i);
-    expect(s.serialize(value, { secure: false })).not.toContain("Secure");
-    expect(() => s.serialize("x; Domain=evil", { secure: true })).toThrow();
+    expect(() => s.serialize("x; Domain=evil")).toThrow();
+  });
+
+  it("localhost mode uses the plain names without Secure", async () => {
+    const s = createSessions(SECRET, 8, { secure: false });
+    const value = await s.issue(identity);
+    expect(s.names).toEqual({ session: SESSION_COOKIE, transaction: TRANSACTION_COOKIE });
+    const set = s.serialize(value);
+    expect(set.startsWith(`${SESSION_COOKIE}=${value}; `)).toBe(true);
+    expect(set).not.toContain("Secure");
+    expect(await s.read(`${SESSION_COOKIE}=${value}`)).toEqual(identity);
+  });
+
+  it("each mode reads only its own cookie name and ignores the other (no cookie tossing)", async () => {
+    const secure = createSessions(SECRET, 8);
+    const plain = createSessions(SECRET, 8, { secure: false });
+    const value = await secure.issue(identity);
+    // A plain-name cookie (which a sibling subdomain could plant) is ignored in secure mode.
+    expect(await secure.read(`${SESSION_COOKIE}=${value}`)).toBeNull();
+    expect(await plain.read(`${SECURE.session}=${value}`)).toBeNull();
+    // A tossed plain cookie next to the real one changes nothing.
+    const other = await secure.issue({ ...identity, subject: "attacker", groups: ["authentik Admins"] });
+    expect((await secure.read(`${SESSION_COOKIE}=${other}; ${SECURE.session}=${value}`))?.subject).toBe("user-1");
+    const tx1 = await secure.issueTransaction(tx);
+    expect(await secure.readTransaction(`${TRANSACTION_COOKIE}=${tx1}`)).toBeNull();
+    expect(await plain.readTransaction(`${TRANSACTION_COOKIE}=${tx1}`)).toEqual(tx);
   });
 
   it("clear cookie", () => {
     const s = createSessions(SECRET, 8);
-    const cleared = s.clear({ secure: true });
-    expect(cleared.startsWith(`${SESSION_COOKIE}=; `)).toBe(true);
+    const cleared = s.clear();
+    expect(cleared.startsWith(`${SECURE.session}=; `)).toBe(true);
     expect(cleared).toContain("Max-Age=0");
     expect(cleared).toContain("Path=/");
     expect(cleared).toContain("HttpOnly");
     expect(cleared).toContain("Secure");
-    expect(s.clearTransaction({ secure: false }).startsWith(`${TRANSACTION_COOKIE}=; `)).toBe(true);
+    expect(s.clearTransaction().startsWith(`${SECURE.transaction}=; `)).toBe(true);
+    expect(createSessions(SECRET, 8, { secure: false }).clearTransaction().startsWith(`${TRANSACTION_COOKIE}=; `)).toBe(true);
+    expect(clearCookies(true)).toEqual({ session: s.clear(), transaction: s.clearTransaction() });
+    expect(clearCookies(false).session).not.toContain("Secure");
   });
 
   it("secret < 32 bytes throws", () => {
@@ -144,27 +176,27 @@ describe("login-transaction cookie", () => {
   it("round trips state, nonce, verifier and next", async () => {
     const s = createSessions(SECRET, 8);
     const value = await s.issueTransaction(tx);
-    expect(await s.readTransaction(header(value, TRANSACTION_COOKIE))).toEqual(tx);
-    const set = s.serializeTransaction(value, { secure: true });
+    expect(await s.readTransaction(header(value, SECURE.transaction))).toEqual(tx);
+    const set = s.serializeTransaction(value);
     expect(set.split("; ")).toEqual(expect.arrayContaining(["HttpOnly", "SameSite=Lax", "Path=/", "Secure", "Max-Age=600"]));
   });
 
   it("transaction cookie expires after 10 minutes", async () => {
     let t = 1_800_000_000_000;
-    const s = createSessions(SECRET, 8, () => t);
+    const s = createSessions(SECRET, 8, { now: () => t });
     const value = await s.issueTransaction(tx);
     t += 9 * 60 * 1000;
-    expect(await s.readTransaction(header(value, TRANSACTION_COOKIE))).not.toBeNull();
+    expect(await s.readTransaction(header(value, SECURE.transaction))).not.toBeNull();
     t += 2 * 60 * 1000;
-    expect(await s.readTransaction(header(value, TRANSACTION_COOKIE))).toBeNull();
+    expect(await s.readTransaction(header(value, SECURE.transaction))).toBeNull();
   });
 
   it("re-sanitizes next and rejects ambiguity or another secret", async () => {
     const s = createSessions(SECRET, 8);
     const value = await s.issueTransaction({ ...tx, next: "//evil.example" });
-    expect((await s.readTransaction(header(value, TRANSACTION_COOKIE)))?.next).toBe("/");
-    expect(await s.readTransaction(`${TRANSACTION_COOKIE}=${value}; ${TRANSACTION_COOKIE}=${value}`)).toBeNull();
+    expect((await s.readTransaction(header(value, SECURE.transaction)))?.next).toBe("/");
+    expect(await s.readTransaction(`${SECURE.transaction}=${value}; ${SECURE.transaction}=${value}`)).toBeNull();
     const foreign = await createSessions(OTHER_SECRET, 8).issueTransaction(tx);
-    expect(await s.readTransaction(header(foreign, TRANSACTION_COOKIE))).toBeNull();
+    expect(await s.readTransaction(header(foreign, SECURE.transaction))).toBeNull();
   });
 });

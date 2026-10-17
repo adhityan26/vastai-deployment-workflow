@@ -1,211 +1,185 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { SignJWT, createLocalJWKSet, exportJWK, exportSPKI, generateKeyPair, type JWK } from "jose";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppsConfig } from "@vast-comfy/core";
-import { createAuth, type RejectReason } from "../src/auth.js";
+import { createAuth, createAuthStack, roleGroups } from "../src/auth.js";
+import { SESSION_COOKIE, cookieNames, createSessions } from "../src/session.js";
+import type { OidcIdentity } from "../src/oidc.js";
+import { CLIENT_ID, CLIENT_SECRET, startFakeIdp, type FakeIdp } from "./fake-idp.js";
 
-const ISSUER = "https://sso.example.test/application/o/vast/";
-const AUDIENCE = "vast-web";
-const KID = "k1";
+// Auth = a valid signed session cookie. These tests use real sessions; the login flow that issues
+// them is covered end to end in routes.test.ts.
 
-let signing: CryptoKey;
-let otherKey: CryptoKey;
-let publicPem: string;
-let resolver: ReturnType<typeof createLocalJWKSet>;
+const SECRET = "test-session-secret-0123456789abcdef";
+const ADMIN = "authentik Admins";
+const MEMBER = "member";
+const NAMES = cookieNames(true);
 
+let idp: FakeIdp;
 beforeAll(async () => {
-  const pair = await generateKeyPair("RS256");
-  const other = await generateKeyPair("RS256");
-  signing = pair.privateKey;
-  otherKey = other.privateKey;
-  publicPem = await exportSPKI(pair.publicKey);
-  const jwk: JWK = { ...(await exportJWK(pair.publicKey)), kid: KID, alg: "RS256", use: "sig" };
-  resolver = createLocalJWKSet({ keys: [jwk] });
+  idp = await startFakeIdp();
+});
+afterAll(async () => {
+  await idp.close();
 });
 
-function config(over: Record<string, string> = {}): AppsConfig {
+function config(over: Record<string, unknown> = {}): AppsConfig {
   return {
-    authentikJwksUrl: "https://sso.example.test/jwks/",
-    authentikIssuer: ISSUER,
-    authentikAudience: AUDIENCE,
-    webAdminGroup: "authentik Admins",
-    webMemberGroup: "member",
-    secretNames: [],
+    authentikIssuer: idp.issuer,
+    authentikClientId: CLIENT_ID,
+    authentikClientSecret: CLIENT_SECRET,
+    webPublicUrl: "https://comfy.example.test",
+    webSessionSecret: SECRET,
+    webSessionTtlH: 8,
+    webOidcSkewS: 0,
+    httpTimeoutSApps: 5,
+    webJsonMaxBytes: 65536,
+    webAdminGroup: ADMIN,
+    webMemberGroup: MEMBER,
+    secretNames: ["AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...over,
   } as unknown as AppsConfig;
 }
 
-interface Opts {
-  key?: CryptoKey;
-  iss?: string;
-  aud?: string;
-  exp?: string | number;
-  claims?: Record<string, unknown>;
-  sub?: string | null;
-}
+const identity = (groups: string[] = [MEMBER], over: Partial<OidcIdentity> = {}): OidcIdentity => ({
+  subject: "user-1",
+  username: "ayu",
+  name: "Ayu",
+  email: "ayu@example.test",
+  groups,
+  ...over,
+});
 
-async function mint(o: Opts = {}): Promise<string> {
-  const jwt = new SignJWT({ preferred_username: "ayu", email: "ayu@example.test", groups: ["member"], ...(o.claims ?? {}) })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
-    .setIssuer(o.iss ?? ISSUER)
-    .setAudience(o.aud ?? AUDIENCE)
-    .setIssuedAt()
-    .setExpirationTime(o.exp ?? "5m");
-  if (o.sub !== null) jwt.setSubject(o.sub ?? "user-1");
-  return jwt.sign(o.key ?? signing);
-}
-
-function harness(cfg = config()) {
-  const reasons: RejectReason[] = [];
+function stack(cfg = config()) {
   const warnings: string[] = [];
-  const auth = createAuth(cfg, resolver, { onReject: (r) => reasons.push(r), onMisconfigured: (m) => warnings.push(m) });
-  return { auth, reasons, warnings };
+  const s = createAuthStack(cfg, { onMisconfigured: (m) => warnings.push(m) });
+  return { ...s, warnings };
 }
 
-const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+async function cookieFor(groups: string[]): Promise<string> {
+  const value = await createSessions(SECRET, 8).issue(identity(groups));
+  return `${NAMES.session}=${value}`;
+}
 
 describe("identify", () => {
-  it("accepts a valid token and reads identity from verified claims", async () => {
-    const { auth } = harness();
-    const id = await auth.identify({ "X-Authentik-Jwt": await mint({ claims: { name: "Ayu" } }) });
-    expect(id).toMatchObject({ subject: "user-1", username: "ayu", email: "ayu@example.test", name: "Ayu", groups: ["member"] });
+  it("reads the identity from a valid session cookie", async () => {
+    const { auth, warnings } = stack();
+    expect(auth.configured).toBe(true);
+    expect(warnings).toEqual([]);
+    const id = await auth.identify({ cookie: `theme=dark; ${await cookieFor([MEMBER])}` });
+    expect(id).toEqual(identity([MEMBER]));
   });
 
-  it("returns null for forged x-authentik headers without a jwt", async () => {
-    const { auth, reasons } = harness();
-    const id = await auth.identify({
-      "x-authentik-username": "root",
-      "x-authentik-groups": "authentik Admins",
-      "x-authentik-email": "root@example.test",
-    });
-    expect(id).toBeNull();
-    expect(reasons).toEqual(["missing"]);
+  it("anonymous without a cookie, with garbage, a tampered or a foreign-secret cookie", async () => {
+    const { auth } = stack();
+    const good = (await cookieFor([MEMBER])).split("=")[1]!;
+    const [h, p, sig] = good.split(".");
+    const forgedPayload = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(p!, "base64url").toString()), groups: [ADMIN] })).toString("base64url");
+    const foreign = await createSessions("another-secret-0123456789abcdefghij", 8).issue(identity([ADMIN]));
+    for (const cookie of [undefined, "", "garbage", `${NAMES.session}=`, `${NAMES.session}=${h}.${forgedPayload}.${sig}`, `${NAMES.session}=${foreign}`]) {
+      expect(await auth.identify(cookie === undefined ? {} : { cookie })).toBeNull();
+    }
   });
 
-  it("ignores forged plain headers even when a valid jwt is present", async () => {
-    const { auth } = harness();
-    const id = await auth.identify({
-      "x-authentik-jwt": await mint({ claims: { groups: ["member"], preferred_username: "ayu" } }),
-      "x-authentik-username": "root",
-      "x-authentik-groups": "authentik Admins",
-    });
-    expect(id?.username).toBe("ayu");
-    expect(auth.role(id!)).toBe("member");
+  it("ignores identity headers entirely (the old X-authentik-jwt path is gone)", async () => {
+    const { auth } = stack();
+    const jwt = await idp.mint({ claims: { groups: [ADMIN] } });
+    expect(
+      await auth.identify({ "x-authentik-jwt": jwt, "x-authentik-username": "root", "x-authentik-groups": ADMIN, authorization: `Bearer ${jwt}` }),
+    ).toBeNull();
   });
 
-  it("rejects a jwt signed by another key", async () => {
-    const { auth, reasons } = harness();
-    expect(await auth.identify({ "x-authentik-jwt": await mint({ key: otherKey }) })).toBeNull();
-    expect(reasons).toEqual(["invalid"]);
+  it("ignores a plain-name cookie in secure mode (cookie tossing from a sibling subdomain)", async () => {
+    const { auth } = stack();
+    const value = await createSessions(SECRET, 8, { secure: false }).issue(identity([ADMIN]));
+    expect(await auth.identify({ cookie: `${SESSION_COOKIE}=${value}` })).toBeNull();
   });
 
-  it("rejects expired, wrong issuer and wrong audience", async () => {
-    const { auth, reasons } = harness();
-    const past = Math.floor(Date.now() / 1000) - 3600;
-    expect(await auth.identify({ "x-authentik-jwt": await mint({ exp: past }) })).toBeNull();
-    expect(await auth.identify({ "x-authentik-jwt": await mint({ iss: "https://evil.example.test/" }) })).toBeNull();
-    expect(await auth.identify({ "x-authentik-jwt": await mint({ aud: "other" }) })).toBeNull();
-    expect(reasons).toEqual(["expired", "claims", "claims"]);
+  it("uses the plain name for an http://localhost public URL", async () => {
+    const { auth, sessions } = stack(config({ webPublicUrl: "http://localhost:3000" }));
+    expect(sessions?.names.session).toBe(SESSION_COOKIE);
+    const value = await sessions!.issue(identity([MEMBER]));
+    expect(await auth.identify({ cookie: `${SESSION_COOKIE}=${value}` })).not.toBeNull();
+    expect(await auth.identify({ cookie: `${NAMES.session}=${value}` })).toBeNull();
   });
 
-  it("rejects a token without exp or sub", async () => {
-    const { auth } = harness();
-    const noSub = await mint({ sub: null });
-    expect(await auth.identify({ "x-authentik-jwt": noSub })).toBeNull();
-    const noExp = await new SignJWT({ groups: ["member"] })
-      .setProtectedHeader({ alg: "RS256", kid: KID })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setSubject("u")
-      .sign(signing);
-    expect(await auth.identify({ "x-authentik-jwt": noExp })).toBeNull();
-  });
-
-  it("rejects an alg none token", async () => {
-    const { auth } = harness();
-    const exp = Math.floor(Date.now() / 1000) + 300;
-    const token = `${b64({ alg: "none", typ: "JWT" })}.${b64({ iss: ISSUER, aud: AUDIENCE, sub: "u", exp, groups: ["authentik Admins"] })}.`;
-    expect(await auth.identify({ "x-authentik-jwt": token })).toBeNull();
-  });
-
-  it("rejects an HS256 token signed with the public key text as secret", async () => {
-    const { auth } = harness();
-    const token = await new SignJWT({ groups: ["authentik Admins"] })
-      .setProtectedHeader({ alg: "HS256", kid: KID })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setSubject("u")
-      .setExpirationTime("5m")
-      .sign(new TextEncoder().encode(publicPem));
-    expect(await auth.identify({ "x-authentik-jwt": token })).toBeNull();
-  });
-
-  it("rejects a repeated jwt header and accepts a single-element array", async () => {
-    const { auth, reasons } = harness();
-    const token = await mint();
-    expect(await auth.identify({ "x-authentik-jwt": [token, token] })).toBeNull();
-    expect(await auth.identify({ "x-authentik-jwt": token, "X-Authentik-JWT": token })).toBeNull();
-    expect(reasons).toEqual(["ambiguous", "ambiguous"]);
-    expect(await auth.identify({ "x-authentik-jwt": [token] })).not.toBeNull();
-  });
-
-  it("rejects garbage and an empty jwt header", async () => {
-    const { auth } = harness();
-    expect(await auth.identify({ "x-authentik-jwt": "not-a-jwt" })).toBeNull();
-    expect(await auth.identify({ "x-authentik-jwt": "  " })).toBeNull();
-  });
-
-  it("tolerates a missing or malformed groups claim as no groups", async () => {
-    const { auth } = harness();
-    const absent = await auth.identify({ "x-authentik-jwt": await mint({ claims: { groups: undefined } }) });
-    expect(absent?.groups).toEqual([]);
-    const bad = await auth.identify({ "x-authentik-jwt": await mint({ claims: { groups: "authentik Admins" } }) });
-    expect(bad?.groups).toEqual([]);
-    expect(auth.role(bad!)).toBe("none");
+  it("an array cookie header is joined; two session cookies are ambiguous and anonymous", async () => {
+    const { auth } = stack();
+    const a = await cookieFor([MEMBER]);
+    expect(await auth.identify({ cookie: ["theme=dark", a] })).not.toBeNull();
+    expect(await auth.identify({ cookie: [a, await cookieFor([ADMIN])] })).toBeNull();
   });
 });
 
 describe("role", () => {
-  async function roleOf(groups: unknown, cfg = config()): Promise<string> {
-    const { auth } = harness(cfg);
-    const id = await auth.identify({ "x-authentik-jwt": await mint({ claims: { groups } }) });
-    return auth.role(id!);
-  }
+  const roleOf = (groups: string[], cfg = config()) => stack(cfg).auth.role(identity(groups));
 
-  it("maps admin, member, other and both", async () => {
-    expect(await roleOf(["authentik Admins"])).toBe("admin");
-    expect(await roleOf(["member"])).toBe("member");
-    expect(await roleOf(["staff"])).toBe("none");
-    expect(await roleOf(["member", "authentik Admins"])).toBe("admin");
-    expect(await roleOf([])).toBe("none");
+  it("maps admin, member, other and both", () => {
+    expect(roleOf([ADMIN])).toBe("admin");
+    expect(roleOf([MEMBER])).toBe("member");
+    expect(roleOf(["staff"])).toBe("none");
+    expect(roleOf([MEMBER, ADMIN])).toBe("admin");
+    expect(roleOf([])).toBe("none");
   });
 
-  it("matches group names exactly, case-sensitively", async () => {
+  it("matches group names exactly, case-sensitively", () => {
     for (const variant of ["Authentik Admins", "authentik Admins2", "xauthentik Admins", "authentik  Admins", "Member", "members"]) {
-      expect(await roleOf([variant])).toBe("none");
+      expect(roleOf([variant])).toBe("none");
     }
   });
 
-  it("honours configured group names and never matches an empty one", async () => {
-    expect(await roleOf(["ops"], config({ webAdminGroup: "ops" }))).toBe("admin");
-    expect(await roleOf([""], config({ webAdminGroup: "", webMemberGroup: "" }))).toBe("none");
+  it("honours configured group names and never matches an empty one", () => {
+    expect(roleOf(["ops"], config({ webAdminGroup: "ops" }))).toBe("admin");
+    expect(roleOf([""], config({ webAdminGroup: "", webMemberGroup: "" }))).toBe("none");
+  });
+
+  it("roleGroups keeps only the groups that map to a role", () => {
+    expect(roleGroups(config(), ["staff", MEMBER, "x".repeat(500), ADMIN, MEMBER])).toEqual([MEMBER, ADMIN]);
+    expect(roleGroups(config(), ["staff"])).toEqual([]);
+    expect(roleGroups(config({ webAdminGroup: "", webMemberGroup: "" }), ["", MEMBER])).toEqual([]);
   });
 });
 
 describe("fail closed", () => {
-  for (const key of ["authentikJwksUrl", "authentikIssuer", "authentikAudience"]) {
-    it(`denies everything and warns loudly when ${key} is empty`, async () => {
-      const { auth, reasons, warnings } = harness(config({ [key]: "" }));
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    ["AUTHENTIK_ISSUER empty", { authentikIssuer: "" }, /AUTHENTIK_ISSUER/],
+    ["AUTHENTIK_CLIENT_ID empty", { authentikClientId: "" }, /AUTHENTIK_CLIENT_ID/],
+    ["AUTHENTIK_CLIENT_SECRET empty", { authentikClientSecret: "" }, /AUTHENTIK_CLIENT_SECRET/],
+    ["WEB_PUBLIC_URL empty", { webPublicUrl: "" }, /WEB_PUBLIC_URL/],
+    ["WEB_PUBLIC_URL plain http", { webPublicUrl: "http://comfy.example.test" }, /WEB_PUBLIC_URL/],
+    ["AUTHENTIK_ISSUER plain http", { authentikIssuer: "http://sso.example.test/application/o/vast/" }, /AUTHENTIK_ISSUER/],
+    ["WEB_SESSION_SECRET empty", { webSessionSecret: "" }, /WEB_SESSION_SECRET/],
+    ["WEB_SESSION_SECRET too short", { webSessionSecret: "short-secret-31-bytes-xxxxxxxxx" }, /WEB_SESSION_SECRET/],
+  ];
+  for (const [label, over, pattern] of cases) {
+    it(`denies everything and warns loudly once when ${label}`, async () => {
+      const { auth, warnings } = stack(config(over));
       expect(auth.configured).toBe(false);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toMatch(/FAIL-CLOSED/);
-      expect(await auth.identify({ "x-authentik-jwt": await mint() })).toBeNull();
-      expect(reasons).toEqual(["unconfigured"]);
+      expect(warnings[0]).toMatch(pattern);
+      // A cookie that would be valid under the configured secret still identifies nobody.
+      expect(await auth.identify({ cookie: await cookieFor([ADMIN]) })).toBeNull();
+      for (const value of [CLIENT_SECRET, SECRET, "short-secret-31-bytes-xxxxxxxxx"]) expect(warnings[0]).not.toContain(value);
     });
   }
+
+  it("requires both: configured OIDC and a sessions object", async () => {
+    const sessions = createSessions(SECRET, 8);
+    const quiet = { onMisconfigured: () => undefined };
+    expect(createAuth(config(), { sessions, oidc: { configured: true } }, quiet).configured).toBe(true);
+    expect(createAuth(config(), { sessions: null, oidc: { configured: true } }, quiet).configured).toBe(false);
+    const noOidc = createAuth(config(), { sessions, oidc: { configured: false } }, quiet);
+    expect(noOidc.configured).toBe(false);
+    expect(await noOidc.identify({ cookie: await cookieFor([ADMIN]) })).toBeNull();
+  });
+
+  it("a throwing session reader is anonymous, never an error or an identity", async () => {
+    const auth = createAuth(config(), { sessions: { read: async () => { throw new Error("boom"); } }, oidc: { configured: true } });
+    expect(await auth.identify({ cookie: "x=1" })).toBeNull();
+  });
 });
 
 describe("secrecy", () => {
-  it("never leaks the token or claims through the reject callback or console", async () => {
+  it("never writes the cookie, the secrets or claims to the console", async () => {
     const seen: string[] = [];
     const spies = (["log", "error", "warn", "info", "debug"] as const).map((m) => {
       const original = console[m];
@@ -213,23 +187,19 @@ describe("secrecy", () => {
       return () => (console[m] = original);
     });
     try {
-      const bad = await mint({ key: otherKey, claims: { email: "secret-claim@example.test" } });
-      const reasons: unknown[] = [];
-      const auth = createAuth(config(), resolver, { onReject: (r) => reasons.push(r) });
-      await auth.identify({ "x-authentik-jwt": bad });
-      await auth.identify({ "x-authentik-jwt": bad.slice(0, 20) });
-      const dump = JSON.stringify(reasons) + seen.join("\n");
-      expect(dump).not.toContain(bad);
-      expect(dump).not.toContain(bad.slice(0, 20));
-      expect(dump).not.toContain("secret-claim");
-      expect(reasons.every((r) => typeof r === "string" && r.length < 20)).toBe(true);
+      const cookie = await cookieFor([ADMIN]);
+      const { auth } = createAuthStack(config());
+      await auth.identify({ cookie });
+      await auth.identify({ cookie: cookie.slice(0, 40) });
+      createAuthStack(config({ webSessionSecret: "too-short-secret" }));
+      const dump = seen.join("\n");
+      expect(dump).not.toContain(cookie.split("=")[1]!);
+      expect(dump).not.toContain(SECRET);
+      expect(dump).not.toContain("too-short-secret");
+      expect(dump).not.toContain(CLIENT_SECRET);
+      expect(dump).not.toContain("ayu@example.test");
     } finally {
       spies.forEach((restore) => restore());
     }
-  });
-
-  it("does not let a throwing onReject change the outcome", async () => {
-    const auth = createAuth(config(), resolver, { onReject: () => { throw new Error("log down"); } });
-    expect(await auth.identify({})).toBeNull();
   });
 });

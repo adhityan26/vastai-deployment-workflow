@@ -5,14 +5,17 @@ Service: `apps/web` (Fastify, Node 24). Public URL: `https://gen.3dprintingbandu
 ## Architecture
 
 1. Browser -> Cloudflare (proxied DNS or Cloudflare Tunnel) for `gen.3dprintingbandung.my.id`.
-2. Cloudflare -> the Authentik proxy outpost on the homelab. Never directly to the web container.
-3. The outpost authenticates the user, then forwards the request to `vast-comfy-web:3000`
-   on a shared Docker network, adding the signed identity token as the `X-authentik-jwt` header.
-4. The web service verifies that JWT itself (JWKS, issuer, audience) and maps the groups
-   `authentik Admins` (start/extend/destroy) and `member` (generate, status) to roles.
-   `/api/*` is gated: without a valid identity it answers 401 (and if the Authentik keys are
-   empty it fails closed, so every `/api/*` request is 401). `/healthz` and the static page
-   (HTML, script, style, icon, manifest) are public; they carry no data.
+2. Cloudflare -> the web container. (This runbook is being rewritten for the Cloudflare-tunnel
+   deployment; see `docs/superpowers/plans/2026-10-18-oidc-login.md`.)
+3. The web service does the login itself: `GET /auth/login` sends the browser to Authentik
+   (OIDC authorization code flow with PKCE), `GET /auth/callback` exchanges the code
+   server-side with the client secret, verifies the ID token and sets a signed, HttpOnly,
+   Secure, SameSite=Lax session cookie (`__Host-vc_session`). `POST /auth/logout` clears it.
+4. The groups `authentik Admins` (start/extend/destroy) and `member` (generate, status) map to
+   roles; an account in neither group is refused at login. `/api/*` is gated: without a valid
+   session it answers 401 (and if any OIDC key or the session secret is missing it fails closed,
+   so every `/api/*` request is 401 and `/auth/login` is 503). `/healthz`, `/auth/*` and the
+   static page (HTML, script, style, icon, manifest) are public; they carry no data.
 5. The web service talks to the Vast REST API (rent/destroy) and, over the tailnet, to the
    instance (agent port 8189, ComfyUI port 18188, both `tag:gpu`).
 6. The registry (one active instance record) is a JSON file on a named Docker volume.
@@ -51,12 +54,14 @@ Required:
 - `REPO_URL`
 - `REPO_COMMIT`
 - `PROFILE`
-- `AUTHENTIK_JWKS_URL`
 - `AUTHENTIK_ISSUER`
-- `AUTHENTIK_AUDIENCE`
+- `AUTHENTIK_CLIENT_ID`
+- `AUTHENTIK_CLIENT_SECRET`
+- `WEB_PUBLIC_URL` (e.g. `https://gen.3dprintingbandung.my.id`)
+- `WEB_SESSION_SECRET` (at least 32 bytes, e.g. `openssl rand -hex 32`)
 
-(The three `AUTHENTIK_*` keys have empty defaults, but with empty values the service fails
-closed, so they are required in practice. `TS_AUTHKEY_FILE` and `REGISTRY_PATH` are set in the
+(These keys have empty defaults, but with empty values the service fails closed, so they are
+required in practice. Optional: `WEB_SESSION_TTL_H`, `WEB_OIDC_SKEW_S`. `TS_AUTHKEY_FILE` and `REGISTRY_PATH` are set in the
 compose snippet.)
 
 Optional (defaults are in the schema):
@@ -85,21 +90,14 @@ changes where the web looks, so the web and the instance would disagree. Leave t
 
 1. Create **groups** `authentik Admins` (usually exists) and `member`, and add users. The names
    must match `WEB_ADMIN_GROUP` / `WEB_MEMBER_GROUP`. A user in neither group gets 403.
-2. Create an **application** (e.g. slug `vast-comfy-web`) with a **Proxy Provider** in
-   **Proxy** mode (the outpost is the reverse proxy; do not use the forward-auth modes), with
-   external host `https://gen.3dprintingbandung.my.id` and internal host
-   `http://vast-comfy-web:3000`. Assign the provider to the (embedded or dedicated) outpost,
-   which must be on the shared Docker network so it can forward to `vast-comfy-web:3000`.
-3. The outpost must forward the signed JWT to the backend as the `X-authentik-jwt` header (the
-   proxy provider does this and carries the user's groups in the `groups` claim). Verify with
-   a request and check the header reaches the service (a 200 on `/api/state` after login).
-4. Fill in the values (find them in Authentik):
-   - `AUTHENTIK_JWKS_URL`: Providers -> your provider -> the "JWKS URL" shown in the provider
-     overview (form `https://<authentik-host>/application/o/<slug>/jwks/`).
-   - `AUTHENTIK_ISSUER`: the "OpenID Configuration Issuer" on the same page
+2. Create an **application** with an **OAuth2/OpenID Provider** (confidential client), redirect
+   URI `<WEB_PUBLIC_URL>/auth/callback`, scopes `openid profile email` with the `groups` claim
+   in the ID token, and an RS256 (or ES256) signing key.
+3. Fill in the values (find them in Authentik):
+   - `AUTHENTIK_ISSUER`: the provider's "OpenID Configuration Issuer"
      (`https://<authentik-host>/application/o/<slug>/`); it must match the token's `iss` exactly.
-   - `AUTHENTIK_AUDIENCE`: the provider's Client ID (the token `aud`).
-   Open the provider's OpenID Configuration URL to copy these exactly.
+   - `AUTHENTIK_CLIENT_ID` / `AUTHENTIK_CLIENT_SECRET`: the provider's client credentials.
+4. Verify: after logging in, `GET /api/me` answers 200 with your role.
 5. Restrict the application with a policy binding to the two groups.
 
 ## Cloudflare setup (`gen.3dprintingbandung.my.id`)

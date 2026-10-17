@@ -1,17 +1,11 @@
-import { jwtVerify, errors, type JWTVerifyGetKey } from "jose";
 import type { AppsConfig } from "@vast-comfy/core";
+import { createOidc, parsePublicUrl, type Oidc, type OidcDeps } from "./oidc.js";
+import { createSessions, type Sessions } from "./session.js";
 
-/** Header the Authentik proxy outpost uses to forward the signed identity token (protocol constant). */
-const JWT_HEADER = "x-authentik-jwt"; // config-lint: ok (header name defined by the Authentik outpost protocol)
-
-/**
- * Only asymmetric algorithms are accepted, and the list is pinned. This rules out `none`, and rules out
- * HS* (a symmetric alg could be forged by using the public key text as the HMAC secret). Authentik signs
- * with RS256 by default; ES256 is allowed for deployments that use an EC signing key.
- */
-const ALLOWED_ALGORITHMS = ["RS256", "ES256"];
-
-export type RejectReason = "unconfigured" | "missing" | "ambiguous" | "expired" | "claims" | "invalid" | "no_subject";
+// Identity of a request = a valid signed session cookie (set by /auth/callback after an OIDC login
+// at Authentik). Anything else, including any identity header a client sends, is anonymous. Auth is
+// fail-closed: without a complete OIDC configuration AND a usable session secret, every identify()
+// returns null.
 
 export type Role = "admin" | "member" | "none";
 
@@ -26,110 +20,122 @@ export interface Identity {
 export type HeaderBag = Record<string, string | string[] | undefined>;
 
 export interface AuthOptions {
-  /** Called with a coarse reason code only; never receives the token, its claims or any error message. */
-  onReject?: (reason: RejectReason) => void;
   /** Called once at construction when the configuration leaves auth fail-closed. Defaults to console.error. */
   onMisconfigured?: (message: string) => void;
 }
 
+export interface AuthDeps {
+  /** null when WEB_SESSION_SECRET is missing or too short (createSessions refused it). */
+  sessions: Pick<Sessions, "read"> | null;
+  oidc: Pick<Oidc, "configured">;
+}
+
 export interface Auth {
-  /** True when issuer, audience and JWKS URL are all configured; false means every identify() returns null. */
+  /** True only when OIDC is fully configured and the session secret is valid; false means every identify() returns null. */
   readonly configured: boolean;
   identify(headers: HeaderBag): Promise<Identity | null>;
   role(identity: Identity): Role;
 }
-
-const REQUIRED_KEYS: ReadonlyArray<readonly [string, string]> = [
-  ["authentikJwksUrl", "AUTHENTIK_JWKS_URL"],
-  ["authentikIssuer", "AUTHENTIK_ISSUER"],
-  ["authentikAudience", "AUTHENTIK_AUDIENCE"],
-];
 
 function str(cfg: AppsConfig, key: string): string {
   const value = cfg[key];
   return typeof value === "string" ? value : "";
 }
 
-/** The single value of the JWT header (case-insensitive), "missing" when absent, "ambiguous" when repeated. */
-function readToken(headers: HeaderBag): string | "missing" | "ambiguous" {
-  const found: string[] = [];
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() !== JWT_HEADER || value === undefined) continue;
-    if (Array.isArray(value)) found.push(...value);
-    else found.push(value);
+function int(cfg: AppsConfig, key: string): number {
+  const value = cfg[key];
+  return typeof value === "number" ? value : 0;
+}
+
+function groupNames(cfg: AppsConfig): { admin: string; member: string } {
+  return { admin: str(cfg, "webAdminGroup"), member: str(cfg, "webMemberGroup") };
+}
+
+/** Role of a group list: admin wins, then member; exact, case-sensitive; an empty configured name never matches. */
+export function roleOf(cfg: AppsConfig, groups: readonly string[]): Role {
+  const { admin, member } = groupNames(cfg);
+  if (admin !== "" && groups.includes(admin)) return "admin";
+  if (member !== "" && groups.includes(member)) return "member";
+  return "none";
+}
+
+/**
+ * Only the groups that map to a role (WEB_ADMIN_GROUP / WEB_MEMBER_GROUP). The session cookie stores
+ * just these, which keeps it small however many groups the account has, and changes no role.
+ */
+export function roleGroups(cfg: AppsConfig, groups: readonly string[]): string[] {
+  const { admin, member } = groupNames(cfg);
+  const wanted = [admin, member].filter((g) => g !== "");
+  return [...new Set(groups.filter((g) => wanted.includes(g)))];
+}
+
+/** Names (never values) of the keys that leave auth fail-closed. */
+function problems(cfg: AppsConfig, deps: AuthDeps): string[] {
+  const out: string[] = [];
+  const keys: Array<[string, string]> = [
+    ["authentikIssuer", "AUTHENTIK_ISSUER"],
+    ["authentikClientId", "AUTHENTIK_CLIENT_ID"],
+    ["authentikClientSecret", "AUTHENTIK_CLIENT_SECRET"],
+    ["webPublicUrl", "WEB_PUBLIC_URL"],
+  ];
+  for (const [key, env] of keys) if (str(cfg, key) === "") out.push(`${env} is empty`);
+  if (str(cfg, "webPublicUrl") !== "" && parsePublicUrl(str(cfg, "webPublicUrl")) === null) {
+    out.push("WEB_PUBLIC_URL is not a bare https origin (or http on localhost)");
   }
-  if (found.length === 0) return "missing";
-  const only = found[0];
-  if (found.length > 1 || only === undefined) return "ambiguous";
-  const token = only.trim();
-  return token === "" ? "missing" : token;
+  if (out.length === 0 && !deps.oidc.configured) out.push("the OIDC settings are invalid (check AUTHENTIK_ISSUER)");
+  if (deps.sessions === null) {
+    out.push(str(cfg, "webSessionSecret") === "" ? "WEB_SESSION_SECRET is empty" : "WEB_SESSION_SECRET is unusable (at least 32 bytes)");
+  }
+  return out;
 }
 
-function optionalString(value: unknown): string | null {
-  return typeof value === "string" && value !== "" ? value : null;
+function cookieHeader(headers: HeaderBag): string | undefined {
+  const raw = headers["cookie"];
+  if (Array.isArray(raw)) return raw.join("; ");
+  return raw;
 }
 
-function reasonFor(error: unknown): RejectReason {
-  if (error instanceof errors.JWTExpired) return "expired";
-  if (error instanceof errors.JWTClaimValidationFailed) return "claims";
-  return "invalid";
-}
-
-export function createAuth(cfg: AppsConfig, jwksResolver: JWTVerifyGetKey, options: AuthOptions = {}): Auth {
-  const issuer = str(cfg, "authentikIssuer");
-  const audience = str(cfg, "authentikAudience");
-  const adminGroup = str(cfg, "webAdminGroup");
-  const memberGroup = str(cfg, "webMemberGroup");
-  const missing = REQUIRED_KEYS.filter(([key]) => str(cfg, key) === "").map(([, env]) => env);
-  const configured = missing.length === 0;
-  const reject = (reason: RejectReason): null => {
-    try {
-      options.onReject?.(reason);
-    } catch {
-      // a failing logger must never turn a rejection into an error or an acceptance
-    }
-    return null;
-  };
+export function createAuth(cfg: AppsConfig, deps: AuthDeps, options: AuthOptions = {}): Auth {
+  const sessions = deps.sessions;
+  const configured = deps.oidc.configured && sessions !== null;
 
   if (!configured) {
-    const message = `auth is FAIL-CLOSED: ${missing.join(", ")} not configured; every request will be treated as unauthenticated`;
+    const message =
+      `auth is FAIL-CLOSED: ${problems(cfg, deps).join("; ")}; ` +
+      "every /api request will be answered 401 and /auth/login 503";
     (options.onMisconfigured ?? ((m: string) => console.error(m)))(message);
   }
 
   async function identify(headers: HeaderBag): Promise<Identity | null> {
-    if (!configured) return reject("unconfigured");
-    const token = readToken(headers);
-    if (token === "missing" || token === "ambiguous") return reject(token);
-    let claims;
+    if (!configured || sessions === null) return null;
     try {
-      ({ payload: claims } = await jwtVerify(token, jwksResolver, {
-        issuer,
-        audience,
-        algorithms: ALLOWED_ALGORITHMS,
-        requiredClaims: ["exp", "sub"],
-      }));
-    } catch (error) {
-      return reject(reasonFor(error));
+      return await sessions.read(cookieHeader(headers));
+    } catch {
+      return null; // reading never throws, but a failure must never become an identity
     }
-    const subject = optionalString(claims.sub);
-    if (subject === null) return reject("no_subject");
-    const rawGroups: unknown = claims["groups"];
-    const groups = Array.isArray(rawGroups) ? rawGroups.filter((g): g is string => typeof g === "string") : [];
-    return Object.freeze({
-      subject,
-      username: optionalString(claims["preferred_username"]) ?? subject,
-      email: optionalString(claims["email"]),
-      name: optionalString(claims["name"]),
-      groups: Object.freeze(groups),
+  }
+
+  return { configured, identify, role: (identity) => roleOf(cfg, identity.groups) };
+}
+
+/** Everything main.ts (and the route tests) need for login: one wiring, so tests exercise the real one. */
+export interface AuthStack {
+  auth: Auth;
+  oidc: Oidc;
+  sessions: Sessions | null;
+}
+
+export function createAuthStack(cfg: AppsConfig, options: AuthOptions & { oidc?: OidcDeps; now?: () => number } = {}): AuthStack {
+  const oidc = createOidc(cfg, options.oidc ?? {});
+  let sessions: Sessions | null = null;
+  try {
+    sessions = createSessions(str(cfg, "webSessionSecret"), int(cfg, "webSessionTtlH"), {
+      secure: oidc.secureCookies,
+      ...(options.now ? { now: options.now } : {}),
     });
+  } catch {
+    sessions = null; // reported (by key name only) through onMisconfigured below
   }
-
-  function role(identity: Identity): Role {
-    // Exact, case-sensitive equality; an unconfigured (empty) group name never matches anything.
-    if (adminGroup !== "" && identity.groups.includes(adminGroup)) return "admin";
-    if (memberGroup !== "" && identity.groups.includes(memberGroup)) return "member";
-    return "none";
-  }
-
-  return { configured, identify, role };
+  const auth = createAuth(cfg, { sessions, oidc }, options.onMisconfigured ? { onMisconfigured: options.onMisconfigured } : {});
+  return { auth, oidc, sessions };
 }

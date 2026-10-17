@@ -9,13 +9,17 @@ import type {
   Profile,
 } from "@vast-comfy/core";
 import type { Auth, Identity, Role } from "./auth.js";
+import { registerAuthRoutes, type LoginDeps } from "./auth-routes.js";
+import { parsePublicUrl } from "./oidc.js";
 import { registerApiRoutes } from "./routes.js";
 import { sendError } from "./reply.js";
 
 // HTTP surface of the web app. Every request passes one onRequest gate: /api/* needs an
-// identity from auth.identify() (401) and the route's role (403); POSTs must be JSON (415) and
-// must not come from another site (403). Unknown routes are 404 with a JSON error. Responses
-// carry strict security headers and never CORS headers.
+// identity from auth.identify() (a valid session cookie; 401) and the route's role (403); every
+// state-changing request must come from our own origin (403 csrf, see sameOrigin) and be JSON
+// (415). Public routes are exactly /healthz, the static files and /auth/{login,callback,logout}.
+// Unknown routes are 404 with a JSON error. Responses carry strict security headers and never
+// CORS headers; /api and /auth responses are never cacheable.
 
 export type Access = "public" | "member" | "admin";
 
@@ -42,6 +46,8 @@ export interface ServerDeps {
   template: unknown;
   /** Directory of the static page (apps/web/public); may be empty or missing. */
   publicDir: string;
+  /** Login routes; absent (or not configured) means /auth/login and /auth/callback answer 503. */
+  login?: LoginDeps;
   /** Secret values that must never appear in a response (Vast key, Tailscale key, ...). */
   secrets(): readonly string[];
   /** Epoch milliseconds; injectable for tests. */
@@ -65,7 +71,8 @@ const SECURITY_HEADERS: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
 const JSON_TYPE = "application/json";
-const ALLOWED_FETCH_SITES = new Set(["same-origin", "none"]);
+const SAME_ORIGIN = "same-origin";
+const SAFE_METHODS = new Set(["GET", "HEAD"]);
 const MIN_SECRET_LENGTH = 8;
 
 const STATIC_TYPES: Record<string, string> = {
@@ -92,6 +99,35 @@ function pathOf(req: FastifyRequest): string {
 function isApiPath(path: string): boolean {
   const lower = path.toLowerCase();
   return lower === "/api" || lower.startsWith("/api/");
+}
+
+function isAuthPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower === "/auth" || lower.startsWith("/auth/");
+}
+
+function single(value: string | string[] | undefined): string | undefined | null {
+  if (Array.isArray(value)) return value.length === 1 ? value[0] : null;
+  return value;
+}
+
+/**
+ * The one CSRF rule for every state-changing (non-GET/HEAD) request, /api/* and /auth/logout alike:
+ * - an `Origin` header, when present, must equal the origin of WEB_PUBLIC_URL exactly;
+ * - a `Sec-Fetch-Site` header, when present, must be `same-origin` (not `none`, `same-site` or
+ *   `cross-site`: a sibling subdomain is another site for us);
+ * - at least one of the two must be present and positive: without an `Origin` the request is
+ *   allowed only with `Sec-Fetch-Site: same-origin`.
+ * Browsers send Origin on every cross-origin POST and on same-origin fetch POSTs, so a forged form
+ * or fetch from another site always fails. GET navigations (/auth/login, /auth/callback) are exempt.
+ */
+function sameOrigin(headers: FastifyRequest["headers"], publicOrigin: string): boolean {
+  const origin = single(headers["origin"]);
+  const site = single(headers["sec-fetch-site"]);
+  if (origin === null || site === null) return false;
+  if (site !== undefined && site.toLowerCase() !== SAME_ORIGIN) return false;
+  if (origin !== undefined) return publicOrigin !== "" && origin === publicOrigin;
+  return site !== undefined;
 }
 
 /** The access a request needs. /api paths are never public, whatever route matched. */
@@ -174,6 +210,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.decorateRequest("identity", null);
   app.decorateRequest("role", "none");
 
+  const publicOrigin = parsePublicUrl(typeof deps.cfg["webPublicUrl"] === "string" ? deps.cfg["webPublicUrl"] : "")?.origin ?? "";
+
   app.addHook("onRequest", async (req, reply) => {
     const access = accessFor(req);
     if (access !== "public") {
@@ -184,11 +222,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       req.identity = identity;
       req.role = role;
     }
-    if (req.method === "POST") {
-      const site = req.headers["sec-fetch-site"];
-      if (typeof site === "string" && !ALLOWED_FETCH_SITES.has(site.toLowerCase())) {
-        return sendError(reply, 403, "cross_site", "cross-site requests are refused");
-      }
+    if (!SAFE_METHODS.has(req.method)) {
+      if (!sameOrigin(req.headers, publicOrigin)) return sendError(reply, 403, "csrf", "cross-site requests are refused");
       if (mediaType(req.headers["content-type"]) !== JSON_TYPE) {
         return sendError(reply, 415, "unsupported_media_type", "Content-Type must be application/json");
       }
@@ -196,9 +231,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return undefined;
   });
 
-  app.addHook("onSend", async (_req, reply, payload) => {
+  app.addHook("onSend", async (req, reply, payload) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value);
-    if (!reply.hasHeader("cache-control")) reply.header("cache-control", "no-store");
+    const path = pathOf(req);
+    if (isApiPath(path) || isAuthPath(path)) reply.header("cache-control", "no-store");
+    else if (!reply.hasHeader("cache-control")) reply.header("cache-control", "no-store");
     if (typeof payload !== "string") return payload;
     // Defense in depth: a configured secret must never leave in a body, whatever produced it.
     let out = payload;
@@ -230,6 +267,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   app.get("/healthz", { config: { access: "public" } }, async () => ({ ok: true }));
 
+  registerAuthRoutes(app, { cfg: deps.cfg, login: deps.login, log });
   registerApiRoutes(app, deps);
 
   app.get("/*", { config: { access: "public" } }, async (req, reply) => {
