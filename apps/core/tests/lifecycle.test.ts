@@ -22,6 +22,7 @@ import {
   Lifecycle,
   NoOffersError,
   ONSTART_CMD,
+  RefusedError,
   StartError,
   type AgentLike,
 } from "../src/lifecycle.js";
@@ -654,7 +655,9 @@ describe("Lifecycle.destroy", () => {
       { id: 7, label: "someone-else", actual_status: "running", start_date: T0, dph_total: 0.4 },
     );
     await expect(life.destroyUnknown(7)).rejects.toThrow(/project label/);
+    await expect(life.destroyUnknown(7)).rejects.toBeInstanceOf(RefusedError);
     await expect(life.destroyUnknown(900)).rejects.toThrow(/active record/);
+    await expect(life.destroyUnknown(900)).rejects.toBeInstanceOf(RefusedError);
     expect(await life.destroyUnknown(5)).toBe("destroyed");
     expect(vast.calls.filter((c) => c.startsWith("vast.destroy"))).toEqual(["vast.destroy:5"]);
   });
@@ -730,5 +733,37 @@ describe("Lifecycle.extend and view", () => {
     const { life, file } = setup();
     await life.start();
     expect(readFileSync(file, "utf8")).not.toContain(AUTH_KEY);
+  });
+});
+
+describe("Lifecycle.view scrubbing", () => {
+  it("never returns secrets echoed in the agent's free-text status fields", async () => {
+    const VAST_KEY = "fixturevastkeybbbbbbbbbbbbbbbbbbb";
+    const calls: string[] = [];
+    const clock = (): number => T0;
+    const dir = mkdtempSync(join(tmpdir(), "life-scrub-"));
+    const registry = new Registry(join(dir, "registry.json"), schema);
+    const vast = new FakeVast(calls, clock);
+    const agent = new FakeAgent(calls);
+    const life = new Lifecycle({
+      cfg: { ...cfg, vastApiKey: VAST_KEY, secretNames: ["VAST_API_KEY"] } as unknown as AppsConfig,
+      vast, registry, agentFor: () => agent, clock,
+      tsAuthKey: async () => AUTH_KEY, newToken: () => TOKEN, newHostname: () => HOST, sleep: async () => undefined,
+    });
+    await life.start();
+    const echo = `token ${TOKEN} key ${AUTH_KEY} vast ${VAST_KEY} Bearer ${TOKEN}x`;
+    for (const state of ["failed", "destroy_failed", "downloading"]) {
+      agent.statusImpl = async () =>
+        status(state, {
+          reason: echo,
+          progress: { phase: echo, file: echo, bytes_done: 1, bytes_total: 2 },
+          profile: echo,
+          commit: echo,
+          destroy: { pending: true, attempts: 1, last_error: echo },
+        });
+      const out = JSON.stringify(await life.view());
+      for (const secret of [TOKEN, AUTH_KEY, VAST_KEY]) expect(out, state).not.toContain(secret);
+      expect(out).toContain("[redacted]");
+    }
   });
 });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AppsConfig } from "../src/config.js";
-import { ComfyClient, ComfyError, Unreachable } from "../src/comfy.js";
+import { ComfyClient, ComfyError, ResponseTooLarge, Unreachable } from "../src/comfy.js";
 
 interface Seen { method: string; url: string; body: string }
 let server: Server | undefined;
@@ -25,7 +25,7 @@ async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 
   });
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  const cfg = { comfyPort: port, httpTimeoutSApps: timeoutS, secretNames: [] } as unknown as AppsConfig;
+  const cfg = { comfyPort: port, httpTimeoutSApps: timeoutS, webJsonMaxBytes: 4096, webImageMaxBytes: 8192, secretNames: [] } as unknown as AppsConfig;
   return { client: new ComfyClient("127.0.0.1", cfg), seen };
 }
 
@@ -119,5 +119,52 @@ describe("ComfyClient", () => {
     const t0 = Date.now();
     await expect(client.queue()).rejects.toBeInstanceOf(Unreachable);
     expect(Date.now() - t0).toBeLessThan(4000);
+  });
+});
+
+describe("ComfyClient response caps", () => {
+  it("view rejects an honest oversized content-length before reading the body", async () => {
+    let written = 0;
+    const { client } = await fake((_s, res) => {
+      res.writeHead(200, { "Content-Type": "image/png", "Content-Length": String(10 * 1024 * 1024) });
+      const chunk = Buffer.alloc(64 * 1024);
+      const pump = () => {
+        while (written < 10 * 1024 * 1024 && !res.destroyed && res.write(chunk)) written += chunk.length;
+        if (written < 10 * 1024 * 1024 && !res.destroyed) res.once("drain", pump);
+      };
+      pump();
+    });
+    await expect(client.view("a.png", "", "output")).rejects.toBeInstanceOf(ResponseTooLarge);
+    expect(written).toBeLessThan(10 * 1024 * 1024);
+  });
+
+  it("view stops reading an endless chunked body as soon as it passes the cap", async () => {
+    let closed = false;
+    let written = 0;
+    const { client } = await fake((_s, res) => {
+      res.writeHead(200, { "Content-Type": "image/png" }); // no content-length: chunked
+      res.on("close", () => (closed = true));
+      const chunk = Buffer.alloc(4096, 1);
+      const timer = setInterval(() => {
+        if (res.destroyed) return clearInterval(timer);
+        res.write(chunk);
+        written += chunk.length;
+      }, 1);
+    });
+    const started = Date.now();
+    const err = await client.view("a.png", "", "output").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResponseTooLarge);
+    expect(err).not.toBeInstanceOf(Unreachable);
+    expect(Date.now() - started).toBeLessThan(3000); // well before the 5 s timeout
+    await new Promise((r) => setTimeout(r, 50));
+    expect(closed).toBe(true);
+    const at = written;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(written).toBe(at); // the server is no longer writing
+  });
+
+  it("history rejects a JSON body over the JSON cap", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, { p1: { outputs: {}, junk: "x".repeat(5000) } }));
+    await expect(client.history("p1")).rejects.toBeInstanceOf(ResponseTooLarge);
   });
 });

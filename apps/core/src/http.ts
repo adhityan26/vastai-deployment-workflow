@@ -25,6 +25,11 @@ export function baseUrl(host: string, port: number): string {
   return `http://${host}:${port}`; // config-lint: ok (scheme is a protocol constant; host and port are injected)
 }
 
+/** Body cap for JSON calls to the instance (WEB_JSON_MAX_BYTES). */
+export function jsonMaxBytes(cfg: AppsConfig): number {
+  return positiveInt("WEB_JSON_MAX_BYTES", cfg["webJsonMaxBytes"]);
+}
+
 export function timeoutMs(cfg: AppsConfig): number {
   return positiveInt("HTTP_TIMEOUT_S_APPS", cfg["httpTimeoutSApps"]) * 1000;
 }
@@ -41,16 +46,65 @@ export interface RawReply {
   contentType: string;
 }
 
-/** One request, no retry. Network failures and timeouts become Unreachable. */
+/** The instance answered with a body larger than the caller allows; reading stopped early. */
+export class ResponseTooLarge extends Error {
+  readonly limit: number;
+  constructor(path: string, limit: number) {
+    super(`response to ${path} exceeds ${limit} bytes`);
+    this.name = "ResponseTooLarge";
+    this.limit = limit;
+  }
+}
+
+export interface RequestOptions {
+  /** Largest response body accepted; a larger one throws ResponseTooLarge as soon as it is seen. */
+  maxBytes: number;
+  /** Redacted from every error message. */
+  secret?: string;
+}
+
+/** Read at most `maxBytes` of the body; cancels the stream as soon as the running total passes it. */
+async function readCapped(res: Response, maxBytes: number, path: string, abort: AbortController): Promise<Buffer> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    abort.abort();
+    throw new ResponseTooLarge(path, maxBytes);
+  }
+  if (res.body === null) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      throw new ResponseTooLarge(path, maxBytes);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/** One request, no retry. Network failures and timeouts become Unreachable; oversized bodies ResponseTooLarge. */
 export async function request(
   method: string,
   url: string,
   ms: number,
   headers: Record<string, string>,
   body: unknown,
-  secret?: string,
+  opts: RequestOptions,
 ): Promise<RawReply> {
-  const init: RequestInit = { method, headers: { ...headers }, signal: AbortSignal.timeout(ms), redirect: "error" };
+  if (!Number.isInteger(opts.maxBytes) || opts.maxBytes <= 0) throw new Error("maxBytes must be a positive integer");
+  const abort = new AbortController();
+  const init: RequestInit = {
+    method,
+    headers: { ...headers },
+    signal: AbortSignal.any([AbortSignal.timeout(ms), abort.signal]),
+    redirect: "error",
+  };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)["Content-Type"] = "application/json";
@@ -58,15 +112,16 @@ export async function request(
   const path = new URL(url).pathname;
   try {
     const res = await fetch(url, init);
-    const bytes = Buffer.from(await res.arrayBuffer());
+    const bytes = await readCapped(res, opts.maxBytes, path, abort);
     return { status: res.status, body: bytes, contentType: res.headers.get("content-type") ?? "" };
   } catch (e) {
+    if (e instanceof ResponseTooLarge) throw e;
     const err = e as Error & { cause?: { code?: string } };
     if (err.name === "TimeoutError" || err.name === "AbortError") {
       throw new Unreachable(`${method} ${path} timed out after ${ms} ms`);
     }
     const code = err.cause?.code ? ` (${err.cause.code})` : "";
-    throw new Unreachable(clip(`${method} ${path} failed: ${err.message}${code}`, secret));
+    throw new Unreachable(clip(`${method} ${path} failed: ${err.message}${code}`, opts.secret));
   }
 }
 

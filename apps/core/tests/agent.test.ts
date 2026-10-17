@@ -3,7 +3,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { AppsConfig } from "../src/config.js";
-import { AgentClient, AgentError, Unreachable } from "../src/agent.js";
+import { AgentClient, AgentError, ResponseTooLarge, Unreachable } from "../src/agent.js";
 
 const SCHEMA = fileURLToPath(new URL("../../../contracts/status.schema.json", import.meta.url));
 const TOKEN = "tok-" + "z".repeat(30) + "SECRET";
@@ -35,7 +35,7 @@ async function fake(handler: (s: Seen, res: ServerResponse) => void, timeoutS = 
   });
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  const cfg = { agentPort: port, httpTimeoutSApps: timeoutS, secretNames: [] } as unknown as AppsConfig;
+  const cfg = { agentPort: port, httpTimeoutSApps: timeoutS, webJsonMaxBytes: 4096, secretNames: [] } as unknown as AppsConfig;
   return { client: new AgentClient("127.0.0.1", cfg, TOKEN, SCHEMA), seen, cfg };
 }
 
@@ -134,5 +134,12 @@ describe("AgentClient", () => {
     await client.destroy("manual");
     expect(seen[0]?.url).toBe("/destroy");
     expect(JSON.parse(seen[0]!.body)).toEqual({ reason: "manual" });
+  });
+});
+
+describe("AgentClient response cap", () => {
+  it("status rejects a body over WEB_JSON_MAX_BYTES with ResponseTooLarge", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, { ...STATUS, reason: "x".repeat(5000) }));
+    await expect(client.status()).rejects.toBeInstanceOf(ResponseTooLarge);
   });
 });

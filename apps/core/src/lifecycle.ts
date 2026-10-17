@@ -1,4 +1,4 @@
-import type { AppsConfig } from "./config.js";
+import { camelCase, type AppsConfig } from "./config.js";
 import type { AgentStatus } from "./agent.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import {
@@ -53,6 +53,14 @@ export class StartError extends Error {
     super(message);
     this.name = "StartError";
     this.ambiguous = ambiguous;
+  }
+}
+
+/** The request was refused on purpose (e.g. not a project instance); the message is safe to show. */
+export class RefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RefusedError";
   }
 }
 
@@ -209,6 +217,24 @@ export class Lifecycle {
   constructor(private readonly deps: LifecycleDeps) {
     this.cfg = deps.cfg;
     this.sleep = deps.sleep ?? realSleep;
+    // Configured secrets (e.g. VAST_API_KEY) are scrubbed too, whoever echoes them.
+    for (const name of this.cfg.secretNames ?? []) {
+      const value = this.cfg[camelCase(name)];
+      if (typeof value === "string" && value !== "") this.secrets.add(value);
+    }
+  }
+
+  /** The agent's /status with every free-text field scrubbed (the agent is not trusted). */
+  private scrubStatus(status: AgentStatus): AgentStatus {
+    const clean = (v: unknown): unknown => {
+      if (typeof v === "string") return this.scrub(v);
+      if (Array.isArray(v)) return v.map(clean);
+      if (v !== null && typeof v === "object") {
+        return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, clean(x)]));
+      }
+      return v;
+    };
+    return clean(status) as AgentStatus;
   }
 
   // Start, destroy and reconcile run one at a time so none of them acts on a stale record.
@@ -445,13 +471,13 @@ export class Lifecycle {
     return this.exclusive(async () => {
       const inst = (await this.deps.vast.listInstances()).find((i) => i.id === vastId);
       if (inst === undefined) return "gone";
-      if (!isProjectLabel(inst.label)) throw new Error(`instance ${vastId} does not carry the project label`);
+      if (!isProjectLabel(inst.label)) throw new RefusedError(`instance ${vastId} does not carry the project label`);
       const active = await this.deps.registry.active();
       if (
         active !== null &&
         (active.vast_instance_id === vastId || labelHostname(inst.label) === active.tailnet_hostname)
       ) {
-        throw new Error(`instance ${vastId} belongs to the active record; use destroy()`);
+        throw new RefusedError(`instance ${vastId} belongs to the active record; use destroy()`);
       }
       return this.vastDestroy(vastId);
     });
@@ -500,7 +526,7 @@ export class Lifecycle {
     if (record !== null && record.vast_instance_id !== null) {
       this.secrets.add(record.agent_token);
       try {
-        agent = await this.deps.agentFor(record).status();
+        agent = this.scrubStatus(await this.deps.agentFor(record).status());
       } catch (err) {
         agentError = this.scrub(message(err));
         agent = null;
@@ -530,7 +556,7 @@ export class Lifecycle {
       record !== null && this.lastDestroyError?.hostname === record.tailnet_hostname
         ? { error: this.lastDestroyError.error }
         : agent?.state === "destroy_failed"
-          ? { error: this.scrub(agent.destroy.last_error ?? "destroy failed on the instance") }
+          ? { error: agent.destroy.last_error ?? "destroy failed on the instance" }
           : null;
 
     return {

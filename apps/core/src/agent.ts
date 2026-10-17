@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv/dist/2020.js";
 import type { AppsConfig } from "./config.js";
-import { baseUrl, clip, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
+import { baseUrl, clip, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
 
-export { Unreachable } from "./http.js";
+export { ResponseTooLarge, Unreachable } from "./http.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
 
@@ -43,6 +43,7 @@ export interface AgentStatus {
 export class AgentClient {
   private readonly base: string;
   private readonly ms: number;
+  private readonly maxBytes: number;
   private readonly validate: ValidateFunction;
 
   /** `statusSchemaPath` is contracts/status.schema.json, passed in by the caller. */
@@ -55,12 +56,16 @@ export class AgentClient {
     if (token === "") throw new Error("agent token is empty");
     this.base = baseUrl(host, positiveInt("AGENT_PORT", cfg["agentPort"]));
     this.ms = timeoutMs(cfg);
+    this.maxBytes = jsonMaxBytes(cfg);
     const ajv = new Ajv2020({ allErrors: true, strict: false });
     this.validate = ajv.compile(JSON.parse(readFileSync(statusSchemaPath, "utf8")) as object);
   }
 
   private async call(method: string, path: string, body?: unknown): Promise<RawReply> {
-    return request(method, `${this.base}${path}`, this.ms, { Authorization: `Bearer ${this.token}` }, body, this.token);
+    return request(method, `${this.base}${path}`, this.ms, { Authorization: `Bearer ${this.token}` }, body, {
+      maxBytes: this.maxBytes,
+      secret: this.token,
+    });
   }
 
   private fail(what: string, reply: RawReply): never {

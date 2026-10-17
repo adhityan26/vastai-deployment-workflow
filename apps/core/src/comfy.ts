@@ -1,7 +1,7 @@
 import type { AppsConfig } from "./config.js";
-import { baseUrl, clip, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
+import { baseUrl, clip, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
 
-export { Unreachable } from "./http.js";
+export { ResponseTooLarge, Unreachable } from "./http.js";
 
 /** ComfyUI answered with an HTTP error. Carries the status and a clipped message. */
 export class ComfyError extends Error {
@@ -42,14 +42,19 @@ function safeSegment(name: string, value: string, allowEmpty: boolean): string {
 export class ComfyClient {
   private readonly base: string;
   private readonly ms: number;
+  private readonly jsonMax: number;
+  private readonly imageMax: number;
 
   constructor(host: string, cfg: AppsConfig) {
     this.base = baseUrl(host, positiveInt("COMFY_PORT", cfg["comfyPort"]));
     this.ms = timeoutMs(cfg);
+    this.jsonMax = jsonMaxBytes(cfg);
+    this.imageMax = positiveInt("WEB_IMAGE_MAX_BYTES", cfg["webImageMaxBytes"]);
   }
 
-  private call(method: string, path: string, body?: unknown): Promise<RawReply> {
-    return request(method, `${this.base}${path}`, this.ms, {}, body);
+  // The instance is a rented third-party host: every body is size-capped (JSON vs image).
+  private call(method: string, path: string, body?: unknown, maxBytes = this.jsonMax): Promise<RawReply> {
+    return request(method, `${this.base}${path}`, this.ms, {}, body, { maxBytes });
   }
 
   private fail(what: string, reply: RawReply): never {
@@ -80,7 +85,7 @@ export class ComfyClient {
     safeSegment("subfolder", subfolder, true);
     if (!(VIEW_TYPES as readonly string[]).includes(type)) throw new ComfyError(0, "type must be input, output or temp");
     const q = new URLSearchParams({ filename, subfolder, type });
-    const reply = await this.call("GET", `/view?${q.toString()}`);
+    const reply = await this.call("GET", `/view?${q.toString()}`, undefined, this.imageMax);
     if (reply.status !== 200) this.fail("view", reply);
     return { bytes: reply.body, contentType: reply.contentType };
   }

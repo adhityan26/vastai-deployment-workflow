@@ -8,6 +8,8 @@ import {
   GenerateInputError,
   NoActiveInstanceError,
   NoOffersError,
+  RefusedError,
+  ResponseTooLarge,
   StartError,
   Unreachable,
   generate,
@@ -169,7 +171,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   );
   const generateTimeoutMs = intCfg(cfg, "generateTimeoutS", "GENERATE_TIMEOUT_S") * 1000;
   const extendMax = intCfg(cfg, "webExtendMaxMinutes", "WEB_EXTEND_MAX_MINUTES");
-  const plainScrub = scrubber(deps, []);
+  /** A scrubber that also knows the active record's token and hostname. */
+  const activeScrubber = async (): Promise<(text: string) => string> => {
+    const active = await deps.registry.active().catch(() => null);
+    return scrubber(deps, active ? [active.agent_token, active.tailnet_hostname] : []);
+  };
+  const tooLarge = (reply: FastifyReply, code = "upstream_too_large") =>
+    sendError(reply, 502, code, "the instance sent a response larger than allowed");
   const admin = { config: { access: "admin" as const } };
   const member = { config: { access: "member" as const } };
 
@@ -276,8 +284,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
         if (err instanceof AgentError && REFUSAL_STATUSES.has(err.status)) {
           const text = err.message.replace(/^extend failed with HTTP \d+:\s*/, "");
-          return sendError(reply, 422, "extend_refused", plainScrub(text));
+          return sendError(reply, 422, "extend_refused", (await activeScrubber())(text));
         }
+        if (err instanceof ResponseTooLarge) return tooLarge(reply);
         log("warn", `extend failed: ${(err as Error).name}`);
         return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
       }
@@ -304,10 +313,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return { outcome: await deps.lifecycle.destroyUnknown(vast_id) };
       } catch (err) {
         if (err instanceof DestroyFailedError) return sendError(reply, 502, "destroy_failed", "Vast destroy failed");
-        // Lifecycle refuses with a plain Error: not a project instance, or the active one.
-        if (err instanceof Error && err.constructor === Error) {
-          return sendError(reply, 409, "refused", plainScrub(err.message));
-        }
+        // Not a project instance, or the active one.
+        if (err instanceof RefusedError) return sendError(reply, 409, "refused", (await activeScrubber())(err.message));
         log("warn", `destroy-unknown failed: ${(err as Error).name}`);
         return sendError(reply, 502, "vast_unavailable", "Vast could not be reached");
       }
@@ -336,6 +343,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return sendError(reply, 400, err.code, err.message);
       }
       log("warn", `generate submit failed: ${(err as Error).name}`);
+      if (err instanceof ResponseTooLarge) return tooLarge(reply);
       return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not accept the job");
     }
     if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
@@ -359,6 +367,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         } catch (err) {
           if (err instanceof GenerateFailed) {
             job.state = { kind: "failed", message: scrubber(deps, [job.hostname])(err.message) };
+          } else if (err instanceof ResponseTooLarge) {
+            // A hostile or broken instance: stop polling it for this job.
+            log("warn", "generate poll: oversized history response");
+            job.state = { kind: "failed", message: "the instance sent an oversized response" };
+            return tooLarge(reply);
           } else {
             // Unreachable or ComfyError: transient from the browser's view; it may poll again.
             log("warn", `generate poll failed: ${(err as Error).name}`);
@@ -393,6 +406,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (err instanceof ComfyError && err.status === 0) {
         log("warn", "ComfyUI history named an unsafe image path; refused");
         return sendError(reply, 502, "image_rejected", "the image reference was refused");
+      }
+      if (err instanceof ResponseTooLarge) {
+        log("warn", "image larger than WEB_IMAGE_MAX_BYTES; refused");
+        return tooLarge(reply, "image_too_large");
       }
       if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
       return sendError(reply, 502, "image_unavailable", "the image could not be fetched");

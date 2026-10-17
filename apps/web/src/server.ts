@@ -143,11 +143,21 @@ function intCfg(cfg: AppsConfig, key: string, env: string): number {
   return v;
 }
 
+/** Node/Fastify socket timeouts from config (Fastify 5's defaults are effectively unlimited). */
+export function serverTimeouts(cfg: AppsConfig): { requestTimeout: number; connectionTimeout: number; keepAliveTimeout: number } {
+  return {
+    requestTimeout: intCfg(cfg, "webRequestTimeoutS", "WEB_REQUEST_TIMEOUT_S") * 1000,
+    connectionTimeout: intCfg(cfg, "webConnectionTimeoutS", "WEB_CONNECTION_TIMEOUT_S") * 1000,
+    keepAliveTimeout: intCfg(cfg, "webKeepaliveTimeoutS", "WEB_KEEPALIVE_TIMEOUT_S") * 1000,
+  };
+}
+
 export function buildServer(deps: ServerDeps): FastifyInstance {
   const log = deps.log ?? (() => undefined);
   const app = Fastify({
     logger: false,
     bodyLimit: intCfg(deps.cfg, "webBodyLimitBytes", "WEB_BODY_LIMIT_BYTES"),
+    ...serverTimeouts(deps.cfg),
     exposeHeadRoutes: false,
     return503OnClosing: true,
     // Strict validation: no coercion, no silent removal of unknown properties, no defaults.

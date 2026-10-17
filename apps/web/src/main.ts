@@ -133,7 +133,12 @@ async function main(): Promise<void> {
   const intervalMs = int(cfg, "reconcileIntervalS") * 1000;
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
-  const reconcile = async (): Promise<void> => {
+  let inFlight: Promise<void> = Promise.resolve();
+  const reconcile = (): Promise<void> => {
+    inFlight = reconcileOnce();
+    return inFlight;
+  };
+  const reconcileOnce = async (): Promise<void> => {
     try {
       const r = await lifecycle.reconcile();
       if (r.vast_error !== null) log("warn", "reconcile: Vast list unavailable; nothing changed");
@@ -152,11 +157,29 @@ async function main(): Promise<void> {
     }
   };
 
+  const shutdownWaitMs = int(cfg, "webShutdownWaitS") * 1000;
+  let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     stopped = true;
     if (timer !== null) clearTimeout(timer);
-    await app.close();
-    process.exit(0);
+    let code = 0;
+    try {
+      await app.close();
+    } catch (err) {
+      code = 1;
+      log("error", `server close failed: ${err instanceof Error ? err.name : "error"}`);
+    }
+    // Let an in-flight reconcile finish (it may be mid-destroy), but never wait forever.
+    let waitTimer: NodeJS.Timeout | undefined;
+    const waited = await Promise.race([
+      inFlight.then(() => true, () => true),
+      new Promise<boolean>((r) => (waitTimer = setTimeout(() => r(false), shutdownWaitMs))),
+    ]);
+    clearTimeout(waitTimer);
+    if (!waited) log("warn", "shutdown: reconcile still running after WEB_SHUTDOWN_WAIT_S; exiting anyway");
+    process.exit(code);
   };
   process.once("SIGTERM", () => void shutdown());
   process.once("SIGINT", () => void shutdown());

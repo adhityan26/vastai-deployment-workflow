@@ -179,6 +179,11 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     comfyPort: comfy.port,
     agentPort: agent.port,
     httpTimeoutSApps: 5,
+    webJsonMaxBytes: 65536,
+    webImageMaxBytes: 65536,
+    webRequestTimeoutS: 30,
+    webConnectionTimeoutS: 60,
+    webKeepaliveTimeoutS: 75,
     startIdleMinutes: 30,
     startFailsafeHours: 3,
     startHardCapHours: 6,
@@ -502,6 +507,12 @@ describe("start, estimate, destroy, extend", () => {
     expect((await post("/api/destroy-unknown", a, { vast_id: VAST_ID })).statusCode).toBe(409);
     const ok = await post("/api/destroy-unknown", a, { vast_id: 6 });
     expect(ok.json()).toEqual({ outcome: "destroyed" });
+    // A plain failure is not a refusal: generic 502, no message relayed.
+    h.vast.listError = new Error(`boom ${VAST_KEY}`);
+    const failed = await post("/api/destroy-unknown", a, { vast_id: 6 });
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json().error.code).toBe("vast_unavailable");
+    expect(failed.body).not.toContain("boom");
   });
 });
 
@@ -636,10 +647,59 @@ describe("generate", () => {
     expect(res.body).not.toContain("<script>");
   });
 
+  it("maps an oversized /view (honest content-length or endless chunked) to 502 image_too_large", async () => {
+    const LIMIT = 65536;
+    for (const mode of ["length", "chunked"] as const) {
+      let written = 0;
+      h.setComfy((s, res) => {
+        if (!s.url.startsWith("/view")) return comfyDone([{ filename: "a.png", subfolder: "", type: "output" }])(s, res);
+        res.writeHead(200, mode === "length"
+          ? { "Content-Type": "image/png", "Content-Length": String(64 * 1024 * 1024) }
+          : { "Content-Type": "image/png" });
+        const chunk = Buffer.alloc(8192, 7);
+        const timer = setInterval(() => {
+          if (res.destroyed || written > 64 * 1024 * 1024) return clearInterval(timer);
+          res.write(chunk);
+          written += chunk.length;
+        }, 1);
+      });
+      const m = await member();
+      await post("/api/generate", m, okGen);
+      await call("GET", "/api/generate/p-1", m);
+      const res = await call("GET", "/api/image/p-1/0", m);
+      expect(res.statusCode, mode).toBe(502);
+      expect(res.json()).toEqual({ error: { code: "image_too_large", message: expect.any(String) } });
+      await new Promise((r) => setTimeout(r, 50));
+      const at = written;
+      await new Promise((r) => setTimeout(r, 50));
+      expect(written, `${mode}: server still writing`).toBe(at);
+      expect(written).toBeLessThan(LIMIT * 4);
+      h = await harness();
+    }
+  });
+
+  it("maps an oversized /history to 502 upstream_too_large and fails the job", async () => {
+    h.setComfy((s, res) =>
+      s.url === "/prompt" ? json(res, 200, { prompt_id: "p-1" }) : json(res, 200, { "p-1": { junk: "x".repeat(70000) } }),
+    );
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    const res = await call("GET", "/api/generate/p-1", m);
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.code).toBe("upstream_too_large");
+    expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "failed", message: expect.any(String) });
+  });
+
   it("rejects malformed job ids and image indexes", async () => {
     const m = await member();
     expect((await call("GET", "/api/generate/..%2F..%2Fetc", m)).statusCode).toBe(400);
     expect((await call("GET", "/api/image/p-1/-1", m)).statusCode).toBe(400);
+  });
+});
+
+describe("server timeouts", () => {
+  it("come from config", () => {
+    expect(h.app.initialConfig).toMatchObject({ requestTimeout: 30_000, connectionTimeout: 60_000, keepAliveTimeout: 75_000 });
   });
 });
 

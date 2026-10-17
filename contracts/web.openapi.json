@@ -984,7 +984,7 @@
             }
           },
           "502": {
-            "description": "Agent unreachable (code agent_unavailable)",
+            "description": "Agent unreachable or oversized response (codes agent_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1267,7 +1267,7 @@
             }
           },
           "502": {
-            "description": "ComfyUI unavailable (code comfy_unavailable)",
+            "description": "ComfyUI unavailable or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1351,7 +1351,7 @@
             }
           },
           "502": {
-            "description": "ComfyUI unreachable; poll again (code comfy_unavailable)",
+            "description": "ComfyUI unreachable, poll again (code comfy_unavailable); history over WEB_JSON_MAX_BYTES fails the job (code upstream_too_large)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1453,7 +1453,7 @@
             }
           },
           "502": {
-            "description": "Unsafe reference, non-image body or ComfyUI unavailable (codes image_rejected, image_unavailable)",
+            "description": "Unsafe reference, non-image body, body over WEB_IMAGE_MAX_BYTES or ComfyUI unavailable (codes image_rejected, image_too_large, image_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
