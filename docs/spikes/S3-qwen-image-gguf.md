@@ -36,3 +36,8 @@ GGUF Q4_K_M + encoder int8 + VAE menghasilkan gambar yang benar di 24 GB dengan 
 - Task 13: boot end-to-end nyata dengan profil ini (butuh repo di-push).
 - Uji GPU 16 GB (lebih murah) dan resolusi 2048² bila diperlukan.
 - Pengecekan checksum otomatis (`ModelSpec` belum punya `sha256`); saat ini hanya ukuran yang diverifikasi.
+
+## Addendum: copyrighted characters (second run, same setup)
+- Empat prompt SFW dengan karakter berhak cipta (seed 7, 1024², 25 langkah): Pikachu, Mickey Mouse klasik, Spider-Man, Super Mario. **Semuanya sukses dan dikenali dengan benar**, tanpa penolakan, gambar kosong, atau pengaburan. Waktu 32–39 s per gambar, download total 296 s di instance kedua (host sama, kecepatan GGUF berbeda: 151 s vs 74 s).
+- Tidak ada filter konten di pipeline (sesuai README model). Pembatasan konten, jika diinginkan, harus ditambahkan di bot atau halaman web.
+- Biaya run kedua: ~$0,077 (kredit $4,8410 → $4,7644). Instance dihancurkan.
