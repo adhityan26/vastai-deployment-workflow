@@ -1,5 +1,11 @@
 import {
   API,
+  AUTH,
+  SESSION_EXPIRED_MESSAGE,
+  loginErrorMessage,
+  loginErrorParam,
+  screenForMe,
+  withoutLoginError,
   CLOCK_TICK_MS,
   DEFAULT_EXTEND_MINUTES,
   JOB_POLL_MAX_ERRORS,
@@ -44,6 +50,8 @@ export interface App {
 }
 
 class ApiError extends Error {}
+/** The session is gone or the account lost access: the screen was already switched. */
+class AuthLostError extends ApiError {}
 
 interface HistoryEntry {
   id: string;
@@ -74,6 +82,7 @@ export function mountApp(doc: Document, env: Env): App {
   let busy = false;
   let jobPending = false;
   let stopped = false;
+  let active = false; // true only while the app screen is shown; gates every timer and poll
   let pollHandle: unknown = null;
   let tickHandle: unknown = null;
   let selectedPreset = "";
@@ -102,8 +111,129 @@ export function mountApp(doc: Document, env: Env): App {
     } catch {
       json = null;
     }
+    if (res.status === 401) {
+      showAuthScreen("login", SESSION_EXPIRED_MESSAGE);
+      throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
+    }
+    if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
     if (!res.ok) throw new ApiError(errorText(res.status, json));
     return json;
+  }
+
+  // A 403 can also mean "admin only" or a refused cross-site request, so ask /api/me whether the
+  // account itself lost its access. True when the screen was switched.
+  async function accessLost(): Promise<boolean> {
+    try {
+      const res = await env.fetch(API.me);
+      if (res.status === 401) {
+        showAuthScreen("login", SESSION_EXPIRED_MESSAGE);
+        return true;
+      }
+      if (res.status === 403) {
+        showAuthScreen("noaccess", "");
+        return true;
+      }
+    } catch {
+      // Cannot tell: keep the page and show the ordinary error.
+    }
+    return false;
+  }
+
+  // ---- screens: loading, login, no access, app ----
+
+  const screens = {
+    loading: $("loading"),
+    error: $("loading-error"),
+    login: $("login-screen"),
+    noaccess: $("noaccess-screen"),
+    app: $("app"),
+  };
+  function showOnly(name: keyof typeof screens): void {
+    for (const [key, node] of Object.entries(screens)) node.hidden = key !== name;
+  }
+
+  function pauseTimers(): void {
+    active = false;
+    if (pollHandle !== null) env.clearTimeout(pollHandle);
+    if (tickHandle !== null) env.clearTimeout(tickHandle);
+    pollHandle = null;
+    tickHandle = null;
+  }
+
+  function setText(id: string, text: string): void {
+    const node = $(id);
+    node.textContent = text;
+    node.hidden = text === "";
+  }
+
+  function showAuthScreen(kind: "login" | "noaccess", message: string): void {
+    pauseTimers();
+    clearMessages();
+    state = null;
+    jobPending = false;
+    setText("login-message", kind === "login" ? message : "");
+    setText("noaccess-error", "");
+    setText("logout-error", "");
+    showOnly(kind);
+    ($(kind === "login" ? "login-link" : "btn-logout-noaccess") as HTMLElement).focus();
+  }
+
+  async function logout(): Promise<void> {
+    try {
+      const res = await env.fetch(AUTH.logout, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      const text = "Logout failed, please try again.";
+      setText(screens.app.hidden ? "noaccess-error" : "logout-error", text);
+      return;
+    }
+    showAuthScreen("login", "");
+  }
+  $("btn-logout").addEventListener("click", () => void logout());
+  $("btn-logout-noaccess").addEventListener("click", () => void logout());
+  $("btn-retry").addEventListener("click", () => void start());
+
+  async function start(): Promise<void> {
+    showOnly("loading");
+    let result: ReturnType<typeof screenForMe>;
+    try {
+      const res = await env.fetch(API.me);
+      let json: unknown = null;
+      try {
+        json = await res.json();
+      } catch {
+        json = null;
+      }
+      result = screenForMe(res.status, json);
+    } catch {
+      result = { screen: "error", me: null };
+    }
+    if (stopped) return;
+    if (result.screen === "login") {
+      // Show a login_error from the redirect once, from a fixed map; the URL value is never shown.
+      const win = doc.defaultView;
+      const code = win === null ? null : loginErrorParam(win.location.search);
+      showAuthScreen("login", loginErrorMessage(code) ?? "");
+      if (win !== null && code !== null) {
+        win.history.replaceState(null, "", `${win.location.pathname}${withoutLoginError(win.location.search)}${win.location.hash}`);
+      }
+    } else if (result.screen === "noaccess" || result.me === null) {
+      if (result.screen === "noaccess") showAuthScreen("noaccess", "");
+      else {
+        $("loading-error-text").textContent = "Could not check your login. Check your connection and try again.";
+        showOnly("error");
+      }
+    } else {
+      $("user-name").textContent = result.me.name;
+      showOnly("app");
+      active = true;
+      tickHandle = env.setTimeout(tick, CLOCK_TICK_MS);
+      await refresh();
+    }
   }
 
   // ---- banners ----
@@ -517,7 +647,7 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   async function pollJob(e: HistoryEntry, errors: number): Promise<void> {
-    if (stopped) return;
+    if (stopped || !active) return;
     try {
       const res = await call("GET", `${API.generate}/${e.id}`);
       const r = (typeof res === "object" && res !== null ? res : {}) as Record<string, unknown>;
@@ -534,6 +664,7 @@ export function mountApp(doc: Document, env: Env): App {
       }
       env.setTimeout(() => void pollJob(e, 0), JOB_POLL_MS);
     } catch (err) {
+      if (err instanceof AuthLostError) return;
       // A network blip or a 5xx may pass; anything else (404, 403) will not.
       if (errors + 1 >= JOB_POLL_MAX_ERRORS) {
         return finishEntry(e, "failed", err instanceof Error ? err.message : "Lost contact with the server.");
@@ -566,6 +697,7 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   async function refresh(): Promise<void> {
+    if (!active) return;
     try {
       const parsed = parseState(await call("GET", API.state));
       if (parsed === null) throw new ApiError("The server sent a status this page cannot read.");
@@ -577,6 +709,7 @@ export function mountApp(doc: Document, env: Env): App {
         delete banner.dataset["source"];
       }
     } catch (err) {
+      if (err instanceof AuthLostError || !active) return;
       failures += 1;
       showBanner(err instanceof Error ? err.message : "Status update failed.", true);
     }
@@ -585,25 +718,25 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function schedulePoll(): void {
-    if (stopped) return;
+    if (stopped || !active) return;
     if (pollHandle !== null) env.clearTimeout(pollHandle);
     pollHandle = env.setTimeout(() => void refresh(), pollIntervalMs(state?.state ?? null, doc.hidden, failures));
   }
 
   function tick(): void {
-    if (stopped) return;
+    if (stopped || !active) return;
     renderClock();
     tickHandle = env.setTimeout(tick, CLOCK_TICK_MS);
   }
 
   const onVisibility = (): void => {
+    if (!active) return;
     if (!doc.hidden) void refresh();
     else schedulePoll();
   };
   doc.addEventListener("visibilitychange", onVisibility);
 
-  tickHandle = env.setTimeout(tick, CLOCK_TICK_MS);
-  const ready = refresh();
+  const ready = start();
   return {
     ready,
     refresh,

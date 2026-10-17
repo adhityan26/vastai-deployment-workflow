@@ -18,11 +18,36 @@
 <script src="/app.js" defer></script>
 </head>
 <body>
-<main>
+<p id="loading" class="loading" role="status">Loading&hellip;</p>
+<div id="loading-error" class="screen" hidden>
+  <p id="loading-error-text" class="alert bad" role="alert"></p>
+  <button id="btn-retry" type="button" class="primary">Try again</button>
+</div>
+
+<section id="login-screen" class="screen card" aria-labelledby="login-title" hidden>
+  <h1 id="login-title">Image generator</h1>
+  <p id="login-message" class="alert bad" role="status" aria-live="polite" hidden></p>
+  <p class="muted">Log in to continue.</p>
+  <a id="login-link" class="button primary" href="/auth/login?next=/">Login with Authentik</a>
+</section>
+
+<section id="noaccess-screen" class="screen card" aria-labelledby="noaccess-title" hidden>
+  <h1 id="noaccess-title">No access for this account</h1>
+  <p class="muted">You are logged in, but this account is not allowed to use the generator.</p>
+  <p id="noaccess-error" class="alert bad" role="status" aria-live="polite" hidden></p>
+  <button id="btn-logout-noaccess" type="button" class="primary">Logout</button>
+</section>
+
+<main id="app" hidden>
   <header class="top">
     <h1>Image generator</h1>
     <span id="role" class="chip" hidden></span>
   </header>
+  <div class="userbar">
+    <span id="user-name" class="muted"></span>
+    <button id="btn-logout" type="button">Logout</button>
+  </div>
+  <p id="logout-error" class="alert bad" role="status" aria-live="polite" hidden></p>
 
   <div id="banner" class="alert bad" role="alert" hidden></div>
   <div id="notice" class="alert ok" role="status" hidden></div>

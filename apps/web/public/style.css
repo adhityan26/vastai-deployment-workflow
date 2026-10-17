@@ -110,6 +110,12 @@ ul { padding: 0; margin: 0; list-style: none; }
 .grid figure { margin: 0; min-width: 0; }
 .grid img { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--bg); }
 .grid a.dl { display: inline-block; min-height: 44px; line-height: 44px; font-weight: 600; color: var(--accent); }
+.screen { max-width: 40rem; margin: 12px auto; width: calc(100% - 24px); display: grid; gap: 8px; }
+.loading { text-align: center; color: var(--muted); margin: 24px 12px; }
+.button { display: flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 16px; font-weight: 600; text-decoration: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); }
+.button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.userbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.userbar span { overflow-wrap: anywhere; min-width: 0; }
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: flex-end; justify-content: center; padding: 12px; z-index: 10; }
 .dialog { background: var(--surface); color: var(--text); border-radius: 12px; padding: 16px; width: 100%; max-width: 28rem; max-height: 90vh; overflow: auto; }
 .dialog p { overflow-wrap: anywhere; }

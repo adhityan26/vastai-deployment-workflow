@@ -40,7 +40,7 @@ let routes: Record<string, Handler> = {};
 let nowMs = 0;
 
 async function mount(state: Record<string, unknown> = {}, extra: Record<string, Handler> = {}): Promise<App> {
-  routes = { "GET /api/state": { body: apiState(state) }, ...extra };
+  routes = { "GET /api/me": { body: { name: "Tester", username: "tester", role: "member" } }, "GET /api/state": { body: apiState(state) }, ...extra };
   app = mountApp(document, {
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

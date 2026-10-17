@@ -20,7 +20,16 @@ export const API = {
   extend: "/api/extend",
   destroyUnknown: "/api/destroy-unknown",
   generate: "/api/generate",
+  me: "/api/me",
 } as const;
+
+// Protocol paths of the login routes (apps/web/src/auth-routes.ts). The login link is a plain
+// <a href>, so it does not need JavaScript.
+export const AUTH = {
+  login: "/auth/login?next=/", // config-lint: ok (protocol path, not configuration)
+  logout: "/auth/logout", // config-lint: ok (protocol path, not configuration)
+} as const;
+const LOGIN_ERROR_PARAM = "login_error";
 const JOB_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SEED_TEXT = /^[0-9]{1,16}$/;
 const MAX_IMAGE_INDEX = 999;
@@ -267,4 +276,46 @@ export function errorText(status: number, body: unknown): string {
   if (status === 401) return "You are signed out. Reload the page to sign in again.";
   if (status === 403) return "Your account may not do this.";
   return `The request failed (HTTP ${status}).`;
+}
+
+// ---- login screens ----
+
+export const LOGIN_FAILED_MESSAGE = "Login failed, please try again.";
+export const SESSION_EXPIRED_MESSAGE = "Your session expired, please log in again.";
+// Fixed allowlist keyed by the codes of LOGIN_ERROR_CODES (apps/web/src/auth-routes.ts). Every
+// other code, including session_too_large, gets the generic message.
+const LOGIN_ERROR_MESSAGES = new Map<string, string>([["access_denied", "This account has no access."]]);
+
+/** Human message for a `login_error` URL value. Only fixed strings come back, never the input. */
+export function loginErrorMessage(code: string | null): string | null {
+  if (code === null) return null;
+  return LOGIN_ERROR_MESSAGES.get(code) ?? LOGIN_FAILED_MESSAGE;
+}
+
+/** The `login_error` value of a location search string (null when absent). */
+export function loginErrorParam(search: string): string | null {
+  return new URLSearchParams(search).get(LOGIN_ERROR_PARAM);
+}
+
+/** The same search string without `login_error`; "" when nothing else is left. */
+export function withoutLoginError(search: string): string {
+  const params = new URLSearchParams(search);
+  params.delete(LOGIN_ERROR_PARAM);
+  const rest = params.toString();
+  return rest === "" ? "" : `?${rest}`;
+}
+
+export interface Me { name: string; username: string; role: Role | "none" }
+export type Screen = "app" | "login" | "noaccess" | "error";
+
+/** Which screen an /api/me answer means: 200 with a usable body -> app, 401 -> login, 403 -> no access. */
+export function screenForMe(status: number, json: unknown): { screen: Screen; me: Me | null } {
+  if (status === 401) return { screen: "login", me: null };
+  if (status === 403) return { screen: "noaccess", me: null };
+  if (status !== 200 || !isObj(json)) return { screen: "error", me: null };
+  const username = typeof json["username"] === "string" ? json["username"] : "";
+  const name = typeof json["name"] === "string" && json["name"] !== "" ? json["name"] : username;
+  const role = json["role"];
+  if (role !== "admin" && role !== "member") return { screen: "noaccess", me: null };
+  return { screen: "app", me: { name, username, role } };
 }

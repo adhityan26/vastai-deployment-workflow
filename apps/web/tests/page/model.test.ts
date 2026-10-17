@@ -4,6 +4,10 @@ import {
   STATE_POLL_MAX_MS,
   STATE_POLL_MS,
   clockView,
+  loginErrorMessage,
+  loginErrorParam,
+  screenForMe,
+  withoutLoginError,
   controls,
   countdown,
   errorText,
@@ -136,5 +140,32 @@ describe("form helpers", () => {
     expect(parseState(null)).toBeNull();
     expect(parseState({ state: "ready" })).toBeNull();
     expect(parseState({ ...base, presets: "nope" })!.presets).toEqual([]);
+  });
+});
+
+describe("login helpers", () => {
+  it("maps login_error codes to fixed messages", () => {
+    expect(loginErrorMessage(null)).toBeNull();
+    expect(loginErrorMessage("access_denied")).toBe("This account has no access.");
+    expect(loginErrorMessage("session_too_large")).toBe("Login failed, please try again.");
+    expect(loginErrorMessage("state_mismatch")).toBe("Login failed, please try again.");
+    const hostile = "<img src=x onerror=alert(1)>";
+    expect(loginErrorMessage(hostile)).toBe("Login failed, please try again.");
+    expect(loginErrorMessage("__proto__")).toBe("Login failed, please try again.");
+  });
+  it("reads and strips login_error from a search string", () => {
+    expect(loginErrorParam("?login_error=access_denied&x=1")).toBe("access_denied");
+    expect(loginErrorParam("")).toBeNull();
+    expect(withoutLoginError("?login_error=access_denied")).toBe("");
+    expect(withoutLoginError("?login_error=a&x=1")).toBe("?x=1");
+  });
+  it("decides the screen from an /api/me answer", () => {
+    expect(screenForMe(401, null).screen).toBe("login");
+    expect(screenForMe(403, null).screen).toBe("noaccess");
+    expect(screenForMe(500, null).screen).toBe("error");
+    expect(screenForMe(200, "x").screen).toBe("error");
+    expect(screenForMe(200, { name: "A", username: "a", role: "none" }).screen).toBe("noaccess");
+    expect(screenForMe(200, { name: "A", username: "a", role: "admin" })).toEqual({ screen: "app", me: { name: "A", username: "a", role: "admin" } });
+    expect(screenForMe(200, { name: null, username: "a", role: "member" }).me?.name).toBe("a");
   });
 });
