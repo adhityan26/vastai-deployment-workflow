@@ -58,6 +58,12 @@ async function main(): Promise<void> {
     readFileSync(join(repoDir, "instance", "workflows", profile.generate.workflow), "utf8"),
   );
 
+  const allowedGpus = cfg["vastAllowedGpus"];
+  if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
+    // Fail closed: an empty allow-list no longer means "any GPU".
+    log("warn", "VAST_ALLOWED_GPUS is empty: Start, the estimate and the GPU list are refused (no_gpu_configured)");
+  }
+
   const registry = new Registry(str(cfg, "registryPath"), contract("instance-registry.schema.json"));
   const vast = new VastClient(cfg);
   const statusSchema = contract("status.schema.json");
@@ -94,6 +100,7 @@ async function main(): Promise<void> {
     agentFor,
     clock: () => Date.now() / 1000,
     tsAuthKey,
+    profileModels: profile.models,
     newToken: () => randomBytes(TOKEN_BYTES).toString("hex"),
     newHostname: () => `${HOSTNAME_PREFIX}${randomBytes(HOSTNAME_ID_BYTES).toString("hex")}`,
   });

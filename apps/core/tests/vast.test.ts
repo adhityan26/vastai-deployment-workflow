@@ -2,7 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AppsConfig } from "../src/config.js";
-import { CreateRejected, DestroyError, VastClient, VastError, offerFiltersFromConfig, type CreateRequest } from "../src/vast.js";
+import {
+  CreateRejected,
+  DestroyError,
+  VastClient,
+  VastError,
+  normalizeGpuName,
+  offerFiltersFromConfig,
+  type CreateRequest,
+} from "../src/vast.js";
 
 const KEY = "k".repeat(40) + "SECRET";
 
@@ -90,6 +98,17 @@ describe("VastClient", () => {
     expect(q["reliability"]).toEqual({ gte: 0.98 });
     expect(q["gpu_name"]).toEqual({ in: ["RTX 4090"] });
     expect(q["num_gpus"]).toEqual({ eq: 1 });
+  });
+
+  it("search normalises GPU names and refuses to run without an allow-list", async () => {
+    const { client, seen } = await fake((_r, res) => json(res, 200, { offers: [] }));
+    await client.searchOffers({ ...filters, allowedGpus: ["RTX_3090", "RTX A5000"] });
+    expect((seen[0]?.body as Record<string, unknown>)["gpu_name"]).toEqual({ in: ["RTX 3090", "RTX A5000"] });
+    // Empty used to mean "any GPU" (it rented a Tesla P40): now nothing is sent at all.
+    await expect(client.searchOffers({ ...filters, allowedGpus: [] })).rejects.toThrow(/allow-list/);
+    expect(seen).toHaveLength(1);
+    expect(normalizeGpuName("RTX_4090")).toBe("RTX 4090");
+    expect(normalizeGpuName("rtx 4090")).toBe("rtx 4090");
   });
 
   it("create sends env + onstart + label and never a port mapping", async () => {

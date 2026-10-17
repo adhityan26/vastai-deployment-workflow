@@ -79,6 +79,14 @@ export interface VastInstance {
 
 export type DestroyOutcome = "destroyed" | "gone";
 
+/**
+ * The GPU model name as the offer query sends it: underscores become spaces (config may say
+ * RTX_4090), nothing else changes (case is kept). Every allow-list comparison uses this form.
+ */
+export function normalizeGpuName(name: string): string {
+  return name.replace(/_/g, " ");
+}
+
 function positiveNumber(name: string, raw: unknown): number {
   const text = String(raw).trim();
   const value = text === "" ? Number.NaN : Number(text); // strict: "0.5abc" is NaN
@@ -197,9 +205,10 @@ export class VastClient {
       type: "on-demand",
       allocated_storage: filters.diskGb,
     };
-    if (filters.allowedGpus.length > 0) {
-      query["gpu_name"] = { in: filters.allowedGpus.map((g) => g.replace(/_/g, " ")) };
-    }
+    // Without an allow-list Vast would return any GPU (it once rented a Tesla P40 the image's
+    // CUDA cannot use): refuse instead of searching.
+    if (filters.allowedGpus.length === 0) throw new VastError("refusing to search offers without a GPU allow-list");
+    query["gpu_name"] = { in: filters.allowedGpus.map(normalizeGpuName) };
     const reply = await this.send("POST", this.url("bundles/"), query);
     this.failIfNotOk("search offers", reply);
     const offers = (reply.json as { offers?: unknown } | null)?.offers;

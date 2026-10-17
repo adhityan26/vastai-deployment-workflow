@@ -15,12 +15,17 @@ import {
   type CreateRequest,
   type DestroyOutcome,
   type Offer,
+  type OfferFilters,
   type VastInstance,
 } from "../src/vast.js";
+import { loadProfile, type ModelSpec } from "../src/profile.js";
 import {
   DestroyFailedError,
+  GpuNotAllowedError,
   Lifecycle,
+  NoGpuConfiguredError,
   NoOffersError,
+  overallDownload,
   ONSTART_CMD,
   RefusedError,
   StartError,
@@ -43,7 +48,7 @@ const cfg = {
   vastMaxDph: "0.50",
   vastMinDownloadMbps: 500,
   vastMinReliability: "0.98",
-  vastAllowedGpus: [],
+  vastAllowedGpus: ["RTX A5000", "RTX_3090", "RTX 4090"],
   comfyPort: 18188,
   agentPort: 8189,
   startIdleMinutes: 30,
@@ -65,6 +70,9 @@ class FakeVast {
   destroyQueue: (DestroyOutcome | Error)[] = [];
   listError: Error | null = null;
   requests: CreateRequest[] = [];
+  searches: OfferFilters[] = [];
+  createdOffers: number[] = [];
+  searchError: Error | null = null;
   nextId = 900;
 
   constructor(calls: string[], private readonly clock: () => number) {
@@ -76,13 +84,17 @@ class FakeVast {
     };
   }
 
-  async searchOffers(): Promise<Offer[]> {
+  // Like a careless Vast: returns every offer whatever the gpu_name filter says.
+  async searchOffers(filters: OfferFilters): Promise<Offer[]> {
     this.calls.push("vast.search");
+    this.searches.push(filters);
+    if (this.searchError) throw this.searchError;
     return this.offers;
   }
   async createInstance(offerId: number, req: CreateRequest): Promise<{ id: number }> {
     this.calls.push("vast.create");
     this.requests.push(req);
+    this.createdOffers.push(offerId);
     return this.createImpl(offerId, req);
   }
   async listInstances(): Promise<VastInstance[]> {
@@ -158,7 +170,9 @@ class TracingRegistry extends Registry {
   }
 }
 
-function setup(over: Partial<{ authKey: () => Promise<string> }> = {}) {
+function setup(
+  over: Partial<{ authKey: () => Promise<string>; cfg: Record<string, unknown>; models: readonly ModelSpec[] }> = {},
+) {
   const calls: string[] = [];
   const time = { now: T0 };
   const clock = (): number => time.now;
@@ -170,11 +184,12 @@ function setup(over: Partial<{ authKey: () => Promise<string> }> = {}) {
   const sleeps: number[] = [];
   let hostCounter = 0;
   const life = new Lifecycle({
-    cfg,
+    cfg: { ...cfg, ...(over.cfg ?? {}) } as unknown as AppsConfig,
     vast,
     registry,
     agentFor: () => agent,
     clock,
+    ...(over.models ? { profileModels: over.models } : {}),
     tsAuthKey: over.authKey ?? (async () => AUTH_KEY),
     newToken: () => TOKEN,
     newHostname: () => (hostCounter++ === 0 ? HOST : `${HOST}-${hostCounter}`),
@@ -906,5 +921,204 @@ describe("Lifecycle.view scrubbing", () => {
       for (const secret of [TOKEN, AUTH_KEY, VAST_KEY]) expect(out, state).not.toContain(secret);
       expect(out).toContain("[redacted]");
     }
+  });
+});
+
+describe("Lifecycle GPU choice", () => {
+  const A5000: Offer = { id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 };
+  const A5000_CHEAP: Offer = { id: 12, dph_total: 0.25, gpu_name: "RTX A5000", gpu_ram: 24564 };
+  const P40: Offer = { id: 5, dph_total: 0.1, gpu_name: "Tesla P40", gpu_ram: 24576 };
+  const R4090: Offer = { id: 40, dph_total: 0.45, gpu_name: "RTX 4090", gpu_ram: 24564 };
+  const ALLOWED = ["RTX A5000", "RTX 3090", "RTX 4090"];
+
+  it("gpuOptions: one search over every allowed model, grouped by model in config order", async () => {
+    const { life, vast } = setup();
+    vast.offers = [P40, R4090, A5000, A5000_CHEAP];
+    const options = await life.gpuOptions();
+    expect(options).toEqual([
+      { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true },
+      { name: "RTX 3090", dph: null, vram_gb: null, available: false },
+      { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+    ]);
+    expect(vast.searches).toHaveLength(1);
+    expect(vast.searches[0]!.allowedGpus).toEqual(ALLOWED);
+    // The other filters still come from config.
+    expect(vast.searches[0]).toMatchObject({ maxDph: 0.5, minReliability: 0.98, minDownloadMbps: 500, diskGb: 50, minVramGb: 24 });
+    // A model Vast returned outside the allow-list never shows up.
+    expect(JSON.stringify(options)).not.toContain("P40");
+    expect(JSON.stringify(options)).not.toContain("offer");
+  });
+
+  it("start(gpu) searches only that model and creates on its offer", async () => {
+    const { life, vast } = setup();
+    vast.offers = [P40, A5000, R4090];
+    const out = await life.start("RTX 4090");
+    expect(vast.searches.map((f) => f.allowedGpus)).toEqual([["RTX 4090"]]);
+    expect(vast.createdOffers).toEqual([40]);
+    expect(out.estimate.gpu_name).toBe("RTX 4090");
+  });
+
+  it("start with a model outside the allow-list is refused before any record or Vast call", async () => {
+    const { life, vast, registry, calls } = setup();
+    for (const bad of ["Tesla P40", "rtx 4090", "RTX 4090 ", "", "RTX A5000,Tesla P40"]) {
+      await expect(life.start(bad), bad).rejects.toBeInstanceOf(GpuNotAllowedError);
+      await expect(life.estimate(bad), bad).rejects.toBeInstanceOf(GpuNotAllowedError);
+    }
+    expect(calls).toEqual([]);
+    expect(vast.requests).toHaveLength(0);
+    expect(await registry.all()).toEqual([]);
+  });
+
+  it("start without a model never picks one outside the allow-list", async () => {
+    const { life, vast } = setup();
+    vast.offers = [P40, A5000_CHEAP, A5000];
+    const out = await life.start();
+    expect(vast.searches[0]!.allowedGpus).toEqual(ALLOWED);
+    expect(vast.createdOffers).toEqual([12]);
+    expect(out.estimate.gpu_name).toBe("RTX A5000");
+
+    const only = setup();
+    only.vast.offers = [P40, { id: 6, dph_total: 0.05 }];
+    await expect(only.life.start()).rejects.toBeInstanceOf(NoOffersError);
+    expect(only.vast.requests).toHaveLength(0);
+    await expect(only.life.estimate()).rejects.toBeInstanceOf(NoOffersError);
+  });
+
+  it("an empty allow-list fails closed for start, estimate and gpuOptions without calling Vast", async () => {
+    const { life, vast, registry, calls } = setup({ cfg: { vastAllowedGpus: [] } });
+    vast.offers = [P40, A5000];
+    await expect(life.start()).rejects.toBeInstanceOf(NoGpuConfiguredError);
+    await expect(life.start("RTX A5000")).rejects.toBeInstanceOf(NoGpuConfiguredError);
+    await expect(life.estimate()).rejects.toBeInstanceOf(NoGpuConfiguredError);
+    await expect(life.gpuOptions()).rejects.toBeInstanceOf(NoGpuConfiguredError);
+    expect(calls).toEqual([]);
+    expect(await registry.all()).toEqual([]);
+  });
+
+  it("names are normalised exactly like the offer query (underscore to space, case kept)", async () => {
+    const { life, vast } = setup();
+    vast.offers = [{ id: 30, dph_total: 0.2, gpu_name: "RTX 3090" }];
+    // Config says RTX_3090; the query and the option list say RTX 3090.
+    expect((await life.gpuOptions())[1]).toEqual({ name: "RTX 3090", dph: 0.2, vram_gb: null, available: true });
+    expect((await life.estimate("RTX_3090")).gpu_name).toBe("RTX 3090");
+    expect((await life.estimate("RTX 3090")).offer_id).toBe(30);
+    expect(vast.searches.slice(1).map((f) => f.allowedGpus)).toEqual([["RTX 3090"], ["RTX 3090"]]);
+    await expect(life.estimate("rtx 3090")).rejects.toBeInstanceOf(GpuNotAllowedError);
+    await expect(life.estimate("RTX-3090")).rejects.toBeInstanceOf(GpuNotAllowedError);
+  });
+
+  it("estimate(gpu) is restricted to that model", async () => {
+    const { life, vast } = setup();
+    vast.offers = [A5000, R4090];
+    expect(await life.estimate("RTX 4090")).toMatchObject({ offer_id: 40, gpu_name: "RTX 4090", dph: 0.45 });
+    expect(await life.estimate("RTX 3090").catch((e: unknown) => e)).toBeInstanceOf(NoOffersError);
+  });
+
+  it("view exposes gpu_name from the Vast row, else from the offer chosen at start", async () => {
+    const { life, vast } = setup();
+    expect((await life.view()).gpu_name).toBeNull();
+    vast.offers = [R4090];
+    await life.start("RTX 4090");
+    expect((await life.view()).gpu_name).toBe("RTX 4090");
+    vast.instances[0]!["gpu_name"] = "RTX 4090 (row)";
+    expect((await life.view()).gpu_name).toBe("RTX 4090 (row)");
+  });
+});
+
+describe("Lifecycle start failure reasons", () => {
+  it("an empty or unreadable Tailscale key file is ts_key_missing, before any Vast call", async () => {
+    for (const authKey of [async () => "", async () => Promise.reject(new Error(`ENOENT ${AUTH_KEY}`))]) {
+      const { life, vast, registry } = setup({ authKey });
+      const err = await errorOf(life.start());
+      expect(err).toBeInstanceOf(StartError);
+      expect((err as StartError).reason).toBe("ts_key_missing");
+      expect((err as StartError).ambiguous).toBe(false);
+      expect(err.message).not.toContain(AUTH_KEY);
+      expect(vast.calls.filter((c) => c.startsWith("vast."))).toEqual([]);
+      expect(await registry.active()).toBeNull();
+    }
+  });
+
+  it("names the other cases it can tell apart", async () => {
+    const search = setup();
+    search.vast.searchError = new VastError("search offers failed with HTTP 500");
+    const e1 = (await errorOf(search.life.start())) as StartError;
+    expect([e1.name, e1.reason, e1.ambiguous]).toEqual(["StartError", "vast_unavailable", false]);
+    expect(await search.registry.active()).toBeNull();
+
+    const rejected = setup();
+    rejected.vast.createImpl = async () => {
+      throw new CreateRejected("create instance was refused (HTTP 400): no");
+    };
+    expect(((await errorOf(rejected.life.start())) as StartError).reason).toBe("vast_rejected");
+
+    const uncertain = setup();
+    uncertain.vast.createImpl = async () => {
+      throw new VastError("timed out");
+    };
+    const e3 = (await errorOf(uncertain.life.start())) as StartError;
+    expect([e3.reason, e3.ambiguous]).toEqual(["create_uncertain", true]);
+
+    const reg = setup();
+    reg.registry.update = async () => {
+      throw new Error("disk full");
+    };
+    expect(((await errorOf(reg.life.start())) as StartError).reason).toBe("registry_failed");
+  });
+});
+
+describe("overall download progress", () => {
+  const shipped = fileURLToPath(new URL("../../../instance/profiles/image.yaml", import.meta.url));
+  const models = loadProfile(shipped).models;
+  const [s1, s2, s3] = models.map((m) => m.size_bytes) as [number, number, number];
+  const total = s1 + s2 + s3;
+  const prog = (file: string, bytes_done: number, phase = "models") => ({ phase, file, bytes_done, bytes_total: 1 });
+
+  it("the TS profile loader reads models from the shipped profile", () => {
+    expect(models).toEqual([
+      { file: "qwen-image-2.1-UC-Q4_K_M.gguf", size_bytes: 4604558112 },
+      { file: "text_encoders/qwen3vl_8b_int8_convrot.safetensors", size_bytes: 9350798360 },
+      { file: "vae/qwen_image_2.1_vae_bf16.safetensors", size_bytes: 675509688 },
+    ]);
+  });
+
+  it("sums earlier files, the current file's bytes (clamped) and nothing after it", () => {
+    const at = (file: string, done: number) => overallDownload("downloading", prog(file, done), models);
+    expect(at("qwen-image-2.1-UC-Q4_K_M.gguf", 1_000_000_000)).toEqual({
+      files_total: 3, files_done: 0, bytes_done: 1_000_000_000, bytes_total: total, current_file: "qwen-image-2.1-UC-Q4_K_M.gguf",
+    });
+    // Between files: the second file just started (basename as the agent reports it).
+    expect(at("qwen3vl_8b_int8_convrot.safetensors", 0)).toMatchObject({ files_done: 1, bytes_done: s1 });
+    // The profile's own subpath form matches too.
+    expect(at("text_encoders/qwen3vl_8b_int8_convrot.safetensors", 5)).toMatchObject({ files_done: 1, bytes_done: s1 + 5 });
+    // Last file, with an agent counter past the file size: clamped.
+    expect(at("qwen_image_2.1_vae_bf16.safetensors", s3 + 999)).toEqual({
+      files_total: 3, files_done: 2, bytes_done: total, bytes_total: total, current_file: "qwen_image_2.1_vae_bf16.safetensors",
+    });
+    expect(at("qwen_image_2.1_vae_bf16.safetensors", -5)).toMatchObject({ bytes_done: s1 + s2 });
+  });
+
+  it("degrades to null instead of guessing", () => {
+    expect(overallDownload("downloading", prog("other.bin", 5), models)).toBeNull();
+    expect(overallDownload("downloading", prog("", 5), models)).toBeNull();
+    expect(overallDownload("downloading", prog("ComfyUI-GGUF", 5, "nodes"), models)).toBeNull();
+    expect(overallDownload("downloading", null, models)).toBeNull();
+    expect(overallDownload("ready", prog("qwen-image-2.1-UC-Q4_K_M.gguf", 5), models)).toBeNull();
+    expect(overallDownload("downloading", prog("qwen-image-2.1-UC-Q4_K_M.gguf", 5), [])).toBeNull();
+    expect(overallDownload("downloading", prog("qwen-image-2.1-UC-Q4_K_M.gguf", Number.NaN), models)).toBeNull();
+    const twice = [...models, { file: "x/qwen-image-2.1-UC-Q4_K_M.gguf", size_bytes: 1 }];
+    expect(overallDownload("downloading", prog("qwen-image-2.1-UC-Q4_K_M.gguf", 5), twice)).toBeNull();
+  });
+
+  it("view().download follows the agent's progress", async () => {
+    const { life, vast, agent } = setup({ models });
+    await life.start();
+    vast.instances[0]!.actual_status = "running";
+    agent.statusImpl = async () => status("downloading", { progress: prog("qwen3vl_8b_int8_convrot.safetensors", 7) });
+    expect((await life.view()).download).toMatchObject({ files_done: 1, bytes_done: s1 + 7, bytes_total: total });
+    agent.statusImpl = async () => status("downloading", { progress: prog("leejet/ComfyUI-GGUF", 7, "nodes") });
+    expect((await life.view()).download).toBeNull();
+    agent.statusImpl = async () => status("ready");
+    expect((await life.view()).download).toBeNull();
   });
 });

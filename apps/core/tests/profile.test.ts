@@ -60,6 +60,31 @@ describe("loadProfile", () => {
     expect(() => loadProfile(path)).toThrow(ProfileError);
   });
 
+  it("reads models (file, size_bytes) and accepts a profile without models", () => {
+    expect(loadProfile(shipped).models.map((m) => m.file)).toEqual([
+      "qwen-image-2.1-UC-Q4_K_M.gguf",
+      "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+      "vae/qwen_image_2.1_vae_bf16.safetensors",
+    ]);
+    expect(loadProfile(writeProfile((d) => delete d.models)).models).toEqual([]);
+    // Fields the web does not need are not copied.
+    expect(Object.keys(loadProfile(shipped).models[0]!)).toEqual(["file", "size_bytes"]);
+  });
+
+  const badModels: Record<string, (d: Doc) => void> = {
+    not_a_list: (d) => (d.models = { file: "a" }),
+    entry_not_mapping: (d) => (d.models = ["a.gguf"]),
+    missing_file: (d) => delete d.models[0].file,
+    empty_file: (d) => (d.models[0].file = ""),
+    missing_size: (d) => delete d.models[0].size_bytes,
+    zero_size: (d) => (d.models[0].size_bytes = 0),
+    text_size: (d) => (d.models[0].size_bytes = "12"),
+    fractional_size: (d) => (d.models[0].size_bytes = 1.5),
+  };
+  it.each(Object.keys(badModels))("rejects models %s", (name) => {
+    expect(() => loadProfile(writeProfile(badModels[name]!))).toThrow(ProfileError);
+  });
+
   it("ignores the rest of the profile", () => {
     const path = writeProfile((doc) => (doc.nodes = "anything"));
     expect(loadProfile(path).name).toBe("image");

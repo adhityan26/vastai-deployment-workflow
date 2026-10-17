@@ -25,9 +25,16 @@ export interface GenerateSpec {
   readonly qualityPresets: readonly QualityPreset[];
   readonly sizes: readonly SizeSpec[];
 }
+/** One model file of the profile, in download order (the instance loader owns the other fields). */
+export interface ModelSpec {
+  /** As written in the profile; may include a subpath (the agent reports the basename). */
+  readonly file: string;
+  readonly size_bytes: number;
+}
 export interface Profile {
   readonly name: string;
   readonly generate: GenerateSpec;
+  readonly models: readonly ModelSpec[];
 }
 
 export type ComfyPrompt = Record<string, { class_type?: string; inputs: Record<string, unknown> }>;
@@ -74,6 +81,21 @@ function positiveInt(value: unknown, what: string): number {
   return value;
 }
 
+function parseModels(raw: unknown): ModelSpec[] {
+  // A profile without models is still valid for the web (nothing to report while downloading).
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new ProfileError("models must be a list");
+  return raw.map((item, i) => {
+    const entry = mapping(item, `model ${i}`);
+    const file = required(entry["file"], `model ${i} file`);
+    const size = entry["size_bytes"];
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size <= 0) {
+      throw new ProfileError(`model ${file} size_bytes must be a positive integer`);
+    }
+    return { file, size_bytes: size };
+  });
+}
+
 function parseGenerate(raw: unknown): GenerateSpec {
   const gen = mapping(raw, "generate");
   const workflow = required(gen["workflow"], "generate workflow");
@@ -116,12 +138,16 @@ function parseGenerate(raw: unknown): GenerateSpec {
   return { workflow, params, qualityPresets, sizes };
 }
 
-/** Load the parts of a profile the web app needs (name, generate); the rest is the instance loader's business. */
+/** Load the parts of a profile the web app needs (name, generate, models); the rest is the instance loader's business. */
 export function loadProfile(path: string): Profile {
   try {
     const raw = mapping(parse(readFileSync(path, "utf8")), "profile");
     if (raw["generate"] === undefined || raw["generate"] === null) throw new ProfileError("profile has no generate section");
-    return { name: required(raw["name"], "name"), generate: parseGenerate(raw["generate"]) };
+    return {
+      name: required(raw["name"], "name"),
+      generate: parseGenerate(raw["generate"]),
+      models: parseModels(raw["models"]),
+    };
   } catch (e) {
     if (e instanceof ProfileError) throw new ProfileError(`${path}: ${e.message}`);
     throw new ProfileError(`${path}: invalid profile (${(e as Error).message})`);

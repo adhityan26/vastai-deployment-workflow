@@ -35,6 +35,9 @@
               },
               "message": {
                 "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/StartFailReason"
               }
             }
           }
@@ -43,16 +46,12 @@
       "Estimate": {
         "type": "object",
         "required": [
-          "offer_id",
           "gpu_name",
           "dph",
           "horizon_hours",
           "max_cost"
         ],
         "properties": {
-          "offer_id": {
-            "type": "integer"
-          },
           "gpu_name": {
             "type": [
               "string",
@@ -68,7 +67,53 @@
           "max_cost": {
             "type": "number"
           }
+        },
+        "description": "The cost estimate as the browser sees it; the offer id stays inside the server.",
+        "additionalProperties": false
+      },
+      "GpuOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "dph",
+          "vram_gb",
+          "available"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "dph": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Cheapest matching offer in USD per hour under the other offer filters; null when none"
+          },
+          "vram_gb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "GPU memory of that offer in GiB"
+          },
+          "available": {
+            "type": "boolean"
+          }
         }
+      },
+      "StartFailReason": {
+        "enum": [
+          "ts_key_missing",
+          "vast_unavailable",
+          "config_invalid",
+          "vast_rejected",
+          "create_uncertain",
+          "registry_failed",
+          "unexpected"
+        ],
+        "description": "Fixed identifier of why a start failed (also logged as 'start failed: <ErrorName> (internal: <reason>)')"
       },
       "Job": {
         "oneOf": [
@@ -148,6 +193,8 @@
           "uptime_s",
           "cost_so_far",
           "progress",
+          "gpu_name",
+          "download",
           "remaining",
           "unknown",
           "role",
@@ -307,6 +354,45 @@
               "object",
               "null"
             ]
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GPU model of the active instance (Vast's row, else the offer chosen at start)"
+          },
+          "download": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Overall model download across the profile's files while state is downloading and the agent is in the models phase; null otherwise or when the agent's file is not in the profile. Speed and ETA are left to the client.",
+            "required": [
+              "files_total",
+              "files_done",
+              "bytes_done",
+              "bytes_total",
+              "current_file"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "files_total": {
+                "type": "integer"
+              },
+              "files_done": {
+                "type": "integer"
+              },
+              "bytes_done": {
+                "type": "integer"
+              },
+              "bytes_total": {
+                "type": "integer"
+              },
+              "current_file": {
+                "type": "string"
+              }
+            }
           },
           "remaining": {
             "type": "object",
@@ -773,7 +859,7 @@
     "/api/estimate": {
       "get": {
         "operationId": "estimate",
-        "summary": "Cheapest matching offer and its upper-bound cost (admin)",
+        "summary": "Cheapest matching offer and its upper-bound cost, for one allowed GPU model or all of them (admin)",
         "security": [
           {
             "sessionCookie": []
@@ -786,6 +872,114 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Estimate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown query parameter or bad gpu value (code invalid_body), or a model outside VAST_ALLOWED_GPUS (code gpu_not_allowed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No offer matches for the chosen model(s) right now (code no_offers)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast unavailable (code vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "VAST_ALLOWED_GPUS is empty: the server refuses to search any GPU (code no_gpu_configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gpu",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "A GPU model name exactly as listed by GET /api/gpus (underscores count as spaces; case is kept). Anything outside VAST_ALLOWED_GPUS is 400 gpu_not_allowed."
+            }
+          }
+        ]
+      }
+    },
+    "/api/gpus": {
+      "get": {
+        "operationId": "gpus",
+        "summary": "The selectable GPU models (VAST_ALLOWED_GPUS, config order) with the cheapest current offer each; one Vast search (admin)",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "gpus"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "gpus": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/GpuOption"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -821,7 +1015,7 @@
             }
           },
           "503": {
-            "description": "No offer matches (code no_offers)",
+            "description": "VAST_ALLOWED_GPUS is empty (code no_gpu_configured)",
             "content": {
               "application/json": {
                 "schema": {
@@ -836,7 +1030,7 @@
     "/api/start": {
       "post": {
         "operationId": "start",
-        "summary": "Start the instance after the user confirmed the estimate (admin; rate limited by START_RATE_LIMIT_PER_HOUR)",
+        "summary": "Start the instance on an allowed GPU model after the user confirmed the estimate (admin; rate limited by START_RATE_LIMIT_PER_HOUR). Without gpu the cheapest offer among all allowed models is used.",
         "security": [
           {
             "sessionCookie": []
@@ -855,6 +1049,12 @@
                 "properties": {
                   "confirm": {
                     "const": true
+                  },
+                  "gpu": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "A GPU model name exactly as listed by GET /api/gpus (underscores count as spaces; case is kept). Anything outside VAST_ALLOWED_GPUS is 400 gpu_not_allowed."
                   }
                 }
               }
@@ -912,7 +1112,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed)",
             "content": {
               "application/json": {
                 "schema": {
@@ -942,7 +1142,7 @@
             }
           },
           "409": {
-            "description": "An instance is already active (code already_active)",
+            "description": "An instance is already active (code already_active), or no offer matches for the chosen model(s) right now (code no_offers)",
             "content": {
               "application/json": {
                 "schema": {
@@ -962,7 +1162,7 @@
             }
           },
           "502": {
-            "description": "Start failed (codes start_failed, start_uncertain)",
+            "description": "Start failed (codes start_failed, start_uncertain); error.reason is one of the fixed StartFailReason values",
             "content": {
               "application/json": {
                 "schema": {
@@ -972,7 +1172,7 @@
             }
           },
           "503": {
-            "description": "No offer matches (code no_offers)",
+            "description": "VAST_ALLOWED_GPUS is empty (code no_gpu_configured)",
             "content": {
               "application/json": {
                 "schema": {

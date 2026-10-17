@@ -22,7 +22,8 @@ describe("loadConfig", () => {
     expect(cfg["vastDiskGb"]).toBe(50);
     expect(cfg["vastMinVramGb"]).toBe(24);
     expect(cfg["vastMaxDph"]).toBe("0.50");
-    expect(cfg["vastAllowedGpus"]).toEqual([]);
+    // Ampere or newer only; empty no longer means "any GPU".
+    expect(cfg["vastAllowedGpus"]).toEqual(["RTX A5000", "RTX 3090", "RTX 4090"]);
     expect(cfg["startFailsafeHours"]).toBe(3);
     expect(cfg["webRepoDir"]).toBe(".");
     expect(cfg.secretNames).toContain("VAST_API_KEY");
@@ -62,7 +63,8 @@ describe("loadConfig", () => {
 
   it("parses csv", () => {
     expect(loadConfig({ ...base, VAST_ALLOWED_GPUS: "a, b" }, schema)["vastAllowedGpus"]).toEqual(["a", "b"]);
-    expect(loadConfig({ ...base, VAST_ALLOWED_GPUS: "" }, schema)["vastAllowedGpus"]).toEqual([]);
+    // An empty value falls back to the default list, never to "any".
+    expect(loadConfig({ ...base, VAST_ALLOWED_GPUS: "" }, schema)["vastAllowedGpus"]).toEqual(["RTX A5000", "RTX 3090", "RTX 4090"]);
   });
 
   it("never includes secret values in error messages", () => {

@@ -18,6 +18,7 @@ import {
   type DestroyOutcome,
   type InstanceRecord,
   type Offer,
+  type OfferFilters,
   type VastInstance,
 } from "@vast-comfy/core";
 import { createAuthStack } from "../src/auth.js";
@@ -165,8 +166,10 @@ class FakeVast {
   instances: VastInstance[] = [];
   listError: Error | null = null;
   creates = 0;
+  searches: OfferFilters[] = [];
   nextId = 1000;
-  async searchOffers(): Promise<Offer[]> {
+  async searchOffers(filters: OfferFilters): Promise<Offer[]> {
+    this.searches.push(filters);
     return this.offers;
   }
   async createInstance(_offer: number, req: CreateRequest): Promise<{ id: number }> {
@@ -205,7 +208,12 @@ interface Harness {
 let h: Harness;
 
 async function harness(
-  opts: { ready?: boolean; cfg?: Record<string, unknown>; extraRoutes?: (app: FastifyInstance) => void } = {},
+  opts: {
+    ready?: boolean;
+    cfg?: Record<string, unknown>;
+    extraRoutes?: (app: FastifyInstance) => void;
+    authKey?: () => Promise<string>;
+  } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
     if (s.url === "/status") return json(res, 200, agentStatus("ready"));
@@ -240,7 +248,7 @@ async function harness(
     vastMaxDph: "0.50",
     vastMinDownloadMbps: 500,
     vastMinReliability: "0.98",
-    vastAllowedGpus: [],
+    vastAllowedGpus: ["RTX A5000", "RTX 3090", "RTX 4090"],
     comfyPort: comfy.port,
     agentPort: agent.port,
     // Generous: under a loaded full-suite run a short timeout made discovery to the fake IdP flaky.
@@ -282,7 +290,8 @@ async function harness(
     registry,
     agentFor: (r: InstanceRecord) => new AgentClient("127.0.0.1", cfg, r.agent_token, STATUS_SCHEMA),
     clock: () => clock.ms / 1000,
-    tsAuthKey: async () => AUTH_KEY,
+    tsAuthKey: opts.authKey ?? (async () => AUTH_KEY),
+    profileModels: profile.models,
     newToken: () => TOKEN,
     newHostname: () => `vast-new${n++}`,
     sleep: async () => undefined,
@@ -397,6 +406,9 @@ describe("auth gate", () => {
     const cases: [Method, string, unknown][] = [
       ["POST", "/api/start", { confirm: true }],
       ["GET", "/api/estimate", undefined],
+      ["GET", "/api/estimate?gpu=RTX%204090", undefined],
+      ["GET", "/api/gpus", undefined],
+      ["POST", "/api/start", { confirm: true, gpu: "RTX 4090" }],
       ["POST", "/api/destroy", {}],
       ["POST", "/api/extend", { kind: "idle", minutes: 10 }],
       ["POST", "/api/destroy-unknown", { vast_id: 5 }],
@@ -549,10 +561,12 @@ describe("start, estimate, destroy, extend", () => {
     const a = await admin();
     const est = await call("GET", "/api/estimate", a);
     expect(est.statusCode).toBe(200);
-    expect(est.json()).toMatchObject({ offer_id: 11, dph: 0.3, horizon_hours: 3 });
+    // Offer ids stay inside the server.
+    expect(est.json()).toEqual({ gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3 });
     const first = await post("/api/start", a, { confirm: true });
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toMatchObject({ status: "booting", vast_instance_id: 1000, estimate: { offer_id: 11 } });
+    expect(first.json()).toMatchObject({ status: "booting", vast_instance_id: 1000, estimate: { gpu_name: "RTX A5000", dph: 0.3 } });
+    expect(first.body).not.toContain("offer_id");
     for (const s of [TOKEN, AUTH_KEY, VAST_KEY, "vast-new0"]) expect(first.body).not.toContain(s);
     const second = await post("/api/start", a, { confirm: true });
     expect(second.statusCode).toBe(409);
@@ -565,12 +579,15 @@ describe("start, estimate, destroy, extend", () => {
     expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(409);
   });
 
-  it("start maps no offers to 503", async () => {
+  it("start and estimate map no offers to 409", async () => {
     h = await harness({ ready: false });
     h.vast.offers = [];
-    const res = await post("/api/start", await admin(), { confirm: true });
-    expect(res.statusCode).toBe(503);
+    const a = await admin();
+    const res = await post("/api/start", a, { confirm: true });
+    expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("no_offers");
+    expect(h.logs).toContain("warn start failed: NoOffersError (internal: no_offers)");
+    expect((await call("GET", "/api/estimate", a)).statusCode).toBe(409);
   });
 
   it("destroy calls the agent and Vast and reports the outcome", async () => {
@@ -1168,6 +1185,142 @@ describe("secrecy across the login flow", () => {
 describe("server timeouts", () => {
   it("come from config", () => {
     expect(h.app.initialConfig).toMatchObject({ requestTimeout: 30_000, connectionTimeout: 60_000, keepAliveTimeout: 75_000 });
+  });
+});
+
+describe("GPU choice", () => {
+  const P40: Offer = { id: 5, dph_total: 0.1, gpu_name: "Tesla P40", gpu_ram: 24576 };
+  const A5000: Offer = { id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 };
+  const R4090: Offer = { id: 40, dph_total: 0.45, gpu_name: "RTX 4090", gpu_ram: 24564 };
+
+  it("GET /api/gpus: 401 anonymous, 403 member, the allowed models with prices for an admin", async () => {
+    h.vast.offers = [P40, A5000, R4090];
+    expect((await call("GET", "/api/gpus")).statusCode).toBe(401);
+    expect((await call("GET", "/api/gpus", await member())).statusCode).toBe(403);
+    const res = await call("GET", "/api/gpus", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.json()).toEqual({
+      gpus: [
+        { name: "RTX A5000", dph: 0.3, vram_gb: 24, available: true },
+        { name: "RTX 3090", dph: null, vram_gb: null, available: false },
+        { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+      ],
+    });
+    expect(res.body).not.toMatch(/P40|offer|"id"/);
+    expect(h.vast.searches).toHaveLength(1);
+  });
+
+  it("GET /api/estimate?gpu=: restricted to the model, 400 outside the allow-list, 409 without offers", async () => {
+    h.vast.offers = [P40, A5000, R4090];
+    const a = await admin();
+    const ok = await call("GET", "/api/estimate?gpu=RTX%204090", a);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3 });
+    expect(h.vast.searches.at(-1)!.allowedGpus).toEqual(["RTX 4090"]);
+    const before = h.vast.searches.length;
+    const bad = await call("GET", "/api/estimate?gpu=Tesla%20P40", a);
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error.code).toBe("gpu_not_allowed");
+    expect(h.vast.searches).toHaveLength(before);
+    expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).json().error.code).toBe("no_offers");
+    expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).statusCode).toBe(409);
+    for (const q of ["gpu=a&gpu=b", "gpu=", `gpu=${"x".repeat(65)}`, "offer_id=5", "gpu=RTX%204090&max_dph=9"]) {
+      const res = await call("GET", `/api/estimate?${q}`, a);
+      expect(res.statusCode, q).toBe(400);
+      expect(res.json().error.code, q).toBe("invalid_body");
+    }
+    expect(h.vast.searches).toHaveLength(before + 2);
+  });
+
+  it("POST /api/start {gpu}: validated by schema and allow-list before anything is rented", async () => {
+    h = await harness({ ready: false, cfg: { startRateLimitPerHour: 50 } });
+    h.vast.offers = [P40, A5000, R4090];
+    const a = await admin();
+    for (const body of [
+      { confirm: true, gpu: 5 },
+      { confirm: true, gpu: ["RTX 4090"] },
+      { confirm: true, gpu: null },
+      { confirm: true, gpu: "x".repeat(65) },
+      { confirm: true, gpu: "RTX 4090", offer_id: 40 },
+      { confirm: true, gpu: "RTX 4090", max_dph: 9 },
+      { gpu: "RTX 4090" },
+    ]) {
+      const res = await post("/api/start", a, body);
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+      expect(res.json().error.code).toBe("invalid_body");
+    }
+    for (const gpu of ["Tesla P40", "rtx 4090", "RTX 4090,Tesla P40"]) {
+      const res = await post("/api/start", a, { confirm: true, gpu });
+      expect(res.statusCode, gpu).toBe(400);
+      expect(res.json().error.code).toBe("gpu_not_allowed");
+    }
+    expect(h.vast.searches).toHaveLength(0);
+    expect(h.vast.creates).toBe(0);
+    expect(await h.registry.all()).toEqual([]);
+    const none = await post("/api/start", a, { confirm: true, gpu: "RTX 3090" });
+    expect(none.statusCode).toBe(409);
+    expect(none.json().error.code).toBe("no_offers");
+    const ok = await post("/api/start", a, { confirm: true, gpu: "RTX 4090" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().estimate).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3 });
+    expect(h.vast.searches.map((f) => f.allowedGpus)).toEqual([["RTX 3090"], ["RTX 4090"]]);
+    expect(h.vast.creates).toBe(1);
+  });
+
+  it("an empty allow-list fails closed with 503 no_gpu_configured on all three endpoints", async () => {
+    h = await harness({ ready: false, cfg: { vastAllowedGpus: [] } });
+    h.vast.offers = [P40];
+    const a = await admin();
+    for (const res of [
+      await call("GET", "/api/gpus", a),
+      await call("GET", "/api/estimate", a),
+      await call("GET", "/api/estimate?gpu=RTX%20A5000", a),
+      await post("/api/start", a, { confirm: true }),
+      await post("/api/start", a, { confirm: true, gpu: "Tesla P40" }),
+    ]) {
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error.code).toBe("no_gpu_configured");
+    }
+    expect(h.vast.searches).toHaveLength(0);
+    expect(h.vast.creates).toBe(0);
+  });
+
+  it("GET /api/state carries gpu_name and the overall download for members too", async () => {
+    h.vast.instances[0]!["gpu_name"] = "RTX A5000";
+    const [s1] = profile.models.map((m) => m.size_bytes) as [number];
+    const total = profile.models.reduce((n, m) => n + m.size_bytes, 0);
+    h.setAgent((s, res) =>
+      json(res, 200, agentStatus("downloading", {
+        progress: { phase: "models", file: "qwen3vl_8b_int8_convrot.safetensors", bytes_done: 1000, bytes_total: 9350798360 },
+      })),
+    );
+    for (const who of [await admin(), await member()]) {
+      const body = (await call("GET", "/api/state", who)).json();
+      expect(body.gpu_name).toBe("RTX A5000");
+      expect(body.download).toEqual({
+        files_total: 3, files_done: 1, bytes_done: s1 + 1000, bytes_total: total, current_file: "qwen3vl_8b_int8_convrot.safetensors",
+      });
+    }
+    h.setAgent((s, res) => json(res, 200, agentStatus("ready")));
+    const ready = (await call("GET", "/api/state", await member())).json();
+    expect(ready.download).toBeNull();
+  });
+
+  it("a failed start names a fixed reason in the log and the body, never a secret", async () => {
+    for (const authKey of [async () => "", async () => Promise.reject(new Error(`ENOENT ${AUTH_KEY} ${VAST_KEY}`))]) {
+      h = await harness({ ready: false, authKey });
+      const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({
+        error: { code: "start_failed", reason: "ts_key_missing", message: "the Tailscale auth key is missing or empty on the server" },
+      });
+      expect(h.logs).toContain("warn start failed: StartError (internal: ts_key_missing)");
+      for (const text of [res.body, h.logs.join("\n")]) {
+        for (const secret of [AUTH_KEY, VAST_KEY, TOKEN, "ENOENT"]) expect(text).not.toContain(secret);
+      }
+      expect(h.vast.searches).toHaveLength(0);
+    }
   });
 });
 

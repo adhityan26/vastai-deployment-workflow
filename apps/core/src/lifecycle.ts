@@ -1,9 +1,11 @@
 import { camelCase, type AppsConfig } from "./config.js";
 import type { AgentStatus } from "./agent.js";
+import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import {
   CreateRejected,
   DestroyError,
+  normalizeGpuName,
   offerFiltersFromConfig,
   type CreateRequest,
   type DestroyOutcome,
@@ -32,11 +34,30 @@ const READY_STATES = new Set(["ready", "idle-warning"]);
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
 const VANISH_CONFIRMATIONS = 2; // consecutive lists without the instance before it counts as gone
+const MB_PER_GIB = 1024; // Vast reports gpu_ram in MiB; shown as whole GiB (24564 -> 24)
+const DOWNLOAD_STATE = "downloading";
+const MODELS_PHASE = "models";
 
 export class NoOffersError extends Error {
   constructor() {
     super("no Vast offer matches the configured filters");
     this.name = "NoOffersError";
+  }
+}
+
+/** VAST_ALLOWED_GPUS is empty: the web refuses to search or rent rather than take any GPU. */
+export class NoGpuConfiguredError extends Error {
+  constructor() {
+    super("no GPU model is configured (VAST_ALLOWED_GPUS is empty)");
+    this.name = "NoGpuConfiguredError";
+  }
+}
+
+/** The requested GPU model is not in VAST_ALLOWED_GPUS; nothing was searched or recorded. */
+export class GpuNotAllowedError extends Error {
+  constructor() {
+    super("this GPU model is not offered");
+    this.name = "GpuNotAllowedError";
   }
 }
 
@@ -47,13 +68,31 @@ export class NoActiveInstanceError extends Error {
   }
 }
 
+/**
+ * Why a start failed, as a fixed identifier (safe to log and to show; never provider text).
+ * ts_key_missing: the Tailscale key file is unreadable or empty; vast_unavailable: the offer
+ * search failed; config_invalid: a start setting is missing; vast_rejected: Vast definitely
+ * refused the create; create_uncertain: the create may or may not have happened;
+ * registry_failed: the instance was created but could not be recorded.
+ */
+export type StartFailReason =
+  | "ts_key_missing"
+  | "vast_unavailable"
+  | "config_invalid"
+  | "vast_rejected"
+  | "create_uncertain"
+  | "registry_failed"
+  | "unexpected";
+
 /** Start failed after the write-ahead record; `ambiguous` means the instance may exist on Vast. */
 export class StartError extends Error {
   readonly ambiguous: boolean;
-  constructor(message: string, ambiguous: boolean) {
+  readonly reason: StartFailReason;
+  constructor(message: string, ambiguous: boolean, reason: StartFailReason = "unexpected") {
     super(message);
     this.name = "StartError";
     this.ambiguous = ambiguous;
+    this.reason = reason;
   }
 }
 
@@ -98,6 +137,8 @@ export interface LifecycleDeps {
   newHostname(): string;
   /** Waits between destroy attempts; defaults to a real timer. */
   sleep?(seconds: number): Promise<void>;
+  /** The profile's model files in download order, for the overall download progress. */
+  profileModels?: readonly ModelSpec[];
 }
 
 /** A registry record as it may leave this module: never the agent token. */
@@ -109,6 +150,25 @@ export interface CostEstimate {
   dph: number;
   horizon_hours: number;
   max_cost: number;
+}
+
+/** One selectable GPU model with its cheapest current offer (no offer id leaves the server). */
+export interface GpuOption {
+  name: string;
+  dph: number | null;
+  vram_gb: number | null;
+  available: boolean;
+}
+
+/** Overall model download progress across all profile files (the agent reports one file). */
+export interface DownloadView {
+  files_total: number;
+  /** Files before the current one in profile order. */
+  files_done: number;
+  bytes_done: number;
+  bytes_total: number;
+  /** Basename of the file being downloaded, as named by the profile. */
+  current_file: string;
 }
 
 export interface StartResult {
@@ -139,6 +199,9 @@ export interface StatusView {
   uptime_s: number | null;
   cost_so_far: number | null;
   progress: AgentStatus["progress"];
+  /** GPU model of the active instance: Vast's row, else the offer chosen at start. */
+  gpu_name: string | null;
+  download: DownloadView | null;
   remaining: { idle_s: number | null; failsafe_s: number | null; hard_cap_s: number | null };
   unknown: UnknownInstance[];
 }
@@ -203,6 +266,39 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * Overall progress while models download: files before the current one (profile order) count as
+ * done, the current one counts its bytes (clamped to its size), later ones count nothing. Any
+ * doubt (other phase or state, unknown or ambiguous file name, a bad counter) gives null.
+ */
+export function overallDownload(
+  state: string,
+  progress: AgentStatus["progress"],
+  models: readonly ModelSpec[],
+): DownloadView | null {
+  if (state !== DOWNLOAD_STATE || progress === null || progress.phase !== MODELS_PHASE || models.length === 0) return null;
+  if (typeof progress.file !== "string" || typeof progress.bytes_done !== "number") return null;
+  if (!Number.isFinite(progress.bytes_done)) return null;
+  const name = baseName(progress.file);
+  if (name === "") return null;
+  const matches = models.map((m, i) => (baseName(m.file) === name ? i : -1)).filter((i) => i >= 0);
+  if (matches.length !== 1) return null;
+  const index = matches[0]!;
+  const current = models[index]!;
+  const before = models.slice(0, index).reduce((sum, m) => sum + m.size_bytes, 0);
+  return {
+    files_total: models.length,
+    files_done: index,
+    bytes_done: before + Math.min(Math.max(progress.bytes_done, 0), current.size_bytes),
+    bytes_total: models.reduce((sum, m) => sum + m.size_bytes, 0),
+    current_file: baseName(current.file),
+  };
+}
+
 function realSleep(seconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
@@ -219,6 +315,8 @@ export class Lifecycle {
   private readonly destroyRequested = new Set<string>();
   // Consecutive successful Vast lists that omitted a record's instance, per hostname.
   private readonly vanishMisses = new Map<string, number>();
+  // GPU model of the offer the last start chose, until Vast's own row names it.
+  private startedGpu: { hostname: string; gpu_name: string | null } | null = null;
 
   constructor(private readonly deps: LifecycleDeps) {
     this.cfg = deps.cfg;
@@ -276,10 +374,56 @@ export class Lifecycle {
     };
   }
 
-  /** Cheapest matching offer and its upper-bound cost; read-only (for the confirmation dialog). */
-  async estimate(): Promise<CostEstimate> {
-    const offers = await this.deps.vast.searchOffers(offerFiltersFromConfig(this.cfg));
-    const offer = offers[0];
+  /** The allow-list in offer-query form (deduplicated, config order); empty fails closed. */
+  private allowedModels(): string[] {
+    const raw = this.cfg["vastAllowedGpus"];
+    const list = Array.isArray(raw) ? raw.filter((g): g is string => typeof g === "string" && g !== "") : [];
+    const models = [...new Set(list.map(normalizeGpuName))];
+    if (models.length === 0) throw new NoGpuConfiguredError();
+    return models;
+  }
+
+  /** The models a search may return: the requested one (exact match after normalisation) or all. */
+  private modelsFor(gpu: string | undefined): string[] {
+    const models = this.allowedModels();
+    if (gpu === undefined) return models;
+    const wanted = normalizeGpuName(gpu);
+    if (!models.includes(wanted)) throw new GpuNotAllowedError();
+    return [wanted];
+  }
+
+  /** One Vast search over `models`; offers of any other model are dropped whatever Vast returns. */
+  private async offersFor(models: readonly string[]): Promise<Offer[]> {
+    const filters: OfferFilters = { ...offerFiltersFromConfig(this.cfg), allowedGpus: models };
+    const offers = await this.deps.vast.searchOffers(filters);
+    return offers
+      .filter((o) => typeof o.gpu_name === "string" && models.includes(normalizeGpuName(o.gpu_name)))
+      .sort((a, b) => a.dph_total - b.dph_total);
+  }
+
+  /** Every allowed model in config order with its cheapest matching offer (one Vast search). */
+  async gpuOptions(): Promise<GpuOption[]> {
+    const models = this.allowedModels();
+    const offers = await this.offersFor(models);
+    return models.map((name) => {
+      const best = offers.find((o) => normalizeGpuName(o.gpu_name as string) === name);
+      if (best === undefined) return { name, dph: null, vram_gb: null, available: false };
+      const ram = best.gpu_ram;
+      return {
+        name,
+        dph: best.dph_total,
+        vram_gb: typeof ram === "number" && Number.isFinite(ram) && ram > 0 ? Math.round(ram / MB_PER_GIB) : null,
+        available: true,
+      };
+    });
+  }
+
+  /**
+   * Cheapest matching offer and its upper-bound cost; read-only (for the confirmation dialog).
+   * `gpu` restricts the search to that allowed model; without it every allowed model counts.
+   */
+  async estimate(gpu?: string): Promise<CostEstimate> {
+    const offer = (await this.offersFor(this.modelsFor(gpu)))[0];
     if (offer === undefined) throw new NoOffersError();
     return this.estimateFor(offer);
   }
@@ -310,9 +454,16 @@ export class Lifecycle {
    * (`creating`) is written before any Vast call. A definite failure marks it gone; an ambiguous
    * create failure leaves it `creating` for reconcile to resolve by its label.
    */
-  start(): Promise<StartResult> {
+  start(gpu?: string): Promise<StartResult> {
+    // Validate the model before sharing an attempt or writing anything.
+    let models: string[];
+    try {
+      models = this.modelsFor(gpu);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     if (this.starting) return this.starting;
-    const run = this.exclusive(() => this.doStart());
+    const run = this.exclusive(() => this.doStart(models));
     this.starting = run;
     const clear = (): void => {
       if (this.starting === run) this.starting = null;
@@ -321,7 +472,7 @@ export class Lifecycle {
     return run;
   }
 
-  private async doStart(): Promise<StartResult> {
+  private async doStart(models: readonly string[]): Promise<StartResult> {
     const { registry, vast } = this.deps;
     const hostname = this.deps.newHostname();
     const token = this.deps.newToken();
@@ -335,17 +486,33 @@ export class Lifecycle {
       tailnet_hostname: hostname,
     });
 
-    let authKey: string;
-    let offer: Offer;
-    let request: CreateRequest;
+    // Until create is called nothing exists on Vast: every failure marks the record gone.
+    const failBeforeCreate = async (err: unknown, reason: StartFailReason): Promise<never> => {
+      await registry.markGone(record.tailnet_hostname);
+      if (err instanceof NoOffersError) throw err;
+      throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason);
+    };
+
+    let authKey = "";
     try {
       authKey = await this.deps.tsAuthKey();
-      this.secrets.add(authKey);
-      if (authKey === "") throw new Error("the Tailscale auth key is empty");
-      const offers = await vast.searchOffers(offerFiltersFromConfig(this.cfg));
-      const first = offers[0];
-      if (first === undefined) throw new NoOffersError();
-      offer = first;
+    } catch {
+      // Fixed text: a read error may name the file or, from a broken reader, echo its content.
+      return failBeforeCreate(new Error("the Tailscale auth key could not be read"), "ts_key_missing");
+    }
+    this.secrets.add(authKey);
+    if (authKey === "") return failBeforeCreate(new Error("the Tailscale auth key is empty"), "ts_key_missing");
+
+    let offer: Offer | undefined;
+    try {
+      offer = (await this.offersFor(models))[0];
+    } catch (err) {
+      return failBeforeCreate(err, "vast_unavailable");
+    }
+    if (offer === undefined) return failBeforeCreate(new NoOffersError(), "vast_unavailable");
+
+    let request: CreateRequest;
+    try {
       request = {
         image: strCfg(this.cfg, "vastImage", "VAST_IMAGE"),
         disk: intCfg(this.cfg, "vastDiskGb", "VAST_DISK_GB", 1),
@@ -354,11 +521,9 @@ export class Lifecycle {
         label: `${LABEL_PREFIX}${LABEL_SEPARATOR}${hostname}`,
       };
     } catch (err) {
-      // Nothing was sent to Vast's create endpoint: the record can safely become gone.
-      await registry.markGone(record.tailnet_hostname);
-      if (err instanceof NoOffersError) throw err;
-      throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false);
+      return failBeforeCreate(err, "config_invalid");
     }
+    this.startedGpu = { hostname, gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null };
 
     let created: { id: number };
     try {
@@ -366,13 +531,14 @@ export class Lifecycle {
     } catch (err) {
       if (err instanceof CreateRejected) {
         await registry.markGone(record.tailnet_hostname);
-        throw new StartError(this.scrub(`Vast refused to create the instance: ${err.message}`), false);
+        throw new StartError(this.scrub(`Vast refused to create the instance: ${err.message}`), false, "vast_rejected");
       }
       // Ambiguous: the instance may exist. Keep the record `creating` (blocks another start)
       // so reconcile can link it by label or mark it gone after the grace period.
       throw new StartError(
         this.scrub(`instance creation is uncertain; reconcile will resolve it: ${message(err)}`),
         true,
+        "create_uncertain",
       );
     }
 
@@ -394,6 +560,7 @@ export class Lifecycle {
             (outcome !== null ? "it was destroyed" : "destroy failed, reconcile will retry"),
         ),
         outcome === null,
+        "registry_failed",
       );
     }
   }
@@ -573,6 +740,11 @@ export class Lifecycle {
           ? { error: agent.destroy.last_error ?? "destroy failed on the instance" }
           : null;
 
+    const rowGpu = inst !== undefined && typeof inst["gpu_name"] === "string" ? inst["gpu_name"] : null;
+    const startGpu =
+      record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.gpu_name : null;
+    const progress = agent?.progress ?? null;
+
     return {
       state,
       record: record === null ? null : publicRecord(record),
@@ -586,7 +758,9 @@ export class Lifecycle {
       dph,
       uptime_s: uptime,
       cost_so_far: cost,
-      progress: agent?.progress ?? null,
+      progress,
+      gpu_name: record === null ? null : (rowGpu ?? startGpu),
+      download: overallDownload(state, progress, this.deps.profileModels ?? []),
       remaining: {
         idle_s: left(agent?.idle_destroy_at),
         failsafe_s: left(agent?.failsafe_at),

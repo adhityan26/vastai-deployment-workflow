@@ -6,7 +6,9 @@ import {
   DestroyFailedError,
   GenerateFailed,
   GenerateInputError,
+  GpuNotAllowedError,
   NoActiveInstanceError,
+  NoGpuConfiguredError,
   NoOffersError,
   RefusedError,
   ResponseTooLarge,
@@ -16,8 +18,10 @@ import {
   labelHostname,
   pollResult,
   type AppsConfig,
+  type CostEstimate,
   type GenerateDeps,
   type GenerateRequest,
+  type StartFailReason,
   type StatusView,
 } from "@vast-comfy/core";
 import { JobStore, RateLimiter, type Job } from "./store.js";
@@ -42,6 +46,30 @@ const HOSTNAME_TEXT = /\bvast-[A-Za-z0-9-]+/g;
 const LABEL_TEXT = /\bvastcomfy:[A-Za-z0-9.-]*/g;
 const URL_TEXT = /\bhttps?:\/\/\S+/gi; // config-lint: ok (pattern that removes URLs from messages)
 const MESSAGE_MAX = 300;
+const GPU_NAME_MAX = 64;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+
+// Short English text per fixed start-failure reason (the page shows it as is).
+const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
+  ts_key_missing: "the Tailscale auth key is missing or empty on the server",
+  vast_unavailable: "Vast could not be asked for offers; nothing was rented",
+  config_invalid: "the server start configuration is incomplete; nothing was rented",
+  vast_rejected: "Vast refused to create the instance; nothing was rented",
+  create_uncertain: "instance creation is uncertain; reconcile will resolve it",
+  registry_failed: "the instance could not be recorded and was destroyed",
+  unexpected: "the instance could not be started",
+};
+
+/** An error's class name for a log line, or a fixed word when it is not a plain identifier. */
+function errorName(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  return ERROR_NAME.test(name) ? name : "Error";
+}
+
+/** The estimate as the browser may see it: the offer id stays inside the server. */
+function publicEstimate(e: CostEstimate) {
+  return { gpu_name: e.gpu_name, dph: e.dph, horizon_hours: e.horizon_hours, max_cost: e.max_cost };
+}
 
 function intCfg(cfg: AppsConfig, key: string, env: string): number {
   const v = cfg[key];
@@ -114,6 +142,9 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
     uptime_s: view.uptime_s,
     cost_so_far: view.cost_so_far,
     progress: view.progress,
+    gpu_name: view.gpu_name === null ? null : scrub(view.gpu_name).slice(0, GPU_NAME_MAX),
+    // Numbers plus a profile file name: no instance internals.
+    download: view.download,
     remaining: view.remaining,
     // Only admins can act on unknown instances; labels (which carry hostnames) are not sent.
     unknown: isAdmin
@@ -128,11 +159,18 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
 }
 
 const EMPTY_BODY = { type: "object", additionalProperties: false, properties: {} } as const;
+// The browser sends only a model NAME; the server checks it against VAST_ALLOWED_GPUS.
+const GPU_FIELD = { type: "string", minLength: 1, maxLength: GPU_NAME_MAX } as const;
 const START_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["confirm"],
-  properties: { confirm: { const: true } },
+  properties: { confirm: { const: true }, gpu: GPU_FIELD },
+} as const;
+const ESTIMATE_QUERY = {
+  type: "object",
+  additionalProperties: false,
+  properties: { gpu: GPU_FIELD },
 } as const;
 const ID_PARAMS = {
   type: "object",
@@ -221,12 +259,37 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     };
   });
 
-  app.get("/api/estimate", admin, async (_req, reply) => {
+  /** The GPU-choice refusals shared by /api/gpus, /api/estimate and /api/start, else null. */
+  const gpuRefusal = (reply: FastifyReply, err: unknown): FastifyReply | null => {
+    if (err instanceof NoGpuConfiguredError) {
+      return sendError(reply, 503, "no_gpu_configured", "no GPU model is configured on the server");
+    }
+    if (err instanceof GpuNotAllowedError) return sendError(reply, 400, "gpu_not_allowed", "this GPU model is not offered");
+    if (err instanceof NoOffersError) {
+      return sendError(reply, 409, "no_offers", "no Vast offer matches for this GPU model right now");
+    }
+    return null;
+  };
+
+  app.get("/api/gpus", admin, async (_req, reply) => {
     try {
-      return await deps.lifecycle.estimate();
+      return { gpus: await deps.lifecycle.gpuOptions() };
     } catch (err) {
-      if (err instanceof NoOffersError) return sendError(reply, 503, "no_offers", "no Vast offer matches the filters");
-      log("warn", `estimate failed: ${(err as Error).name}`);
+      const refused = gpuRefusal(reply, err);
+      if (refused) return refused;
+      log("warn", `gpu list failed: ${errorName(err)}`);
+      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+    }
+  });
+
+  app.get("/api/estimate", { ...admin, schema: { querystring: ESTIMATE_QUERY } }, async (req, reply) => {
+    const { gpu } = req.query as { gpu?: string };
+    try {
+      return publicEstimate(await deps.lifecycle.estimate(gpu));
+    } catch (err) {
+      const refused = gpuRefusal(reply, err);
+      if (refused) return refused;
+      log("warn", `estimate failed: ${errorName(err)}`);
       return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
     }
   });
@@ -234,21 +297,23 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   app.post("/api/start", { ...admin, schema: { body: START_BODY } }, async (req, reply) => {
     // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
     if (!startLimiter.take("start")) return sendError(reply, 429, "rate_limited", "too many start requests this hour");
+    const { gpu } = req.body as { gpu?: string };
     log("info", `start requested by ${req.identity?.username ?? "?"}`);
     try {
-      const { record, estimate } = await deps.lifecycle.start();
-      return { status: record.status, vast_instance_id: record.vast_instance_id, estimate };
+      const { record, estimate } = await deps.lifecycle.start(gpu);
+      return { status: record.status, vast_instance_id: record.vast_instance_id, estimate: publicEstimate(estimate) };
     } catch (err) {
       if (err instanceof AlreadyActiveError) return sendError(reply, 409, "already_active", "an instance is already active");
-      if (err instanceof NoOffersError) return sendError(reply, 503, "no_offers", "no Vast offer matches the filters");
+      if (err instanceof NoOffersError) log("warn", "start failed: NoOffersError (internal: no_offers)");
+      const refused = gpuRefusal(reply, err);
+      if (refused) return refused;
+      // A fixed reason only: the error message may carry provider text.
+      const reason: StartFailReason = err instanceof StartError ? err.reason : "unexpected";
       const ambiguous = err instanceof StartError && err.ambiguous;
-      log("warn", `start failed: ${(err as Error).name}${ambiguous ? " (ambiguous)" : ""}`);
-      return sendError(
-        reply,
-        502,
-        ambiguous ? "start_uncertain" : "start_failed",
-        ambiguous ? "instance creation is uncertain; reconcile will resolve it" : "the instance could not be started",
-      );
+      log("warn", `start failed: ${errorName(err)} (internal: ${reason})${ambiguous ? " (ambiguous)" : ""}`);
+      const code = ambiguous ? "start_uncertain" : "start_failed";
+      const text = ambiguous && reason !== "create_uncertain" ? START_FAIL_MESSAGES.create_uncertain : START_FAIL_MESSAGES[reason];
+      return sendError(reply, 502, code, text, reason);
     }
   });
 
