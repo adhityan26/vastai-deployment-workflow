@@ -253,7 +253,10 @@ def test_s1_defaults_and_new_keys_are_in_the_real_schema():
     for name, default in S1_DEFAULTS.items():
         spec = by_name[name]
         assert spec.default == default, name
-        assert spec.components == ("instance",) and not spec.secret and not spec.required, name
+        assert "instance" in spec.components and not spec.secret and not spec.required, name
+    # only these S1 keys are intentionally shared with the apps component (web app needs them)
+    shared = {name for name in S1_DEFAULTS if by_name[name].components != ("instance",)}
+    assert shared == {"COMFY_PORT"}, shared
     assert by_name["COMFY_PORT"].type == "int" and by_name["DESTROY_ASSUME_YES"].type == "bool"
     for name in ("VENV_DIR", "VASTAI_VERSION", "STOCK_VASTAI_BIN", "SUPERVISOR_CONF_DIR", "SUPERVISOR_PROGRAMS_FILE"):
         assert by_name[name].type == "str" and "S1" in by_name[name].description, name
