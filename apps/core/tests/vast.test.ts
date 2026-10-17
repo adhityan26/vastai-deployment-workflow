@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AppsConfig } from "../src/config.js";
@@ -15,6 +15,7 @@ interface Seen {
 
 let server: Server | undefined;
 afterEach(() => {
+  vi.unstubAllGlobals();
   server?.closeAllConnections?.();
   server?.close();
   server = undefined;
@@ -146,20 +147,27 @@ describe("VastClient", () => {
     expect(await client.destroyInstance(9)).toBe("gone");
   });
 
-  it("destroy treats a 200 body that says not found as gone", async () => {
-    const { client } = await fake((_r, res) => json(res, 200, { error: true, status_code: 404, msg: "Instance 9 not found." }));
-    expect(await client.destroyInstance(9)).toBe("gone");
-  });
-
-  it("destroy treats an error body with a success status as failure", async () => {
+  it("destroy treats a 2xx body carrying status_code 404 or error plus not-found text as gone", async () => {
     for (const body of [
-      { success: false, msg: "something broke" },
-      { error: true, status_code: 401, msg: "Your key lacks proper privileges" },
-      "Failed with error 500",
-      {},
-      "",
+      { error: true, status_code: 404, msg: "Instance 9 not found." },
+      { error: true, msg: "Failed with error 404: Instance 9 not found." },
     ]) {
       const { client } = await fake((_r, res) => json(res, 200, body));
+      expect(await client.destroyInstance(9)).toBe("gone");
+      server?.close();
+    }
+  });
+
+  it("destroy keeps a bare success:false with not-found wording a failure", async () => {
+    const { client } = await fake((_r, res) => json(res, 200, { success: false, msg: "Instance 9 not found" }));
+    await expect(client.destroyInstance(9)).rejects.toThrow(DestroyError);
+  });
+
+  it("destroy never trusts an inner 404 on a non-2xx HTTP status", async () => {
+    for (const status of [401, 403, 500, 502]) {
+      const { client } = await fake((_r, res) =>
+        json(res, status, { error: true, status_code: 404, msg: "Instance 9 not found" }),
+      );
       await expect(client.destroyInstance(9)).rejects.toThrow(DestroyError);
       server?.close();
     }
@@ -188,16 +196,51 @@ describe("VastClient", () => {
     }
   });
 
-  it("errors from an unreachable server never contain the api key", async () => {
-    const cfg = {
-      vastApiKey: KEY,
-      vastApiUrl: "http://127.0.0.1:1/api/v0",
-      httpTimeoutSApps: 2,
-      secretNames: [],
-    } as unknown as AppsConfig;
-    const err = (await new VastClient(cfg).listInstances().catch((e: unknown) => e)) as Error;
-    expect(err).toBeInstanceOf(VastError);
-    expect(err.message).not.toContain(KEY);
+  it("redacts the key from a 200 success:false body on search, create and destroy", async () => {
+    const { client } = await fake((_r, res) =>
+      json(res, 200, { success: false, msg: `nope ${KEY} and Bearer ${KEY}` }),
+    );
+    for (const call of [
+      () => client.searchOffers(filters),
+      () => client.createInstance(1, request),
+      () => client.destroyInstance(1),
+    ]) {
+      const err = (await call().catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(VastError);
+      expect(err.message).not.toContain(KEY);
+      expect(err.message).toContain("[redacted]");
+    }
+  });
+
+  it("redacts the key from network errors", async () => {
+    const { client } = await fake((_r, res) => json(res, 200, {}));
+    vi.stubGlobal("fetch", () => Promise.reject(new Error(`socket failed for Bearer ${KEY} / ${KEY}`)));
+    for (const call of [
+      () => client.searchOffers(filters),
+      () => client.createInstance(1, request),
+      () => client.listInstances(),
+      () => client.destroyInstance(1),
+    ]) {
+      const err = (await call().catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(VastError);
+      expect(err.message).not.toContain(KEY);
+      expect(err.message).toContain("[redacted]");
+    }
+  });
+
+  it("search returns [] for an empty offers list", async () => {
+    const { client } = await fake((_r, res) => json(res, 200, { offers: [] }));
+    expect(await client.searchOffers(filters)).toEqual([]);
+  });
+
+  it("list stops on a repeated next_token", async () => {
+    const { client } = await fake((_r, res) => json(res, 200, { instances: [], next_token: "same" }));
+    await expect(client.listInstances()).rejects.toThrow(/repeated page token/);
+  });
+
+  it("the constructor requires a versioned VAST_API_URL", () => {
+    const cfg = { vastApiKey: KEY, vastApiUrl: "http://127.0.0.1:1/api", httpTimeoutSApps: 2 } as unknown as AppsConfig;
+    expect(() => new VastClient(cfg)).toThrow(/versioned/);
   });
 
   it("timeouts surface as VastError", async () => {
@@ -222,6 +265,8 @@ describe("VastClient", () => {
     expect(f.maxDph).toBe(0.5);
     expect(f.minReliability).toBe(0.98);
     expect(() => offerFiltersFromConfig({ ...base, vastMaxDph: "abc" } as unknown as AppsConfig)).toThrow(/VAST_MAX_DPH/);
+    expect(() => offerFiltersFromConfig({ ...base, vastMaxDph: "0.5abc" } as unknown as AppsConfig)).toThrow(/VAST_MAX_DPH/);
+    expect(() => offerFiltersFromConfig({ ...base, vastMinReliability: "" } as unknown as AppsConfig)).toThrow(/VAST_MIN_RELIABILITY/);
     expect(() => offerFiltersFromConfig({ ...base, vastMaxDph: "-1" } as unknown as AppsConfig)).toThrow(VastError);
     expect(() => offerFiltersFromConfig({ ...base, vastMinReliability: "1.5" } as unknown as AppsConfig)).toThrow(/between 0 and 1/);
   });

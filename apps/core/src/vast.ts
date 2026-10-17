@@ -4,9 +4,14 @@ import type { AppsConfig } from "./config.js";
 // `--explain` of read-only commands (search offers: POST /bundles/, list: GET v1 /instances/,
 // create: PUT /asks/{offer}/, destroy: DELETE /instances/{id}/). The API key is sent only
 // in the Authorization header and is redacted from everything this module throws.
+// UNVERIFIED against the live API: create and destroy (never executed; shapes come from the
+// SDK source and spike S4). The runtype string "ssh_direc ssh_proxy" is the CLI's own spelling
+// and must be confirmed on the first real create. Search and list were checked with --explain.
 
 const MAX_ERROR_TEXT = 200;
 const GONE_TEXT = /instance\b.*\bnot found/i;
+const VERSIONED_BASE = /\/v\d+\/?$/;
+const MAX_PAGES = 1000;
 const RUNTYPE_SSH_DIRECT = "ssh_direc ssh_proxy"; // ssh + direct, as built by the vastai CLI
 const MB_PER_GB = 1000; // the CLI sends gpu_ram in MB using 1000 per GB
 
@@ -63,7 +68,8 @@ export interface VastInstance {
 export type DestroyOutcome = "destroyed" | "gone";
 
 function positiveNumber(name: string, raw: unknown): number {
-  const value = typeof raw === "number" ? raw : Number.parseFloat(String(raw));
+  const text = String(raw).trim();
+  const value = text === "" ? Number.NaN : Number(text); // strict: "0.5abc" is NaN
   if (!Number.isFinite(value) || value <= 0) throw new VastError(`${name} must be a positive number`);
   return value;
 }
@@ -98,6 +104,7 @@ export class VastClient {
     if (this.key === "") throw new VastError("VAST_API_KEY is not configured");
     const url = String(cfg["vastApiUrl"] ?? "");
     if (url === "") throw new VastError("VAST_API_URL is not configured");
+    if (!VERSIONED_BASE.test(url)) throw new VastError("VAST_API_URL must end in a versioned path such as /v0");
     this.base = url.endsWith("/") ? url : `${url}/`;
     this.timeoutMs = positiveNumber("HTTP_TIMEOUT_S_APPS", cfg["httpTimeoutSApps"]) * 1000;
   }
@@ -223,7 +230,9 @@ export class VastClient {
   async listInstances(): Promise<VastInstance[]> {
     const rows: VastInstance[] = [];
     let token: string | undefined;
+    const seenTokens = new Set<string>();
     do {
+      if (seenTokens.size >= MAX_PAGES) throw new VastError("list instances: too many pages");
       const query: Record<string, string> = {
         select_filters: "{}",
         order_by: JSON.stringify([{ col: "id", dir: "asc" }]),
@@ -247,6 +256,10 @@ export class VastClient {
         });
       }
       token = typeof body.next_token === "string" && body.next_token !== "" ? body.next_token : undefined;
+      if (token !== undefined) {
+        if (seenTokens.has(token)) throw new VastError("list instances: repeated page token");
+        seenTokens.add(token);
+      }
     } while (token);
     return rows;
   }
@@ -262,11 +275,16 @@ export class VastClient {
     }
     const body = reply.json as Record<string, unknown> | null;
     const obj = body && typeof body === "object" ? body : null;
-    const innerStatus = obj && typeof obj["status_code"] === "number" ? obj["status_code"] : undefined;
-    const notFoundText = GONE_TEXT.test(reply.text);
-    if (reply.status === 404 || innerStatus === 404) return "gone";
-    if (reply.status === 200 && notFoundText && obj?.["success"] !== true) return "gone";
-    if (reply.status >= 200 && reply.status < 300 && obj?.["success"] === true) return "destroyed";
+    // "gone" is allowed only for (a) HTTP 404, or (b) an HTTP 2xx whose body says 404: the CLI
+    // hides the real status (S4: "Failed with error 404: Instance <id> not found"), so accept
+    // status_code 404, or error:true together with the not-found text. A bare success:false with
+    // not-found wording, or any non-2xx/non-404 status, stays a failure.
+    if (reply.status === 404) return "gone";
+    if (reply.status >= 200 && reply.status < 300) {
+      if (obj?.["success"] === true) return "destroyed";
+      if (obj?.["status_code"] === 404) return "gone";
+      if (obj?.["error"] === true && GONE_TEXT.test(reply.text)) return "gone";
+    }
     throw new DestroyError(`destroy instance ${id} failed (HTTP ${reply.status}): ${this.describe(reply)}`);
   }
 }
