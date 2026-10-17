@@ -60,7 +60,10 @@ Image bawaan **dapat dipakai** (tanpa fallback ke image CUDA polos). Paparan pub
 
 ## Follow-ups
 - Ubah kode/skema/bootstrap sesuai keputusan 1, 3, 6, 7, 8: default `COMFY_PORT=18188`, `COMFY_PYTHON=/venv/main/bin/python`, `AGENT_PYTHON=/opt/vastcomfy-venv/bin/python`, `VASTAI_BIN=/opt/vastcomfy-venv/bin/vastai`, `SUPERVISOR_CONF=/etc/supervisor/supervisord.conf`, kunci `SUPERVISOR_CONF_DIR`; bootstrap: pasang venv + vastai + agent dulu, tanpa `supervisord`, pakai `supervisorctl reread/update`, `restart comfyui`.
+  - [x] Selesai: rencana `docs/superpowers/plans/2026-10-17-s1-image-adaptation.md` (Task 2: default dan kunci skema, `render-supervisor-conf`, `set-key`; Task 3: `bootstrap.sh` membangun venv + agent + `vastai` dipin dulu, tanpa supervisord sendiri, `supervisorctl reread/update`, `restart comfyui`; `instance/supervisord.conf` dihapus; `instance/onstart.sh` baru untuk keputusan 4 dan 5).
 - **Fail-closed saat pemasangan `vastai` gagal:** tanpa CLI baru, `Destroyer`/failsafe tidak bisa menghancurkan, padahal CLI lama bisa menghancurkan (tanpa `-y`, dengan 3 baris peringatan sebelum hasil). Diputuskan: fallback ke CLI bawaan dengan `-y` dikosongkan lewat kunci `DESTROY_ASSUME_YES=false`; aturan sukses destroy kini per baris sehingga 3 baris peringatan CLI bawaan ditoleransi (Destroyer dan `failsafe.sh` selesai di Task 1; pemasangan fallback di `bootstrap.sh` menyusul di Task 3).
+  - [x] Selesai (Task 3): `vastai` dipin gagal → `.env` diubah ke `STOCK_VASTAI_BIN` dengan `DESTROY_ASSUME_YES=false` sebelum failsafe dimulai; venv/agent gagal → `emergency_destroy` dengan CLI bawaan dari `PATH` (tanpa `-y`) dan exit non-zero.
 - Verifikasi `ComfyUI-Manager.disabled` benar-benar tidak dimuat ComfyUI (boot berikutnya).
 - Kontrak pembuatan instance (image + env + onstart + tanpa `-p`) dicatat untuk bot (sub-proyek 3).
+  - [x] Dicatat di spec 7.2 (Task 3). Implementasinya di bot tetap bagian sub-proyek 3.
 - Catat bahwa banner instance mengandung teks yang ditujukan ke agen AI; semua teks dari instance diperlakukan sebagai data tak tepercaya.

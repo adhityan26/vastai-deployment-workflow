@@ -69,11 +69,14 @@ Hasil spike dapat mengubah desain di bagian 5. Tiap spike punya kriteria lulus d
 
 ```
 failsafe.sh          (berdiri sendiri, dimulai setelah kredensial tersimpan)
-supervisord          (program autostart=false; bootstrap menyalakan via supervisorctl)
- ├─ tailscaled       (userspace networking)
- ├─ agent            (Python/FastAPI, 127.0.0.1:8189)
- └─ comfyui          (127.0.0.1:8188)
+supervisord          (milik image vastai/comfy, dimulai entrypoint.sh image; kita tidak menjalankan supervisord kedua)
+ ├─ comfyui          (program bawaan image, venv /venv/main, 127.0.0.1:18188, autostart)
+ ├─ tailscaled       (program kita, userspace networking, autostart=false)
+ ├─ agent            (program kita, Python/FastAPI di venv /opt/vastcomfy-venv, 127.0.0.1:8189, autostart=false)
+ └─ (program bawaan lain: portal, tunnel, jupyter, ... keluar sendiri karena tidak ada di PORTAL_CONFIG; S1)
 ```
+
+Program `tailscaled` dan `agent` didaftarkan lewat satu file yang di-render `boot render-supervisor-conf` ke `SUPERVISOR_CONF_DIR/SUPERVISOR_PROGRAMS_FILE` (default `/etc/supervisor/conf.d/vastcomfy.conf`) dengan **nilai literal** (supervisord image tidak melihat env kita; nilai berisi spasi atau `%` ditolak), ditulis atomik, lalu `supervisorctl reread` dan `supervisorctl update`. File `instance/supervisord.conf` lama (dengan `%(ENV_...)s`) dihapus.
 
 Tiga lapisan pengaman independen: **failsafe** (lokal), **idle watcher** (di agent), **watchdog eksternal** (homelab).
 
@@ -100,17 +103,18 @@ Aturan umum: **waktu = epoch UTC dalam detik (integer)**; satu nilai per file ke
 
 ### 5.3 Alur boot (`bootstrap.sh`)
 
-Pengaman dipasang sebelum hal yang bisa gagal.
+Pengaman dipasang sebelum hal yang bisa gagal. Urutan di instance: `--onstart-cmd` bot meng-clone repo (commit dipin) dan menjalankan `instance/onstart.sh`, yang (a) mengganti nama `COMFY_DIR/custom_nodes/ComfyUI-Manager` menjadi `ComfyUI-Manager.disabled` **sebelum** ComfyUI mulai (salinan `.disabled` lama diganti; restart tanpa Manager = no-op), (b) menjalankan `entrypoint.sh` image di latar belakang (output ditambahkan ke `ENTRYPOINT_LOG`, default `/var/log/vastcomfy-entrypoint.log`; nama entrypoint dari env `STOCK_ENTRYPOINT`, default `entrypoint.sh`), lalu (c) `exec bash instance/bootstrap.sh`. Kegagalan (a)/(b) (rename gagal, entrypoint tidak ada, log tidak bisa ditulis) tidak pernah diam: `emergency_destroy` (di bawah) lalu exit non-zero, tanpa memulai entrypoint.
 
-1. **Kredensial.** Tulis `/etc/vastcomfy/.env` hanya dari key yang ada di skema (daftar kunci dihasilkan dari `contracts/config-schema.yaml` ke `instance/allowed-keys.txt`; **bukan** seluruh env Vast). Pastikan `CONTAINER_ID` dan `CONTAINER_API_KEY` tidak kosong; jika kosong, boot berhenti (state `failed`, reason `missing_container_credentials`). Tidak ada kredensial untuk destroy, jadi **hanya timeout watchdog 25 menit yang menghentikannya**.
+0. **Venv agent dan CLI `vastai`** (sebelum ada config; nilai dari env dengan default sama dengan skema). `python3 -m venv VENV_DIR` (default `/opt/vastcomfy-venv`) lalu `pip install -e instance/agent` di venv itu. Gagal → `emergency_destroy agent_install_failed`: CLI bawaan image dari `PATH` (`command -v vastai`), `CONTAINER_ID`/`CONTAINER_API_KEY` dari env proses, `vastai destroy instance <id> --api-key <key>` **tanpa `-y`**, output dicetak dengan key dibuang, dan **selalu exit non-zero** (juga bila destroy gagal; watchdog menangani sisanya). Lalu `pip install vastai==VASTAI_VERSION` (dipin, default `1.8.3`) di venv yang sama; gagal → fallback A (langkah 1), boot berlanjut.
+1. **Kredensial.** Tulis `/etc/vastcomfy/.env` hanya dari key yang ada di skema (daftar kunci dihasilkan dari `contracts/config-schema.yaml` ke `instance/allowed-keys.txt`; **bukan** seluruh env Vast). Pastikan `CONTAINER_ID` dan `CONTAINER_API_KEY` tidak kosong; jika kosong, boot berhenti (state `failed`, reason `missing_container_credentials`). Tidak ada kredensial untuk destroy, jadi **hanya timeout watchdog 25 menit yang menghentikannya**. Setelah `.env` tertulis, trap EXIT dipasang (exit non-zero yang belum ditangani → `boot fail boot_failed`). **Fallback A:** bila CLI dipin gagal dipasang, `boot set-key VASTAI_BIN <STOCK_VASTAI_BIN>` dan `boot set-key DESTROY_ASSUME_YES false` (sebelum failsafe dimulai, jadi failsafe dan agent memakai CLI bawaan tanpa `-y`); kegagalan di sini (atau `STOCK_VASTAI_BIN` tidak bisa dieksekusi) → `emergency_destroy`.
 2. **Tanda waktu.** Jika `first_boot_at` tidak ada: tulis `first_boot_at`, `hard_cap` (boot + `HARD_CAP_HOURS`), dan `deadline` (boot + `FAILSAFE_HOURS`). Jika `first_boot_at` ada tetapi `hard_cap` hilang: `failed` (reason `hard_cap_missing`) dan self-destroy; jangan menghitung ulang.
 3. **Jalankan `failsafe.sh`.** Mulai dari titik ini, setiap kegagalan boot **menghancurkan instance sendiri** (`self_destroy <reason>`), kecuali `KEEP_ON_FAILURE=true`.
-4. **supervisord** (disesuaikan hasil S1); nyalakan program lewat `supervisorctl`.
+4. **Program supervisor** (S1): tidak ada supervisord kedua. `boot render-supervisor-conf` menulis program `tailscaled` dan `agent` (lihat 5.1), lalu `supervisorctl reread` dan `supervisorctl update` (`SUPERVISORCTL_BIN -c SUPERVISOR_CONF`). Gagal → `supervisor_failed` (juga bila entrypoint tidak berhasil menjalankan supervisord image).
 5. **Tailscale naik** (state di `/var/lib/vastcomfy/tailscale/`), `tailscale serve` bila diperlukan (hasil S2). Hapus `TS_AUTHKEY` dari `.env` setelah berhasil. Gagal → `failed` (`tailscale_failed`), self-destroy.
 6. **Jalankan agent** (agent hanya terjangkau lewat Tailscale, jadi setelah langkah 5). Menampilkan state `booting`/`downloading`.
-7. Pasang node (ComfyUI-GGUF dan node profil, commit dipin). ComfyUI-Manager dinonaktifkan/tidak dipasang.
+7. Pasang node (ComfyUI-GGUF dan node profil, commit dipin). ComfyUI-Manager sudah dinonaktifkan oleh `onstart.sh`.
 8. Unduh model profil jika belum ada (state `downloading`, `progress.json`).
-9. Jalankan ComfyUI `--listen 127.0.0.1`, salin workflow bawaan.
+9. Salin workflow bawaan, lalu `supervisorctl restart COMFY_PROGRAM` (ComfyUI image sudah berjalan sejak entrypoint; restart sekali agar node baru dimuat; ComfyUI mendengarkan di `127.0.0.1:18188` dari `COMFYUI_ARGS`). Gagal → `comfyui_start_failed`.
 10. State `ready` saat ComfyUI menjawab. **`idle_destroy_at` diinisialisasi di sini** = sekarang + `IDLE_MINUTES`.
 
 ### 5.4 `failsafe.sh`
@@ -201,7 +205,9 @@ Disimpan di homelab (di luar repo; folder data di-`.gitignore`). Satu record per
 
 ### 7.2 Cara bot membuat instance (env + `onstart`)
 
-Bot membuat instance lewat API Vast dengan `env` (key mengikuti skema config): `AGENT_TOKEN`, `TS_AUTHKEY` (sekali pakai, kedaluwarsa pendek), `TS_HOSTNAME` (unik per instance, mis. `vast-<id-acak>`; mencegah bentrok nama node ephemeral), `REPO_URL`, `REPO_COMMIT`, `PROFILE`, `IDLE_MINUTES`, `FAILSAFE_HOURS`, `HARD_CAP_HOURS`, `HF_TOKEN` (opsional), `KEEP_ON_FAILURE` (opsional). `CONTAINER_ID` dan `CONTAINER_API_KEY` disuntik Vast sendiri. `onstart` dibuat minimal: clone `REPO_URL`, checkout `REPO_COMMIT`, jalankan `instance/bootstrap.sh`.
+Bot membuat instance lewat API Vast dengan `env` (key mengikuti skema config): `AGENT_TOKEN`, `TS_AUTHKEY` (sekali pakai, kedaluwarsa pendek), `TS_HOSTNAME` (unik per instance, mis. `vast-<id-acak>`; mencegah bentrok nama node ephemeral), `REPO_URL`, `REPO_COMMIT`, `PROFILE`, `IDLE_MINUTES`, `FAILSAFE_HOURS`, `HARD_CAP_HOURS`, `HF_TOKEN` (opsional), `KEEP_ON_FAILURE` (opsional). `CONTAINER_ID` dan `CONTAINER_API_KEY` disuntik Vast sendiri. `onstart` dibuat minimal: clone `REPO_URL`, checkout `REPO_COMMIT`, jalankan `instance/onstart.sh` (yang menonaktifkan ComfyUI-Manager, memulai `entrypoint.sh` image, lalu `exec` `bootstrap.sh`; 5.3).
+
+**Kontrak pembuatan instance (S1):** dibuat dari **image**, bukan template: `--image vastai/comfy:<tag dipin>` (terukur: `v0.41.0-cuda-12.9-py312`), `--ssh --direct`, **tanpa `-p`** (tidak ada port yang dipetakan selain 22), **tanpa `PROVISIONING_SCRIPT`** (provisioning menahan ComfyUI), `--env` memuat `PORTAL_CONFIG="localhost:8188:18188:/:ComfyUI"` (hanya ComfyUI, sehingga portal, tunnel Cloudflare, Jupyter, Syncthing keluar sendiri), `COMFYUI_ARGS="--disable-auto-launch --port 18188"` (tanpa `--listen`, tanpa `--enable-cors-header`), `WORKSPACE=/workspace`, `DATA_DIRECTORY=/workspace/`, plus key skema di atas; `--onstart-cmd` seperti di atas (menggantikan `entrypoint.sh` template; karena itu `onstart.sh` memulainya sendiri). Batas panjang `--onstart-cmd` belum diuji (perintah kita pendek).
 
 ## 8. Profil
 
@@ -226,10 +232,10 @@ Aturan unduh: lewati bila file ada dengan ukuran cocok; unduh ke `.part` lalu re
 
 ## 9. Keamanan
 
-- Tanpa port publik; verifikasi lewat `vastai show instance` dan scan eksternal (bagian 11).
+- Tanpa port publik; verifikasi lewat `vastai show instance` dan scan eksternal (bagian 11). Image `vastai/comfy` dari template bawaan membuka port web (1111, 8080, 8188, 8384 ber-token tapi publik) dan tunnel Cloudflare; semua itu dimatikan oleh kontrak pembuatan di 7.2 (tanpa `-p`, `PORTAL_CONFIG` hanya ComfyUI, tanpa template), terukur di S1: hanya 22/tcp terpetakan, tanpa `cloudflared`, listener hanya SSH dan `127.0.0.1:18188`.
 - ComfyUI tidak punya login → **ACL Tailscale** membatasi `tag:gpu` port 8188 dan 8189 hanya untuk perangkat pemilik dan homelab; penolakan dari perangkat lain diuji (S2).
 - Auth key Tailscale: sekali pakai, ephemeral, ber-tag, kedaluwarsa pendek; **dihapus dari `.env` setelah dipakai**. Token agent per instance. Keduanya terlihat di UI/API Vast lewat env; dampak dibatasi oleh sifat sekali pakai dan umur instance.
-- Custom node berjalan sebagai root dan bisa membaca semua rahasia di instance. Mitigasi: node dipin pada commit, tanpa ComfyUI-Manager.
+- Custom node berjalan sebagai root dan bisa membaca semua rahasia di instance. Mitigasi: node dipin pada commit, tanpa ComfyUI-Manager (bawaan image, di-rename menjadi `ComfyUI-Manager.disabled` oleh `onstart.sh` sebelum ComfyUI mulai; bahwa ComfyUI benar-benar mengabaikan direktori `.disabled` belum diverifikasi di instance nyata).
 - Repo publik: **tidak ada rahasia di repo** (bagian 14).
 - `PUT /workflows`: validasi nama, JSON, ukuran.
 - `CONTAINER_API_KEY` hanya bisa start/stop/destroy instance sendiri (terverifikasi di dokumentasi Vast); cakupan pastinya diuji di S4.
@@ -343,7 +349,8 @@ Daftar otoritatif ada di `contracts/config-schema.yaml` (dibuat di Task 1); tabe
 | `OUTPUT_DIR`, `WATCHDOG_INTERVAL_S`, `VAST_API_URL` | apps | tidak |
 | `COMFY_PORT`, `AGENT_PORT`, `COMFY_DIR`, `STATE_DIR`, `ENV_FILE_PATH` | instance | tidak |
 | `FAILSAFE_POLL_S`, `IDLE_WARN_MINUTES`, `EXTEND_MAX_IDLE_MIN`, `EXTEND_MAX_FAILSAFE_MIN`, `WORKFLOW_MAX_BYTES`, `DESTROY_RETRIES`, `DOWNLOAD_RETRIES` | instance | tidak |
-| `TAILSCALED_BIN`, `COMFY_PYTHON`, `REPO_DIR`, `SUPERVISOR_CONF`, `COMFY_PROGRAM`, `DESTROY_TIMEOUT_S`, `DESTROY_BACKOFF_S`, `DESTROY_GONE_MARKERS` (default `Failed with error 404: Instance`, dicocokkan di mana saja), `DESTROY_OK_MARKERS` (default `destroying instance`, harus mengawali sebuah baris output non-kosong), `DESTROY_ASSUME_YES` (default `true`; `false` untuk CLI bawaan yang tidak mengenal `-y`), `HF_BASE_URL`, `GIT_HOST_URL`, `COMFY_START_TIMEOUT_S`, `AGENT_START_TIMEOUT_S` | instance, non-secret (`ENV_FILE_PATH` dan `DESTROY_RETRIES` sudah terdaftar di atas). Success destroy ditentukan dari teks output (`DESTROY_OK_MARKERS` atau `DESTROY_GONE_MARKERS`), bukan exit status | tidak |
+| `VENV_DIR` (default `/opt/vastcomfy-venv`), `AGENT_PYTHON` (`/opt/vastcomfy-venv/bin/python`), `VASTAI_BIN` (`/opt/vastcomfy-venv/bin/vastai`), `VASTAI_VERSION` (`1.8.3`), `STOCK_VASTAI_BIN` (`/opt/instance-tools/bin/vastai`, fallback A), `SUPERVISOR_CONF` (`/etc/supervisor/supervisord.conf`, milik image), `SUPERVISOR_CONF_DIR` (`/etc/supervisor/conf.d`), `SUPERVISOR_PROGRAMS_FILE` (`vastcomfy.conf`), `COMFY_PORT` (`18188`), `COMFY_PYTHON` (`/venv/main/bin/python`) | instance (S1). `VENV_DIR` dan `VASTAI_VERSION` juga dibaca `bootstrap.sh` dari env sebelum `.env` ada, dengan fallback yang sama dengan default skema (diuji). `onstart.sh` membaca `COMFY_DIR`, `STOCK_ENTRYPOINT` (default `entrypoint.sh`) dan `ENTRYPOINT_LOG` dari env saja (berjalan sebelum skema terbaca; dua yang terakhir bukan key skema) | tidak |
+| `TAILSCALED_BIN`, `REPO_DIR`, `COMFY_PROGRAM`, `DESTROY_TIMEOUT_S`, `DESTROY_BACKOFF_S`, `DESTROY_GONE_MARKERS` (default `Failed with error 404: Instance`, dicocokkan di mana saja), `DESTROY_OK_MARKERS` (default `destroying instance`, harus mengawali sebuah baris output non-kosong), `DESTROY_ASSUME_YES` (default `true`; `false` untuk CLI bawaan yang tidak mengenal `-y`), `HF_BASE_URL`, `GIT_HOST_URL`, `COMFY_START_TIMEOUT_S`, `AGENT_START_TIMEOUT_S` | instance, non-secret (`ENV_FILE_PATH` dan `DESTROY_RETRIES` sudah terdaftar di atas). Success destroy ditentukan dari teks output (`DESTROY_OK_MARKERS` atau `DESTROY_GONE_MARKERS`), bukan exit status | tidak |
 | `UNREACHABLE_WARN_MIN`, `UNREACHABLE_DESTROY_MIN`, `ALERT_REPEAT_MIN` | apps/watchdog | tidak |
 
 ## 15. `contracts/`
@@ -373,5 +380,6 @@ Sisi agent (Python) memakai model pydantic yang divalidasi terhadap skema; sisi 
 
 - Nilai pasti batas boot (default 25 menit); ditinjau setelah S3 mengukur waktu download.
 - Apakah `tailscale serve` diperlukan di mode userspace (S2).
-- Strategi menjalankan `onstart` (batas panjang dan perilaku run-ulang); alternatif `PROVISIONING_SCRIPT`. Dijawab S1.
+- ~~Strategi menjalankan `onstart` (batas panjang dan perilaku run-ulang); alternatif `PROVISIONING_SCRIPT`.~~ **Dijawab S1:** `--onstart-cmd` (clone + `instance/onstart.sh`), tanpa `PROVISIONING_SCRIPT`; onstart dijalankan ulang pada setiap restart container dan disk bertahan (rename Manager dan `first_boot_at` idempoten). Batas panjang `--onstart-cmd` belum diuji (perintah kita pendek).
+- Apakah ComfyUI benar-benar mengabaikan `custom_nodes/ComfyUI-Manager.disabled` (S1 keputusan 5, belum diverifikasi; dicek pada boot nyata berikutnya).
 - Cara pengguna tim menjangkau ComfyUI/halaman web saat rilis (sub-proyek 3–4), karena ACL saat ini hanya untuk pemilik.

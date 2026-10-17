@@ -1,14 +1,55 @@
 #!/usr/bin/env bash
 # Boot sequence for a fresh instance (spec 5.3). Safety nets come first.
-# onstart runs: git clone "$REPO_URL" "$REPO_DIR" && git -C "$REPO_DIR" checkout "$REPO_COMMIT" && bash "$REPO_DIR/instance/bootstrap.sh"
-# Adjust the supervisord and Tailscale steps to the findings of spikes S1 and S2.
+# Started by instance/onstart.sh (exec), after it disabled ComfyUI-Manager and launched the image entrypoint,
+# whose supervisord (the image's own, S1) already runs ComfyUI; we never start a second supervisord.
+# Testing: sourcing this file only defines the functions above the guard and returns, so tests can run
+# emergency_destroy and install_runtime with fake binaries on PATH; executing it runs the boot.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${AGENT_PYTHON:-python3}"  # config-lint: ok (interpreter needed before any configuration exists)
+VENV_DIR="${VENV_DIR:-/opt/vastcomfy-venv}"  # config-lint: ok (needed before the schema can be read; schema default of VENV_DIR)
+PY="$VENV_DIR/bin/python"
+VASTAI_FALLBACK=0
+BOOT_DONE=0
+HANDLED=0
 
-# Editable install: the agent reads contracts/config-schema.yaml from this repository checkout.
-"$PY" -m pip install -q -e "$HERE/agent" || { echo "bootstrap: installing the agent failed" >&2; exit 1; }
+# Last resort while no configuration exists (or it cannot be repaired): destroy with the image's own CLI
+# found on PATH and the credentials Vast put in the environment. The stock CLI does not know -y (S1).
+# Always exits non-zero, whether or not the destroy worked; the CLI output is printed with the key removed.
+emergency_destroy() {
+  local cli out
+  HANDLED=1
+  echo "bootstrap: $1; emergency destroy with the image vastai CLI" >&2
+  cli="$(command -v vastai)" || cli=""
+  if [ -z "$cli" ] || [ -z "${CONTAINER_ID:-}" ] || [ -z "${CONTAINER_API_KEY:-}" ]; then
+    echo "bootstrap: emergency destroy impossible: vastai CLI or container credentials missing" >&2
+    exit 1
+  fi
+  out="$("$cli" destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" < /dev/null 2>&1)"
+  printf 'bootstrap: vastai: %s\n' "${out//"$CONTAINER_API_KEY"/<key>}" >&2
+  exit 1
+}
+
+# Our own venv (the image venv /venv/main belongs to ComfyUI). Editable install: the agent reads
+# contracts/config-schema.yaml from this repository checkout.
+install_agent() {
+  python3 -m venv "$VENV_DIR" && "$PY" -m pip install -q -e "$HERE/agent"
+}
+
+# The new CLI destroys with -y; the stock one cannot (S1 decision 7).
+install_pinned_vastai() {
+  "$PY" -m pip install -q "vastai==${VASTAI_VERSION:-1.8.3}"  # config-lint: ok (needed before the schema can be read; schema default of VASTAI_VERSION)
+}
+
+install_runtime() {
+  install_agent || emergency_destroy agent_install_failed
+  install_pinned_vastai || { echo "bootstrap: installing the pinned vastai failed; falling back to the stock CLI" >&2; VASTAI_FALLBACK=1; }
+}
+
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+# Step 0: agent venv and the pinned vastai CLI. No configuration exists yet.
+install_runtime
 boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
 
 # Step 1: credentials. Writes the instance .env from the environment (schema keys only).
@@ -16,8 +57,6 @@ ENV_FILE="$(boot write-env)" || exit $?
 
 # Fail closed: credentials exist from here on, so any non-zero exit before BOOT_DONE that no boot command or
 # die_with already handled (a boot command returns 11, 12 or 13 after handling) self-destroys the instance.
-BOOT_DONE=0
-HANDLED=0
 on_exit() {
   local rc=$?
   trap - EXIT
@@ -30,7 +69,18 @@ on_exit() {
   exit "$rc"
 }
 trap on_exit EXIT
-eval "$(boot env-export --env-file "$ENV_FILE")"  # non-secret keys for supervisord's %(ENV_...)s
+
+# Fallback A (S1): without the pinned CLI the .env points the failsafe and the agent at the stock CLI, without -y.
+# A set-key failure exits 13 (treated as handled) and the configured CLI is missing, so only the stock CLI can
+# still destroy here.
+if [ "$VASTAI_FALLBACK" = 1 ]; then
+  STOCK_VASTAI="$(boot get STOCK_VASTAI_BIN --env-file "$ENV_FILE")" || emergency_destroy vastai_fallback_failed
+  [ -x "$STOCK_VASTAI" ] || emergency_destroy vastai_fallback_failed
+  boot set-key VASTAI_BIN "$STOCK_VASTAI" --env-file "$ENV_FILE" || emergency_destroy vastai_fallback_failed
+  boot set-key DESTROY_ASSUME_YES false --env-file "$ENV_FILE" || emergency_destroy vastai_fallback_failed
+fi
+
+eval "$(boot env-export --env-file "$ENV_FILE")"  # non-secret keys for the shell steps below
 
 die_with() { HANDLED=1; boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
 ctl() { "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" "$@"; }
@@ -45,8 +95,10 @@ FAILSAFE_PID=$!
 sleep 1
 kill -0 "$FAILSAFE_PID" 2>/dev/null || die_with failsafe_failed
 
-# Step 4: supervisord.
-"$SUPERVISORD_BIN" -c "$SUPERVISOR_CONF" || die_with supervisor_failed
+# Step 4: register tailscaled and agent (rendered with literal values) with the image's running supervisord.
+boot render-supervisor-conf --env-file "$ENV_FILE" || exit $?
+ctl reread || die_with supervisor_failed
+ctl update || die_with supervisor_failed
 
 # Step 5: Tailscale (userspace). The single-use key goes through a 600 file, never a command line.
 ctl start tailscaled || die_with tailscale_failed
@@ -71,9 +123,10 @@ boot wait --target agent --env-file "$ENV_FILE" || exit $?
 boot install-nodes --env-file "$ENV_FILE" || exit $?
 boot install-models --env-file "$ENV_FILE" || exit $?
 
-# Step 9: bundled workflows (never overwrites), then ComfyUI.
+# Step 9: bundled workflows (never overwrites), then restart the image's ComfyUI (already running since the
+# entrypoint) once so it loads the new nodes.
 boot copy-workflows --env-file "$ENV_FILE" || exit $?
-ctl start "$COMFY_PROGRAM" || die_with comfyui_start_failed
+ctl restart "$COMFY_PROGRAM" || die_with comfyui_start_failed
 boot wait --target comfy --env-file "$ENV_FILE" || exit $?
 
 # Step 10: ready (starts the idle timer).
