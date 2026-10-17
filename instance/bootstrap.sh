@@ -46,14 +46,32 @@ install_runtime() {
   install_pinned_vastai || { echo "bootstrap: installing the pinned vastai failed; falling back to the stock CLI" >&2; VASTAI_FALLBACK=1; }
 }
 
+boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
+
+# Until failsafe.sh runs, a boot step that failed without destroying leaves the GPU running, and the configured
+# destroy path may not work yet; only the stock CLI (emergency_destroy) is left. Boot CLI exit codes:
+# 10 = CONTAINER_ID/CONTAINER_API_KEY missing (nothing to destroy with: plain exit; the watchdog covers it),
+# 11/12 = already handled (boot fail ran its own destroy), 13 = config invalid (no valid config object, so no
+# self-destroy happened), anything else = a crash that nothing handled.
+write_env_failed() {
+  [ "$1" -eq 10 ] && exit 10
+  emergency_destroy "write_env_failed (exit $1)"
+}
+
+pre_failsafe_failed() {
+  case "$1" in
+    11|12) exit "$1" ;;
+    *) emergency_destroy "$2 (exit $1)" ;;
+  esac
+}
+
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 # Step 0: agent venv and the pinned vastai CLI. No configuration exists yet.
 install_runtime
-boot() { "$PY" -m vastcomfy_agent.boot "$@"; }
 
 # Step 1: credentials. Writes the instance .env from the environment (schema keys only).
-ENV_FILE="$(boot write-env)" || exit $?
+ENV_FILE="$(boot write-env)" || write_env_failed $?
 
 # Fail closed: credentials exist from here on, so any non-zero exit before BOOT_DONE that no boot command or
 # die_with already handled (a boot command returns 11, 12 or 13 after handling) self-destroys the instance.
@@ -86,8 +104,8 @@ die_with() { HANDLED=1; boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
 ctl() { "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" "$@"; }
 
 # Step 2: new boot, time files (written only on the very first boot).
-boot begin --env-file "$ENV_FILE" || exit $?
-boot init-times --env-file "$ENV_FILE" || exit $?
+boot begin --env-file "$ENV_FILE" || pre_failsafe_failed $? begin_failed
+boot init-times --env-file "$ENV_FILE" || pre_failsafe_failed $? init_times_failed
 
 # Step 3: failsafe. From here on every failure self-destroys the instance.
 nohup "$HERE/failsafe.sh" --env-file "$ENV_FILE" >> "$STATE_DIR/failsafe.log" 2>&1 &

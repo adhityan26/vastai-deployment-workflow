@@ -125,7 +125,8 @@ def test_every_step_after_the_trap_is_guarded():
         stripped = line.strip()
         if not stripped.startswith(step_markers):
             continue
-        assert "|| die_with" in stripped or "|| exit $?" in stripped or "|| emergency_destroy" in stripped, stripped
+        assert any(guard in stripped for guard in ("|| die_with", "|| exit $?", "|| emergency_destroy",
+                                                   "|| pre_failsafe_failed $?")), stripped
 
 
 def test_the_vastai_fallback_switches_the_env_to_the_stock_cli_without_y():
@@ -321,3 +322,100 @@ def test_successful_install_builds_the_venv_then_the_agent_then_the_pinned_cli(t
         f"venv-python -m pip install -q -e {INSTANCE}/agent",
         f"venv-python -m pip install -q vastai=={schema_default('VASTAI_VERSION')}",
     ]
+
+
+# --- fix round 1: failures before the failsafe runs must not leave the instance alive ---------------------
+
+WRITE_ENV_LINE = 'ENV_FILE="$(boot write-env)" || write_env_failed $?'
+
+
+def test_write_env_failure_goes_to_the_emergency_destroy_except_missing_credentials():
+    assert lines()[index_of("boot write-env")].strip() == WRITE_ENV_LINE
+    body = [line.strip() for line in function_body("write_env_failed")]
+    assert body.index('[ "$1" -eq 10 ] && exit 10') < next(i for i, line in enumerate(body)
+                                                            if line.startswith("emergency_destroy"))
+
+
+def test_begin_and_init_times_hand_unhandled_codes_to_the_emergency_destroy_before_the_failsafe():
+    for step, reason in (("boot begin", "begin_failed"), ("boot init-times", "init_times_failed")):
+        line = lines()[index_of(step)].strip()
+        assert line.endswith(f"|| pre_failsafe_failed $? {reason}"), line
+        assert index_of(step) < index_of("failsafe.sh")
+    body = " ".join(line.strip() for line in function_body("pre_failsafe_failed"))
+    assert '11|12) exit "$1" ;;' in body and "*) emergency_destroy" in body
+
+
+def test_the_pre_failsafe_handlers_are_defined_above_the_sourcing_guard():
+    guard = index_of('[ "${BASH_SOURCE[0]}" = "$0" ] || return 0')
+    for name in ("write_env_failed() {", "pre_failsafe_failed() {", "boot() {"):
+        assert index_of(name) < guard, name
+
+
+def fake_boot_venv(tmp_path, rcs):
+    """A venv python whose `-m vastcomfy_agent.boot <cmd>` exits with rcs[cmd] (write-env prints a path on 0)."""
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    cases = "".join(f"  {cmd}) exit {rc};;\n" for cmd, rc in rcs.items())
+    write_exec(venv_python,
+               '#!/bin/sh\n[ "$1 $2" = "-m vastcomfy_agent.boot" ] || exit 99\n'
+               f'[ "$3" = write-env ] && [ {rcs.get("write-env", 0)} -eq 0 ] && echo "{tmp_path}/.env"\n'
+               f'case "$3" in\n{cases}esac\nexit 0\n')
+
+
+def run_script_lines(tmp_path, *fragments):
+    script_lines = "\n".join(lines()[index_of(fragment)].strip() for fragment in fragments)
+    return source_and_run(tmp_path, 'ENV_FILE="${ENV_FILE:-unset}"; eval "$STEPS"; echo "reached ENV_FILE=$ENV_FILE"',
+                          {"STEPS": script_lines})
+
+
+@pytest.mark.parametrize("rc", [13, 1, 12])
+def test_a_failing_write_env_destroys_with_the_stock_cli_and_exits_non_zero(tmp_path, bindir, rc):
+    log = tmp_path / "vastai.log"
+    fake_vastai(bindir, log, "WARNING: deprecated\\n\\ndestroying instance 42.\\n")
+    fake_boot_venv(tmp_path, {"write-env": rc})
+    result = run_script_lines(tmp_path, "boot write-env")
+    assert result.returncode != 0 and "reached" not in result.stdout
+    assert log.read_text().splitlines() == [f"destroy instance 42 --api-key {KEY}"]
+    assert KEY not in result.stdout + result.stderr
+
+
+def test_missing_container_credentials_exit_10_without_a_destroy(tmp_path, bindir):
+    log = tmp_path / "vastai.log"
+    fake_vastai(bindir, log, "destroying instance 42.")
+    fake_boot_venv(tmp_path, {"write-env": 10})
+    result = run_script_lines(tmp_path, "boot write-env")
+    assert result.returncode == 10 and "reached" not in result.stdout
+    assert not log.exists()
+
+
+def test_a_successful_write_env_continues_without_a_destroy(tmp_path, bindir):
+    log = tmp_path / "vastai.log"
+    fake_vastai(bindir, log, "destroying instance 42.")
+    fake_boot_venv(tmp_path, {"write-env": 0})
+    result = run_script_lines(tmp_path, "boot write-env")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"reached ENV_FILE={tmp_path}/.env"
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("step", ["begin", "init-times"])
+@pytest.mark.parametrize("rc", [13, 1])
+def test_unhandled_begin_or_init_times_failures_destroy_with_the_stock_cli(tmp_path, bindir, step, rc):
+    log = tmp_path / "vastai.log"
+    fake_vastai(bindir, log, "destroying instance 42.")
+    fake_boot_venv(tmp_path, {step: rc})
+    result = run_script_lines(tmp_path, "boot begin", "boot init-times")
+    assert result.returncode != 0 and "reached" not in result.stdout
+    assert log.read_text().splitlines() == [f"destroy instance 42 --api-key {KEY}"]
+    assert KEY not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("step", ["begin", "init-times"])
+@pytest.mark.parametrize("rc", [11, 12])
+def test_already_handled_begin_or_init_times_codes_exit_without_a_second_destroy(tmp_path, bindir, step, rc):
+    log = tmp_path / "vastai.log"
+    fake_vastai(bindir, log, "destroying instance 42.")
+    fake_boot_venv(tmp_path, {step: rc})
+    result = run_script_lines(tmp_path, "boot begin", "boot init-times")
+    assert result.returncode == rc and "reached" not in result.stdout
+    assert not log.exists()
