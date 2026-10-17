@@ -1,0 +1,410 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import {
+  AgentError,
+  AlreadyActiveError,
+  ComfyError,
+  DestroyFailedError,
+  GenerateFailed,
+  GenerateInputError,
+  NoActiveInstanceError,
+  NoOffersError,
+  StartError,
+  Unreachable,
+  generate,
+  labelHostname,
+  pollResult,
+  type AppsConfig,
+  type GenerateDeps,
+  type GenerateRequest,
+  type StatusView,
+} from "@vast-comfy/core";
+import { JobStore, RateLimiter, type Job } from "./store.js";
+import { sendError } from "./reply.js";
+import type { ServerDeps } from "./server.js";
+
+// The /api routes. Rules: identity and role are already checked by the server gate; bodies are
+// validated by strict JSON schemas; nothing here returns an agent token, an instance hostname,
+// a ComfyUI filename, a Vast key or a stack trace. Errors are {error: {code, message}}.
+
+const READY_STATES = new Set(["ready", "idle-warning"]);
+const HOUR_MS = 3_600_000;
+const PROMPT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const IMAGE_TYPES: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+const REFUSAL_STATUSES = new Set([400, 409, 422]);
+const HOSTNAME_TEXT = /\bvast-[A-Za-z0-9-]+/g;
+const LABEL_TEXT = /\bvastcomfy:[A-Za-z0-9.-]*/g;
+const URL_TEXT = /\bhttps?:\/\/\S+/gi; // config-lint: ok (pattern that removes URLs from messages)
+const MESSAGE_MAX = 300;
+
+function intCfg(cfg: AppsConfig, key: string, env: string): number {
+  const v = cfg[key];
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) throw new Error(`${env} must be a positive integer`);
+  return v;
+}
+
+/** Remove hostnames, labels, URLs, bearer tokens and secrets from a message meant for a browser. */
+function scrubber(deps: ServerDeps, hostnames: readonly string[]): (text: string) => string {
+  return (text: string) => {
+    let out = text;
+    for (const s of [...deps.secrets(), ...hostnames]) if (s !== "") out = out.split(s).join("[redacted]");
+    out = out
+      .replace(URL_TEXT, "[url]")
+      .replace(LABEL_TEXT, "[label]")
+      .replace(HOSTNAME_TEXT, "[host]")
+      .replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+    return out.length > MESSAGE_MAX ? `${out.slice(0, MESSAGE_MAX)}...` : out;
+  };
+}
+
+function hostnamesOf(view: StatusView): string[] {
+  const out: string[] = [];
+  if (view.record) out.push(view.record.tailnet_hostname);
+  for (const u of view.unknown) {
+    const h = labelHostname(u.label);
+    if (h !== null) out.push(h);
+  }
+  return out;
+}
+
+/** The status view as the browser may see it: an explicit allowlist of fields. */
+function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => string) {
+  const detail = (text: string | null): string | null => {
+    if (text === null) return null;
+    return isAdmin ? scrub(text) : "unavailable";
+  };
+  const a = view.agent;
+  return {
+    state: view.state,
+    record: view.record
+      ? {
+          status: view.record.status,
+          profile: view.record.profile,
+          created_at: view.record.created_at,
+          vast_instance_id: view.record.vast_instance_id,
+        }
+      : null,
+    vast: view.vast,
+    vast_error: detail(view.vast_error),
+    agent: a
+      ? {
+          state: a.state,
+          reason: a.reason === null ? null : scrub(a.reason),
+          queue: a.queue,
+          gpu: {
+            util_percent: a.gpu.util_percent ?? null,
+            vram_total_mb: a.gpu.vram_total_mb ?? null,
+            vram_used_mb: a.gpu.vram_used_mb ?? null,
+          },
+          failsafe_alive: a.failsafe_alive,
+          destroy: { pending: a.destroy.pending, attempts: a.destroy.attempts },
+        }
+      : null,
+    agent_error: detail(view.agent_error),
+    agent_unreachable: view.agent_unreachable,
+    failed: view.failed ? { reason: view.failed.reason === null ? null : scrub(view.failed.reason) } : null,
+    destroy_failed: view.destroy_failed ? { error: detail(view.destroy_failed.error) ?? "unavailable" } : null,
+    dph: view.dph,
+    uptime_s: view.uptime_s,
+    cost_so_far: view.cost_so_far,
+    progress: view.progress,
+    remaining: view.remaining,
+    // Only admins can act on unknown instances; labels (which carry hostnames) are not sent.
+    unknown: isAdmin
+      ? view.unknown.map((u) => ({
+          vast_instance_id: u.vast_instance_id,
+          actual_status: u.actual_status,
+          start_date: u.start_date,
+          dph: u.dph,
+        }))
+      : [],
+  };
+}
+
+const EMPTY_BODY = { type: "object", additionalProperties: false, properties: {} } as const;
+const START_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["confirm"],
+  properties: { confirm: { const: true } },
+} as const;
+const ID_PARAMS = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id"],
+  properties: { id: { type: "string", pattern: PROMPT_ID.source } },
+} as const;
+const IMAGE_PARAMS = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "index"],
+  properties: { id: { type: "string", pattern: PROMPT_ID.source }, index: { type: "string", pattern: "^[0-9]{1,3}$" } },
+} as const;
+// Field values are validated by the generate service so its error codes reach the client.
+const GENERATE_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["prompt", "preset", "size"],
+  properties: { prompt: {}, preset: {}, size: {}, seed: {} },
+} as const;
+
+export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void {
+  const now = deps.now ?? Date.now;
+  const log = deps.log ?? (() => undefined);
+  const cfg = deps.cfg;
+  const startLimiter = new RateLimiter(intCfg(cfg, "startRateLimitPerHour", "START_RATE_LIMIT_PER_HOUR"), HOUR_MS, now);
+  const generateLimiter = new RateLimiter(
+    intCfg(cfg, "webGenerateRateLimitPerHour", "WEB_GENERATE_RATE_LIMIT_PER_HOUR"),
+    HOUR_MS,
+    now,
+  );
+  const jobs = new JobStore(
+    intCfg(cfg, "webJobCacheMax", "WEB_JOB_CACHE_MAX"),
+    intCfg(cfg, "webJobTtlS", "WEB_JOB_TTL_S") * 1000,
+    now,
+  );
+  const generateTimeoutMs = intCfg(cfg, "generateTimeoutS", "GENERATE_TIMEOUT_S") * 1000;
+  const extendMax = intCfg(cfg, "webExtendMaxMinutes", "WEB_EXTEND_MAX_MINUTES");
+  const plainScrub = scrubber(deps, []);
+  const admin = { config: { access: "admin" as const } };
+  const member = { config: { access: "member" as const } };
+
+  const generateDeps = (hostname: string): GenerateDeps => ({
+    comfy: deps.comfyFor(hostname),
+    profile: deps.profile,
+    template: deps.template,
+    cfg,
+  });
+
+  /** The job if the caller may read it; otherwise null (unknown and foreign jobs look alike). */
+  const ownJob = (req: FastifyRequest, id: string): Job | null => {
+    const job = jobs.get(id);
+    if (job === null || req.identity === null) return null;
+    return job.owner === req.identity.subject || req.role === "admin" ? job : null;
+  };
+
+  /** True when the job's instance is still the active one. */
+  const sameInstance = async (job: Job): Promise<boolean> => {
+    const active = await deps.registry.active();
+    return active !== null && active.tailnet_hostname === job.hostname;
+  };
+
+  app.get("/api/state", member, async (req) => {
+    const view = await deps.lifecycle.view();
+    const isAdmin = req.role === "admin";
+    // The view passes agent-provided text (reason) through unscrubbed: remove the token too.
+    const token = (await deps.registry.active())?.agent_token ?? "";
+    return {
+      ...publicView(view, isAdmin, scrubber(deps, [token, ...hostnamesOf(view)])),
+      role: req.role,
+      presets: deps.profile.generate.qualityPresets.map((p) => ({ name: p.name, steps: p.steps })),
+      sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
+    };
+  });
+
+  app.get("/api/estimate", admin, async (_req, reply) => {
+    try {
+      return await deps.lifecycle.estimate();
+    } catch (err) {
+      if (err instanceof NoOffersError) return sendError(reply, 503, "no_offers", "no Vast offer matches the filters");
+      log("warn", `estimate failed: ${(err as Error).name}`);
+      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+    }
+  });
+
+  app.post("/api/start", { ...admin, schema: { body: START_BODY } }, async (req, reply) => {
+    // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
+    if (!startLimiter.take("start")) return sendError(reply, 429, "rate_limited", "too many start requests this hour");
+    log("info", `start requested by ${req.identity?.username ?? "?"}`);
+    try {
+      const { record, estimate } = await deps.lifecycle.start();
+      return { status: record.status, vast_instance_id: record.vast_instance_id, estimate };
+    } catch (err) {
+      if (err instanceof AlreadyActiveError) return sendError(reply, 409, "already_active", "an instance is already active");
+      if (err instanceof NoOffersError) return sendError(reply, 503, "no_offers", "no Vast offer matches the filters");
+      const ambiguous = err instanceof StartError && err.ambiguous;
+      log("warn", `start failed: ${(err as Error).name}${ambiguous ? " (ambiguous)" : ""}`);
+      return sendError(
+        reply,
+        502,
+        ambiguous ? "start_uncertain" : "start_failed",
+        ambiguous ? "instance creation is uncertain; reconcile will resolve it" : "the instance could not be started",
+      );
+    }
+  });
+
+  app.post("/api/destroy", { ...admin, schema: { body: EMPTY_BODY } }, async (req, reply) => {
+    log("info", `destroy requested by ${req.identity?.username ?? "?"}`);
+    try {
+      const result = await deps.lifecycle.destroy();
+      return { outcome: result.outcome, agent_reached: result.agent_error === null };
+    } catch (err) {
+      log("warn", `destroy failed: ${(err as Error).name}`);
+      if (err instanceof DestroyFailedError) {
+        return sendError(reply, 502, "destroy_failed", "Vast destroy failed; it will be retried");
+      }
+      return sendError(reply, 502, "destroy_error", "destroy could not be completed");
+    }
+  });
+
+  app.post(
+    "/api/extend",
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "minutes"],
+          properties: {
+            kind: { type: "string", enum: ["idle", "failsafe"] },
+            minutes: { type: "integer", minimum: 1, maximum: extendMax },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const { kind, minutes } = req.body as { kind: "idle" | "failsafe"; minutes: number };
+      try {
+        const res = await deps.lifecycle.extend(kind, minutes);
+        return { kind: res["kind"] === "failsafe" ? "failsafe" : kind, deadline: typeof res["deadline"] === "number" ? res["deadline"] : null };
+      } catch (err) {
+        if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
+        if (err instanceof AgentError && REFUSAL_STATUSES.has(err.status)) {
+          const text = err.message.replace(/^extend failed with HTTP \d+:\s*/, "");
+          return sendError(reply, 422, "extend_refused", plainScrub(text));
+        }
+        log("warn", `extend failed: ${(err as Error).name}`);
+        return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+      }
+    },
+  );
+
+  app.post(
+    "/api/destroy-unknown",
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["vast_id"],
+          properties: { vast_id: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER } },
+        },
+      },
+    },
+    async (req, reply) => {
+      const { vast_id } = req.body as { vast_id: number };
+      log("info", `destroy-unknown ${vast_id} requested by ${req.identity?.username ?? "?"}`);
+      try {
+        return { outcome: await deps.lifecycle.destroyUnknown(vast_id) };
+      } catch (err) {
+        if (err instanceof DestroyFailedError) return sendError(reply, 502, "destroy_failed", "Vast destroy failed");
+        // Lifecycle refuses with a plain Error: not a project instance, or the active one.
+        if (err instanceof Error && err.constructor === Error) {
+          return sendError(reply, 409, "refused", plainScrub(err.message));
+        }
+        log("warn", `destroy-unknown failed: ${(err as Error).name}`);
+        return sendError(reply, 502, "vast_unavailable", "Vast could not be reached");
+      }
+    },
+  );
+
+  app.post("/api/generate", { ...member, schema: { body: GENERATE_BODY } }, async (req, reply) => {
+    const identity = req.identity!;
+    const view = await deps.lifecycle.view();
+    const hostname = view.record?.tailnet_hostname;
+    if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
+      return sendError(reply, 409, "not_ready", "the instance is not ready");
+    }
+    if (!generateLimiter.take(identity.subject)) {
+      return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
+    }
+    let promptId: string;
+    try {
+      ({ promptId } = await generate(generateDeps(hostname), req.body as GenerateRequest));
+    } catch (err) {
+      if (err instanceof GenerateInputError) {
+        if (err.code === "workflow_mismatch") {
+          log("error", "the profile does not match its workflow template");
+          return sendError(reply, 500, "profile_mismatch", "the server profile is misconfigured");
+        }
+        return sendError(reply, 400, err.code, err.message);
+      }
+      log("warn", `generate submit failed: ${(err as Error).name}`);
+      return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not accept the job");
+    }
+    if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+    jobs.add({ id: promptId, owner: identity.subject, hostname });
+    return reply.code(202).send({ id: promptId });
+  });
+
+  app.get("/api/generate/:id", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = ownJob(req, id);
+    if (job === null) return sendError(reply, 404, "not_found", "no such job");
+    if (job.state.kind === "pending") {
+      if (now() - job.createdAt >= generateTimeoutMs) {
+        job.state = { kind: "failed", message: "generation timed out" };
+      } else if (!(await sameInstance(job))) {
+        job.state = { kind: "failed", message: "the instance that ran this job is gone" };
+      } else {
+        try {
+          const result = await pollResult(generateDeps(job.hostname), job.id);
+          if (result !== null) job.state = { kind: "done", images: result.images };
+        } catch (err) {
+          if (err instanceof GenerateFailed) {
+            job.state = { kind: "failed", message: scrubber(deps, [job.hostname])(err.message) };
+          } else {
+            // Unreachable or ComfyError: transient from the browser's view; it may poll again.
+            log("warn", `generate poll failed: ${(err as Error).name}`);
+            return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not be reached");
+          }
+        }
+      }
+    }
+    const state = job.state;
+    if (state.kind === "done") {
+      return {
+        status: "done",
+        images: state.images.map((_img, index) => ({ index, url: `/api/image/${encodeURIComponent(job.id)}/${index}` })),
+      };
+    }
+    if (state.kind === "failed") return { status: "failed", message: state.message };
+    return { status: "pending" };
+  });
+
+  app.get("/api/image/:id/:index", { ...member, schema: { params: IMAGE_PARAMS } }, async (req, reply: FastifyReply) => {
+    const { id, index } = req.params as { id: string; index: string };
+    const job = ownJob(req, id);
+    if (job === null) return sendError(reply, 404, "not_found", "no such job");
+    if (job.state.kind !== "done") return sendError(reply, 404, "not_found", "no such image");
+    const image = job.state.images[Number(index)];
+    if (image === undefined) return sendError(reply, 404, "not_found", "no such image");
+    if (!(await sameInstance(job))) return sendError(reply, 410, "gone", "the instance that made this image is gone");
+    let fetched: { bytes: Buffer; contentType: string };
+    try {
+      fetched = await deps.comfyFor(job.hostname).view(image.filename, image.subfolder, image.type);
+    } catch (err) {
+      if (err instanceof ComfyError && err.status === 0) {
+        log("warn", "ComfyUI history named an unsafe image path; refused");
+        return sendError(reply, 502, "image_rejected", "the image reference was refused");
+      }
+      if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
+      return sendError(reply, 502, "image_unavailable", "the image could not be fetched");
+    }
+    const type = fetched.contentType.split(";")[0]!.trim().toLowerCase();
+    const ext = IMAGE_TYPES[type];
+    if (ext === undefined) return sendError(reply, 502, "image_rejected", "ComfyUI did not return an image");
+    return reply
+      .code(200)
+      .header("cache-control", "no-store")
+      .header("content-disposition", `inline; filename="image-${Number(index)}.${ext}"`)
+      .type(type)
+      .send(fetched.bytes);
+  });
+}

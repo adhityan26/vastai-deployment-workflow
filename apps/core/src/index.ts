@@ -1,0 +1,10 @@
+// Package entry for @vast-comfy/core: the modules other apps import. The low-level HTTP
+// plumbing (http.ts) stays internal; its Unreachable error is re-exported by the clients.
+export * from "./config.js";
+export * from "./agent.js";
+export * from "./comfy.js";
+export * from "./generate.js";
+export * from "./lifecycle.js";
+export * from "./profile.js";
+export * from "./registry.js";
+export * from "./vast.js";

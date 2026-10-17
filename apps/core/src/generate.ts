@@ -111,6 +111,34 @@ function saveImageNodes(template: unknown): Set<string> {
   return ids;
 }
 
+/**
+ * One history read: the images once the prompt has finished, or null while it has not.
+ * Throws GenerateFailed when ComfyUI reports an error or produced no images; Unreachable and
+ * ComfyError propagate. Never sleeps, so a web request can poll without blocking.
+ */
+export async function pollResult(deps: GenerateDeps, promptId: string): Promise<{ images: ResultImage[] } | null> {
+  const entry = await deps.comfy.history(promptId);
+  if (!entry) return null;
+  const status = entry.status as Record<string, unknown> | undefined;
+  if (status?.["status_str"] === "error") throw new GenerateFailed(errorMessage(status));
+  if (status?.["completed"] !== true && status?.["status_str"] !== "success") return null;
+  const saveNodes = saveImageNodes(deps.template);
+  const images: ResultImage[] = [];
+  for (const [id, out] of Object.entries(entry.outputs ?? {})) {
+    if (!saveNodes.has(id) || !Array.isArray(out?.images)) continue;
+    for (const img of out.images) {
+      if (
+        typeof img?.filename === "string" && img.filename !== "" &&
+        typeof img.subfolder === "string" && VIEW_TYPES.includes(img.type)
+      ) {
+        images.push({ filename: img.filename, subfolder: img.subfolder, type: img.type as ResultImage["type"] });
+      }
+    }
+  }
+  if (images.length === 0) throw new GenerateFailed("no images");
+  return { images };
+}
+
 /** Poll history until the prompt finishes; throws GenerateTimeout / GenerateFailed. Unreachable and ComfyError propagate. */
 export async function awaitResult(deps: GenerateDeps, promptId: string): Promise<{ images: ResultImage[] }> {
   const pollMs = intKey(deps.cfg, "statusPollS") * 1000;
@@ -120,28 +148,8 @@ export async function awaitResult(deps: GenerateDeps, promptId: string): Promise
   const deadline = now() + timeoutMs;
 
   for (;;) {
-    const entry = await deps.comfy.history(promptId);
-    if (entry) {
-      const status = entry.status as Record<string, unknown> | undefined;
-      if (status?.["status_str"] === "error") throw new GenerateFailed(errorMessage(status));
-      if (status?.["completed"] === true || status?.["status_str"] === "success") {
-        const saveNodes = saveImageNodes(deps.template);
-        const images: ResultImage[] = [];
-        for (const [id, out] of Object.entries(entry.outputs ?? {})) {
-          if (!saveNodes.has(id) || !Array.isArray(out?.images)) continue;
-          for (const img of out.images) {
-            if (
-              typeof img?.filename === "string" && img.filename !== "" &&
-              typeof img.subfolder === "string" && VIEW_TYPES.includes(img.type)
-            ) {
-              images.push({ filename: img.filename, subfolder: img.subfolder, type: img.type as ResultImage["type"] });
-            }
-          }
-        }
-        if (images.length === 0) throw new GenerateFailed("no images");
-        return { images };
-      }
-    }
+    const result = await pollResult(deps, promptId);
+    if (result) return result;
     if (now() + pollMs > deadline) throw new GenerateTimeout();
     await sleep(pollMs);
   }

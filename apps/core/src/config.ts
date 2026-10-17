@@ -130,3 +130,8 @@ export function loadConfig(env: Record<string, string | undefined>, schemaPath: 
   const secretNames = specs.filter((s) => s.secret).map((s) => s.name);
   return Object.freeze({ ...values, secretNames }) as AppsConfig;
 }
+
+/** Load the `apps` configuration from this process's environment (entry points only). */
+export function loadConfigFromProcess(schemaPath: string): AppsConfig {
+  return loadConfig(process.env, schemaPath);
+}

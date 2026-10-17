@@ -1,0 +1,1469 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "vast-comfy web API",
+    "version": "1",
+    "description": "Hand-kept contract of apps/web (apps/web/tests/routes.test.ts fails when it and the registered Fastify routes diverge). Every /api route needs a verified Authentik JWT in X-authentik-jwt (401 without, 403 for the wrong role); POSTs need Content-Type application/json; unknown routes are 404; errors are {error: {code, message}}. The static route is listed as /{path}; Fastify registers it as the wildcard /*."
+  },
+  "components": {
+    "securitySchemes": {
+      "authentikJwt": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-authentik-jwt",
+        "description": "Signed JWT forwarded by the Authentik proxy outpost"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Estimate": {
+        "type": "object",
+        "required": [
+          "offer_id",
+          "gpu_name",
+          "dph",
+          "horizon_hours",
+          "max_cost"
+        ],
+        "properties": {
+          "offer_id": {
+            "type": "integer"
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dph": {
+            "type": "number"
+          },
+          "horizon_hours": {
+            "type": "integer"
+          },
+          "max_cost": {
+            "type": "number"
+          }
+        }
+      },
+      "Job": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "status",
+              "images"
+            ],
+            "properties": {
+              "status": {
+                "const": "done"
+              },
+              "images": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "index",
+                    "url"
+                  ],
+                  "properties": {
+                    "index": {
+                      "type": "integer"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Relative /api/image path"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "status",
+              "message"
+            ],
+            "properties": {
+              "status": {
+                "const": "failed"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "State": {
+        "type": "object",
+        "description": "The lifecycle status view through an allowlist: never agent tokens, tailnet hostnames, labels or keys. Error details are scrubbed for admins and reduced to 'unavailable' for members; unknown instances are listed for admins only.",
+        "required": [
+          "state",
+          "record",
+          "vast",
+          "vast_error",
+          "agent",
+          "agent_error",
+          "agent_unreachable",
+          "failed",
+          "destroy_failed",
+          "dph",
+          "uptime_s",
+          "cost_so_far",
+          "progress",
+          "remaining",
+          "unknown",
+          "role",
+          "presets",
+          "sizes"
+        ],
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "record": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "integer"
+              },
+              "vast_instance_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "vast": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "actual_status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_date": {
+                "type": "number"
+              },
+              "dph": {
+                "type": "number"
+              }
+            }
+          },
+          "vast_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "queue": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "gpu": {
+                "type": "object"
+              },
+              "failsafe_alive": {
+                "type": "boolean"
+              },
+              "destroy": {
+                "type": "object",
+                "properties": {
+                  "pending": {
+                    "type": "boolean"
+                  },
+                  "attempts": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          },
+          "agent_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_unreachable": {
+            "type": "boolean"
+          },
+          "failed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "destroy_failed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          },
+          "dph": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "uptime_s": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cost_so_far": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "progress": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "remaining": {
+            "type": "object",
+            "properties": {
+              "idle_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "failsafe_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "hard_cap_s": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          },
+          "unknown": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "vast_instance_id": {
+                  "type": "integer"
+                },
+                "actual_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "start_date": {
+                  "type": "number"
+                },
+                "dph": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "member"
+            ]
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "steps"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "steps": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "width",
+                "height"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "width": {
+                  "type": "integer"
+                },
+                "height": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "authentikJwt": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Container healthcheck; no auth; reveals nothing",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{path}": {
+      "get": {
+        "operationId": "staticPage",
+        "summary": "Static page from apps/web/public (empty path serves index.html); no auth; strict CSP",
+        "security": [],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "description": "File path below apps/web/public; segments [A-Za-z0-9][A-Za-z0-9._-]*, known extensions only; paths under api/ are never served",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file",
+            "content": {
+              "text/html": {},
+              "text/javascript": {},
+              "text/css": {},
+              "image/png": {},
+              "image/svg+xml": {}
+            }
+          },
+          "404": {
+            "description": "No such file (code not_found)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "operationId": "state",
+        "summary": "Instance status view (member or admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/estimate": {
+      "get": {
+        "operationId": "estimate",
+        "summary": "Cheapest matching offer and its upper-bound cost (admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Estimate"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast unavailable (code vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No offer matches (code no_offers)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/start": {
+      "post": {
+        "operationId": "start",
+        "summary": "Start the instance after the user confirmed the estimate (admin; rate limited by START_RATE_LIMIT_PER_HOUR)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "confirm"
+                ],
+                "properties": {
+                  "confirm": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "vast_instance_id",
+                    "estimate"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "vast_instance_id": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "estimate": {
+                      "$ref": "#/components/schemas/Estimate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An instance is already active (code already_active)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Start rate limit reached (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Start failed (codes start_failed, start_uncertain)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No offer matches (code no_offers)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/destroy": {
+      "post": {
+        "operationId": "destroy",
+        "summary": "Destroy the active instance (admin; idempotent)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "outcome",
+                    "agent_reached"
+                  ],
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "none",
+                        "pending",
+                        "destroyed",
+                        "gone"
+                      ]
+                    },
+                    "agent_reached": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast destroy failed (codes destroy_failed, destroy_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/extend": {
+      "post": {
+        "operationId": "extend",
+        "summary": "Extend the idle or failsafe deadline (admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "minutes"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "idle",
+                      "failsafe"
+                    ]
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "At most WEB_EXTEND_MAX_MINUTES"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "deadline"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "idle",
+                        "failsafe"
+                      ]
+                    },
+                    "deadline": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No active instance (code no_instance)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The agent refused, e.g. beyond the hard cap (code extend_refused; message relayed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Agent unreachable (code agent_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/destroy-unknown": {
+      "post": {
+        "operationId": "destroyUnknown",
+        "summary": "Destroy a project-labelled instance the registry does not own (admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "vast_id"
+                ],
+                "properties": {
+                  "vast_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "outcome"
+                  ],
+                  "properties": {
+                    "outcome": {
+                      "enum": [
+                        "destroyed",
+                        "gone"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a project instance, or the active one (code refused)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast failed (codes destroy_failed, vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/generate": {
+      "post": {
+        "operationId": "generate",
+        "summary": "Submit a generation filled into the profile workflow (member or admin; per-identity rate limit)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "prompt",
+                  "preset",
+                  "size"
+                ],
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "At most GENERATE_MAX_PROMPT_CHARS"
+                  },
+                  "preset": {
+                    "type": "string",
+                    "description": "A preset name from /api/state"
+                  },
+                  "size": {
+                    "type": "string",
+                    "description": "A size name from /api/state"
+                  },
+                  "seed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The instance is not ready (code not_ready)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Generate rate limit reached (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Profile and workflow disagree (code profile_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ComfyUI unavailable (code comfy_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/generate/{id}": {
+      "get": {
+        "operationId": "job",
+        "summary": "Job state; polls ComfyUI once per request (owner or admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed id (code invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or not yours (code not_found)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ComfyUI unreachable; poll again (code comfy_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/image/{id}/{index}": {
+      "get": {
+        "operationId": "image",
+        "summary": "Image bytes relayed from ComfyUI; nothing is stored (owner or admin)",
+        "security": [
+          {
+            "authentikJwt": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,3}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image (Cache-Control: no-store)",
+            "content": {
+              "image/png": {},
+              "image/jpeg": {},
+              "image/webp": {},
+              "image/gif": {}
+            }
+          },
+          "401": {
+            "description": "No verified Authentik identity (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, or a cross-site POST (codes forbidden, cross_site)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed id or index (code invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job, image or not yours (code not_found)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The instance that made it is gone (code gone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Unsafe reference, non-image body or ComfyUI unavailable (codes image_rejected, image_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

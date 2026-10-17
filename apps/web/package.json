@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@vast-comfy/core": "*",
+    "fastify": "^5.12.7",
     "jose": "^6.2.12"
   },
   "scripts": {

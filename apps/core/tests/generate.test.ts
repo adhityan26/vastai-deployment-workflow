@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import type { AppsConfig } from "../src/config.js";
 import { ComfyClient, Unreachable } from "../src/comfy.js";
 import { GenerateInputError, type Profile } from "../src/profile.js";
-import { awaitResult, generate, GenerateFailed, GenerateTimeout, type GenerateDeps } from "../src/generate.js";
+import { awaitResult, generate, GenerateFailed, GenerateTimeout, pollResult, type GenerateDeps } from "../src/generate.js";
 
 const template = JSON.parse(readFileSync(new URL("../../../instance/workflows/qwen-image-t2i.json", import.meta.url), "utf8"));
 const profile: Profile = {
@@ -154,5 +154,35 @@ describe("awaitResult", () => {
   it("fails with 'no images' when finished without images", async () => {
     const { deps } = await fake((_s, res) => json(res, 200, { p1: { outputs: {}, status: { completed: true } } }));
     await expect(awaitResult(deps, "p1")).rejects.toThrow(new GenerateFailed("no images"));
+  });
+});
+
+describe("pollResult", () => {
+  it("reads history exactly once and never sleeps: null while pending, images when done", async () => {
+    let done = false;
+    const { deps, seen, sleeps } = await fake((_s, res) =>
+      done
+        ? json(res, 200, {
+            p1: {
+              outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } },
+              status: { completed: true, status_str: "success" },
+            },
+          })
+        : json(res, 200, {}),
+    );
+    expect(await pollResult(deps, "p1")).toBeNull();
+    expect(seen).toHaveLength(1);
+    done = true;
+    expect(await pollResult(deps, "p1")).toEqual({ images: [{ filename: "a.png", subfolder: "", type: "output" }] });
+    expect(seen).toHaveLength(2);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("returns null for a running entry and throws GenerateFailed on error", async () => {
+    let entry: unknown = { p1: { outputs: {}, status: { completed: false, status_str: "running" } } };
+    const { deps } = await fake((_s, res) => json(res, 200, entry));
+    expect(await pollResult(deps, "p1")).toBeNull();
+    entry = { p1: { outputs: {}, status: { status_str: "error", messages: [] } } };
+    await expect(pollResult(deps, "p1")).rejects.toThrow(new GenerateFailed("generation failed"));
   });
 });
