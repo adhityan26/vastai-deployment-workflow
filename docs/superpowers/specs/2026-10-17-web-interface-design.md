@@ -1,6 +1,6 @@
 # Antarmuka web: kontrol instance dan generate gambar (sub-proyek 3a)
 
-Status: **draf, jawaban 1-4 pemilik sudah dimasukkan; menunggu persetujuan akhir**. Ditulis saat pemilik proyek tidak bisa dihubungi; semua yang bertanda **[Keputusan saya]** adalah tebakan yang bisa dikoreksi, bukan kesepakatan. Hanya bagian "Dari pemilik" yang berasal dari percakapan.
+Status: **draf, jawaban 1-4 pemilik sudah dimasukkan; semua pertanyaan terjawab; menunggu persetujuan akhir**. Ditulis saat pemilik proyek tidak bisa dihubungi; semua yang bertanda **[Keputusan saya]** adalah tebakan yang bisa dikoreksi, bukan kesepakatan. Hanya bagian "Dari pemilik" yang berasal dari percakapan.
 
 ## 1. Tujuan dan alasan
 
@@ -89,7 +89,7 @@ Struktur modul di dalam `apps/`, skema UI persis, pemilihan penawaran di antara 
 ## 8. Pertanyaan untuk pemilik (jawaban mengubah rencana)
 Dijawab pemilik: (1) domain publik dengan Authentik; (2) homelab sudah di tailnet (node `docker-apps`, tidak bertag; ACL anggota-ke-`tag:gpu` sudah berlaku untuknya); (3) key manual dulu, OAuth client menyusul; (4) `VAST_API_KEY` boleh di `.env` homelab.
 
-Masih terbuka (dipakai saat pemasangan, bukan saat menulis kode): domain/subdomain yang dipakai, reverse proxy yang sudah ada di homelab (Traefik/Nginx Proxy Manager/Cloudflare Tunnel) dan cara Authentik terpasang di depannya, serta nama grup Authentik untuk admin dan anggota.
+Pemasangan (dari pemilik): domain **`gen.3dprintingbandung.my.id`**, lewat **Cloudflare** (Cloudflare Tunnel atau DNS proxied ke homelab; cara persisnya diputuskan saat pemasangan), Authentik di depannya. Grup Authentik yang ada: `authentik Admins` dan `authentik Read-only` (bawaan Authentik). **[Keputusan saya]** `authentik Admins` = admin web. Grup bawaan `authentik Read-only` adalah peran izin untuk Authentik sendiri, jadi **tidak** dipakai sebagai "anggota" web; tahap pemilik-sendiri cukup grup admin, dan grup anggota khusus (mis. `gen-members`) dibuat di Authentik saat tim dilibatkan. Nama grup berasal dari config (`WEB_ADMIN_GROUP`, `WEB_MEMBER_GROUP`), bukan kode.
 
 ## 9. Urutan kerja yang diusulkan
 1. `apps/core`: config, klien Vast/agent/ComfyUI, registri, siklus hidup (dengan server palsu).
