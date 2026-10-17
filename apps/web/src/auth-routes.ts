@@ -71,6 +71,19 @@ function callbackCode(err: unknown, providerError: string | undefined): LoginErr
   }
 }
 
+/**
+ * The internal reason for the server log: the OidcError code (a fixed identifier such as
+ * discovery_failed or token_invalid), or "unexpected". Never provider text, tokens, codes or secrets.
+ */
+function internalReason(err: unknown): string {
+  return err instanceof OidcError ? err.code : "unexpected";
+}
+
+/** One coarse log line: the allowlisted code, plus the internal reason when it says more. */
+function failureLine(code: LoginErrorCode, internal: string | undefined): string {
+  return internal === undefined || internal === code ? `login failed: ${code}` : `login failed: ${code} (internal: ${internal})`;
+}
+
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): void {
   const pub = { config: { access: "public" as const } };
   const ready = (): { oidc: LoginDeps["oidc"]; sessions: NonNullable<LoginDeps["sessions"]> } | null => {
@@ -92,7 +105,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       target = redirectUrl;
     } catch (err) {
       const code = callbackCode(err, undefined);
-      deps.log("warn", `login failed: ${code}`);
+      deps.log("warn", failureLine(code, internalReason(err)));
       return reply.code(302).header("location", `${ERROR_LANDING}${code}`).header("set-cookie", r.sessions.clearTransaction()).send();
     }
     return reply.code(302).header("location", target).header("set-cookie", cookie).send();
@@ -103,13 +116,13 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
     if (r === null) return notConfigured(reply);
     const clearTx = r.sessions.clearTransaction();
     // Every failure: drop the transaction cookie (one attempt per login), set no session.
-    const fail = (code: LoginErrorCode) => {
-      deps.log("warn", `login failed: ${code}`);
+    const fail = (code: LoginErrorCode, internal?: string) => {
+      deps.log("warn", failureLine(code, internal));
       return reply.code(302).header("location", `${ERROR_LANDING}${code}`).header("set-cookie", clearTx).send();
     };
     try {
       const tx = await r.sessions.readTransaction(req.headers.cookie);
-      if (tx === null) return fail("state_mismatch");
+      if (tx === null) return fail("state_mismatch", "no_valid_transaction_cookie");
       const providerError = param(req, "error");
       const code = param(req, "code");
       const state = param(req, "state");
@@ -120,11 +133,11 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
           tx,
         );
       } catch (err) {
-        return fail(callbackCode(err, providerError));
+        return fail(callbackCode(err, providerError), internalReason(err));
       }
       // The session keeps only role groups. An account without a role gets no session at all.
       const groups = roleGroups(deps.cfg, identity.groups);
-      if (roleOf(deps.cfg, groups) === "none") return fail("access_denied");
+      if (roleOf(deps.cfg, groups) === "none") return fail("access_denied", "no_role_group");
       let session: string;
       try {
         session = r.sessions.serialize(await r.sessions.issue({ ...identity, groups }));
@@ -134,7 +147,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       deps.log("info", "login ok");
       return reply.code(302).header("location", tx.next).header("set-cookie", [session, clearTx]).send();
     } catch {
-      return fail("failed");
+      return fail("failed", "unexpected");
     }
   });
 

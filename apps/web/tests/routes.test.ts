@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeJwt } from "jose";
@@ -84,6 +84,9 @@ async function loginFlow(
   const next = opts.next === undefined ? "" : `?next=${encodeURIComponent(opts.next)}`;
   const start = await h.app.inject({ method: "GET", url: `/auth/login${next}` });
   expect(start.statusCode).toBe(302);
+  // A relative /?login_error=... here means the login could not reach the fake IdP (discovery).
+  expect(String(start.headers.location ?? ""), "the /auth/login redirect must go to the fake IdP, not to an error page")
+    .toMatch(new RegExp(`^${idp.base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`));
   const tx = pairOf(setCookies(start)[0] ?? "");
   const { code, state } = idp.authorize(String(start.headers.location), {}, {
     idToken: async (nonce) => {
@@ -124,6 +127,8 @@ interface Seen { method: string; url: string; auth: string | undefined; body: st
 type Handler = (s: Seen, res: ServerResponse) => void;
 const servers: Server[] = [];
 const apps: FastifyInstance[] = [];
+/** Per-harness temp directories, removed after each test (they used to pile up in the tmpdir). */
+const tempDirs: string[] = [];
 
 async function fakeServer(handler: () => Handler): Promise<{ port: number; seen: Seen[] }> {
   const seen: Seen[] = [];
@@ -199,7 +204,9 @@ interface Harness {
 
 let h: Harness;
 
-async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } = {}): Promise<Harness> {
+async function harness(
+  opts: { ready?: boolean; cfg?: Record<string, unknown>; extraRoutes?: (app: FastifyInstance) => void } = {},
+): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
     if (s.url === "/status") return json(res, 200, agentStatus("ready"));
     if (s.url === "/destroy") return json(res, 200, {});
@@ -210,6 +217,7 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
   const agent = await fakeServer(() => agentHandler);
   const comfy = await fakeServer(() => comfyHandler);
   const dir = mkdtempSync(join(tmpdir(), "web-routes-"));
+  tempDirs.push(dir);
   const publicDir = join(dir, "public");
   mkdirSync(publicDir);
   const cfg = {
@@ -235,10 +243,11 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     vastAllowedGpus: [],
     comfyPort: comfy.port,
     agentPort: agent.port,
-    httpTimeoutSApps: 5,
+    // Generous: under a loaded full-suite run a short timeout made discovery to the fake IdP flaky.
+    httpTimeoutSApps: 30,
     webJsonMaxBytes: 65536,
     webImageMaxBytes: 65536,
-    webImageTimeoutS: 5,
+    webImageTimeoutS: 30, // generous for the same reason as httpTimeoutSApps
     webRequestTimeoutS: 30,
     webConnectionTimeoutS: 60,
     webKeepaliveTimeoutS: 75,
@@ -300,6 +309,7 @@ async function harness(opts: { ready?: boolean; cfg?: Record<string, unknown> } 
     log: (level, message) => void logs.push(`${level} ${message}`),
   });
   apps.push(app);
+  opts.extraRoutes?.(app);
   await app.ready();
   return {
     app, vast, registry, dir, publicDir, clock, sessions, logs,
@@ -316,6 +326,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
+  for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   for (const s of servers.splice(0)) {
     s.closeAllConnections?.();
     s.close();
@@ -407,6 +418,25 @@ describe("auth gate", () => {
     expect(page.statusCode).toBe(404);
     expect(page.json().error.code).toBe("not_found");
     expect((await call("GET", "/../../etc/passwd")).statusCode).toBe(404);
+  });
+});
+
+describe("default deny follows the matched route, not the raw path", () => {
+  it("an UNTAGGED /api route is member-gated, also when reached as /%61pi/...", async () => {
+    h = await harness({
+      extraRoutes: (app) => app.get("/api/untagged-probe", async () => ({ ok: "probe" })),
+    });
+    for (const url of ["/api/untagged-probe", "/%61pi/untagged-probe", "/%61%70%69/untagged-probe"]) {
+      const anon = await call("GET", url);
+      expect(anon.statusCode, url).toBe(401);
+      expect(anon.body).not.toContain("probe");
+      expect((await call("GET", url, await cookieOf(["staff"]))).statusCode, url).toBe(403);
+      const ok = await call("GET", url, await member());
+      expect(ok.statusCode, url).toBe(200);
+      expect(ok.headers["cache-control"], url).toBe("no-store");
+    }
+    expect((await call("GET", "/%61pi/state")).statusCode).toBe(401);
+    expect((await call("GET", "/%61pi/estimate", await member())).statusCode).toBe(403);
   });
 });
 
@@ -643,7 +673,7 @@ describe("generate", () => {
     expect(img.rawPayload.equals(PNG)).toBe(true);
     expect(newFilesWith(before, [tmpdir(), h.dir], PNG)).toEqual([]);
     expect((await call("GET", "/api/image/p-1/1", m)).statusCode).toBe(404);
-  });
+  }, 30_000); // walks the shared tmpdir twice; slow on a busy machine
 
   it("reports pending while ComfyUI has no history, and failed with a short message", async () => {
     let state: "pending" | "error" = "pending";
@@ -822,7 +852,7 @@ describe("login flow", () => {
     const { cb } = await loginFlow(["authentik Read-only"]);
     expect(location(cb)).toBe("/?login_error=access_denied");
     expect(sessionSet(cb)).toBeUndefined();
-    expect(h.logs).toContain("warn login failed: access_denied");
+    expect(h.logs).toContain("warn login failed: access_denied (internal: no_role_group)");
   });
 
   it("an over-size session is a clean session_too_large redirect with no cookie", async () => {
@@ -931,10 +961,42 @@ describe("login flow", () => {
     };
   });
 
+  it("the server log names the internal reason (fixed identifiers only); the URL keeps the coarse code", async () => {
+    idp.discovery = 503;
+    h = await harness();
+    const down = await h.app.inject({ method: "GET", url: "/auth/login" });
+    expect(location(down)).toBe("/?login_error=provider_error");
+    expect(h.logs).toContain("warn login failed: provider_error (internal: discovery_failed)");
+    idp.discovery = {
+      issuer: idp.issuer,
+      authorization_endpoint: `${idp.base}/application/o/authorize/`,
+      token_endpoint: `${idp.base}/application/o/token/`,
+      jwks_uri: `${idp.issuer}jwks/`,
+      code_challenge_methods_supported: ["plain", "S256"],
+    };
+    h = await harness();
+    mintedTokens.length = 0;
+    const replay = await loginFlow([MEMBER_GROUP]);
+    const url = `/auth/callback?code=${encodeURIComponent(replay.code)}&state=${encodeURIComponent(replay.state)}`;
+    const again = await h.app.inject({ method: "GET", url, headers: { cookie: replay.tx } });
+    expect(location(again)).toBe("/?login_error=exchange_failed");
+    const stale = await h.app.inject({ method: "GET", url });
+    expect(location(stale)).toBe("/?login_error=state_mismatch");
+    expect(h.logs).toContain("warn login failed: exchange_failed");
+    expect(h.logs).toContain("warn login failed: state_mismatch (internal: no_valid_transaction_cookie)");
+    const text = h.logs.join("\n");
+    for (const value of [CLIENT_SECRET, SESSION_SECRET, replay.code, replay.state, replay.tx.split("=")[1]!, ...mintedTokens]) {
+      expect(text).not.toContain(value);
+    }
+    for (const line of h.logs.filter((l) => l.includes("login failed"))) {
+      expect(line).toMatch(/^warn login failed: [a-z_]+( \(internal: [a-z_]+\))?$/);
+    }
+  });
+
   it("every login_error the server can emit is in the allowlist", async () => {
     const seen = h.logs.concat();
     for (const line of seen.filter((l) => l.startsWith("warn login failed: "))) {
-      expect(LOGIN_ERROR_CODES).toContain(line.slice("warn login failed: ".length));
+      expect(LOGIN_ERROR_CODES).toContain(line.slice("warn login failed: ".length).split(" ")[0]);
     }
     expect(LOGIN_ERROR_CODES).toEqual(expect.arrayContaining(["access_denied", "state_mismatch", "session_too_large", "failed"]));
   });

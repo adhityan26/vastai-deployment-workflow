@@ -95,6 +95,7 @@ describe("deploy files", () => {
       expect(example).toMatch(new RegExp(`^${name}=$`, "m"));
     expect(example).toMatch(/^WEB_PUBLIC_URL=https:\/\/gen\.3dprintingbandung\.my\.id$/m);
     expect(example).toMatch(/^TS_AUTHKEY_FILE=\/run\/secrets\/ts-authkey$/m);
+    expect(example).toMatch(/^WEB_OIDC_SKEW_S=5$/m);
   });
 
   it("README documents the redirect URI and the issuer trailing slash", () => {
@@ -103,6 +104,24 @@ describe("deploy files", () => {
     expect(readme).toMatch(/trailing slash/);
     expect(readme).toContain("192.168.88.113:3400");
     expect(readme).not.toContain("compose.snippet");
+  });
+
+  it("README points every docker command at the remote daemon and keeps the dangerous ones prefixed", () => {
+    const readme = read("deploy/web/README.md");
+    const deploying = readme.indexOf("## Deploying");
+    const exportAt = readme.indexOf("export DOCKER_HOST=tcp://192.168.88.113:2375");
+    expect(exportAt).toBeGreaterThan(deploying);
+    expect(readme).toContain("unset DOCKER_HOST");
+    // No docker command appears before the export.
+    expect(readme.slice(0, exportAt)).not.toMatch(/`docker |^\s+docker /m);
+    expect(readme).toContain("DOCKER_HOST=tcp://192.168.88.113:2375 docker compose stop vast-comfy-web");
+    expect(readme).toContain("DOCKER_HOST=tcp://192.168.88.113:2375 docker run --rm -i -v vast-comfy-keys:/k");
+    expect(readme).not.toMatch(/(?<!2375 )docker compose stop/);
+    expect(readme).toContain("curl -s -o /dev/null -w '%{http_code}\\n' https://gen.3dprintingbandung.my.id/api/state");
+    expect(readme).not.toContain("curl -sI");
+    expect(readme).toMatch(/Include claims in id_token/);
+    expect(readme).toMatch(/discovery_failed/);
+    expect(readme).toContain("http://192.168.88.113:3400");
   });
 
   it("Dockerfile runs as non-root after the last install and has a HEALTHCHECK", () => {

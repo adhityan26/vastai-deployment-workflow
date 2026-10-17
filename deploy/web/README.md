@@ -27,10 +27,23 @@ Compose file: `docker-compose.yml` at the repository root. Env template: `.env.e
 
 ## Deploying (from the laptop)
 
-The Docker daemon is remote. Use the `docker compose` plugin (Compose v2 or newer); legacy v1
-`docker-compose` is not supported (it ignores the `deploy.*` limits). `tcp://192.168.88.113:2375` is an
-unauthenticated, unencrypted Docker API: acceptable only on a trusted LAN. Run everything from the
-laptop checkout:
+The Docker daemon is remote. First, in the shell you deploy from, point the Docker client at it:
+
+    export DOCKER_HOST=tcp://192.168.88.113:2375
+
+**Every `docker` command in this runbook assumes that export** (`docker inspect`, `docker exec`,
+`docker logs`, `docker tag`, `docker compose ...`). Without it they talk to the laptop's LOCAL
+daemon and silently inspect, tag or stop nothing. Run `unset DOCKER_HOST` when you are done. The
+commands that must never run against the wrong daemon (the key-volume fill, `up`, the emergency
+stop) also carry an explicit `DOCKER_HOST=...` prefix, so copy-pasting them is safe on their own.
+
+Use the `docker compose` plugin (Compose v2 or newer); legacy v1 `docker-compose` is not supported
+(it ignores the `deploy.*` limits). `tcp://192.168.88.113:2375` is an unauthenticated, unencrypted
+Docker API: acceptable only on a trusted LAN. That includes the secrets: the `.env` values
+(`AUTHENTIK_CLIENT_SECRET`, `WEB_SESSION_SECRET`, `VAST_API_KEY`) travel to the daemon in clear
+text over port 2375, and anyone on the LAN who can reach that port can read them back with
+`docker inspect vast-comfy-web`. Same trusted-LAN caveat; do not expose port 2375 anywhere else.
+Run everything from the laptop checkout:
 
     DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build
 
@@ -44,6 +57,8 @@ The image runs the compiled JavaScript as the non-root `node` user.
 - [ ] Authentik application and provider (below); note client id, client secret, issuer.
 - [ ] `cp .env.example .env`, fill it in (mode 600, never committed). `WEB_SESSION_SECRET`:
       `openssl rand -hex 32`. `AUTHENTIK_ISSUER` must be copied EXACTLY, including the trailing slash.
+      Keep `WEB_OIDC_SKEW_S=5` from the template: Authentik may run on another clock, and with a skew
+      of 0 an ID token whose `iat` is even 1 s in the future (by our clock) is rejected.
 - [ ] Tailscale auth key into the `vast-comfy-keys` volume (below), BEFORE the first `up`.
 - [ ] Cloudflare tunnel public hostname (below).
 - [ ] `DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build`, then the smoke checks.
@@ -76,7 +91,9 @@ Same pattern as the owner's dashboard, but as an OIDC application.
    OAuth2/OpenID Connect; client type **Confidential**.
 3. Redirect URI (strict), exactly: `https://gen.3dprintingbandung.my.id/auth/callback`
 4. Scopes: `openid`, `profile`, `email`. The ID token must carry a `groups` claim (array of group
-   names). The default "profile" scope mapping includes `groups`; verify under Customization ->
+   names). The provider setting **"Include claims in id_token" must stay ON** (the default): the app
+   reads the groups only from the ID token, so with it off `groups` is empty and every user gets
+   `access_denied`. The default "profile" scope mapping includes `groups`; verify under Customization ->
    Property Mappings (and the provider's Preview tab for a user). If it is missing, add a scope
    mapping with expression `return {"groups": [g.name for g in request.user.ak_groups.all()]}`
    and select it on the provider.
@@ -108,10 +125,17 @@ service use the instance 100.x IP. `network_mode: host` is not recommended.
 
 ## Smoke checks
 
+Log in through the public hostname `https://gen.3dprintingbandung.my.id` only. Logging in through
+the LAN address `http://192.168.88.113:3400` cannot work: the cookies are `Secure` with the
+`__Host-` prefix, and the redirect URI and the Origin check are bound to the public hostname.
+(With `export DOCKER_HOST=...` set, see "Deploying".)
+
 1. `docker inspect -f '{{.State.Health.Status}}' vast-comfy-web` becomes `healthy`.
 2. `docker inspect -f '{{.HostConfig.PidsLimit}} {{.HostConfig.Memory}}' vast-comfy-web` prints
    `128 268435456` (the pids and memory limits are applied).
-3. `curl -sI https://gen.3dprintingbandung.my.id/api/state` returns 401 with a JSON body, NOT a redirect.
+3. `curl -s -o /dev/null -w '%{http_code}\n' https://gen.3dprintingbandung.my.id/api/state` prints
+   `401` (a GET without a session; NOT a redirect). Cloudflare bot protection may challenge curl
+   (403 or a challenge page); then check the same request from the browser devtools network tab.
 4. The page shows the login button; logging in as an `authentik Admins` user shows the app.
 5. A user in neither role group is stopped by Authentik's own denial page and never reaches the app,
    because only the two groups are bound. The app's `access_denied` path is reachable only if the
@@ -125,7 +149,25 @@ service use the instance 100.x IP. `network_mode: host` is not recommended.
   `image: vast-comfy-web:prev` (remove `build`) and run `docker compose up -d`.
 - The registry volume is independent of the image; the service reconciles registry and Vast on
   startup. Always check the Vast console for orphan instances after a rollback.
-- Emergency stop: `docker compose stop vast-comfy-web`; destroy any instance in the Vast console.
+- Emergency stop (explicit prefix; without it this stops nothing):
+  `DOCKER_HOST=tcp://192.168.88.113:2375 docker compose stop vast-comfy-web`; then destroy any
+  instance in the Vast console.
+
+## Troubleshooting login
+
+`docker logs vast-comfy-web` shows one line per failed login, `login failed: <code>`, plus the
+internal reason when it says more, e.g. `login failed: provider_error (internal: discovery_failed)`.
+The browser only ever sees the coarse code (`/?login_error=<code>`).
+
+- `discovery_failed`: the app could not load `<AUTHENTIK_ISSUER>.well-known/openid-configuration`
+  or the issuer in it differs. Most often `AUTHENTIK_ISSUER` lacks Authentik's trailing slash
+  (`.../application/o/<slug>/`), or the container cannot reach the Authentik public URL.
+- `token_invalid`: the ID token failed verification (wrong signing key type, e.g. HS256 because no
+  certificate is selected; wrong client id; or clock skew, see `WEB_OIDC_SKEW_S`).
+- `access_denied (internal: no_role_group)`: the account has neither role group in its ID token
+  (check "Include claims in id_token" and the groups mapping).
+- `state_mismatch (internal: no_valid_transaction_cookie)`: the login took longer than 10 minutes,
+  was started on another hostname (e.g. the LAN address), or another tab restarted it.
 
 ## Operational notes
 

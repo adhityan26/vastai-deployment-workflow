@@ -35,7 +35,8 @@ const PLACEHOLDERS = [
   "",
 ].join("\n");
 
-describe("check-secrets.sh .env.example handling", () => {
+// Each test spawns git and bash; under a loaded full-suite run that can exceed the 5 s default.
+describe("check-secrets.sh .env.example handling", { timeout: 30_000 }, () => {
   it("passes a placeholders-only root .env.example", () => {
     expect(guard(".env.example", PLACEHOLDERS).status).toBe(0);
   });

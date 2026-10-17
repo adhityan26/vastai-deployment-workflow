@@ -130,10 +130,23 @@ function sameOrigin(headers: FastifyRequest["headers"], publicOrigin: string): b
   return site !== undefined;
 }
 
-/** The access a request needs. /api paths are never public, whatever route matched. */
+/**
+ * True for an /api request, judged by BOTH the raw request path and the matched route pattern:
+ * the router percent-decodes before matching, so `/%61pi/x` matches the route `/api/x` while its
+ * raw path does not start with /api.
+ */
+function isApiRequest(req: FastifyRequest): boolean {
+  return isApiPath(pathOf(req)) || isApiPath(req.routeOptions.url ?? "");
+}
+
+function isAuthRequest(req: FastifyRequest): boolean {
+  return isAuthPath(pathOf(req)) || isAuthPath(req.routeOptions.url ?? "");
+}
+
+/** The access a request needs. /api requests are never public, whatever route matched or tag it has. */
 function accessFor(req: FastifyRequest): Access {
   const declared = req.routeOptions.config?.access;
-  if (isApiPath(pathOf(req))) return declared === "admin" ? "admin" : "member";
+  if (isApiRequest(req)) return declared === "admin" ? "admin" : "member";
   return declared ?? "public";
 }
 
@@ -233,8 +246,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   app.addHook("onSend", async (req, reply, payload) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value);
-    const path = pathOf(req);
-    if (isApiPath(path) || isAuthPath(path)) reply.header("cache-control", "no-store");
+    if (isApiRequest(req) || isAuthRequest(req)) reply.header("cache-control", "no-store");
     else if (!reply.hasHeader("cache-control")) reply.header("cache-control", "no-store");
     if (typeof payload !== "string") return payload;
     // Defense in depth: a configured secret must never leave in a body, whatever produced it.
