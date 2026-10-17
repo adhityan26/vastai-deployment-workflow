@@ -231,3 +231,15 @@ def test_install_nodes_recovers_from_a_broken_checkout(tmp_path):
     install_nodes(node_profile(), tmp_path, git_host="https://git.test", git_bin="git", pip_bin="pip", run=run)
     assert not (dest / "garbage").exists() and sibling.exists()
     assert any("clone" in c for c in run.cmds) and any("checkout" in c for c in run.cmds)
+
+
+def test_the_shipped_image_profile_loads_and_its_workflow_exists():
+    from pathlib import Path
+
+    instance = Path(__file__).resolve().parents[2]
+    profile = load_profile(instance / "profiles" / "image.yaml")
+    assert profile.name == "image" and profile.requires_vram_gb == 24
+    assert [m.dest for m in profile.models] == ["models/diffusion_models/", "models/text_encoders/", "models/vae/"]
+    assert all(len(m.revision) == 40 for m in profile.models) and all(len(n.commit) == 40 for n in profile.nodes)
+    for name in profile.workflows:
+        assert (instance / "workflows" / name).is_file()

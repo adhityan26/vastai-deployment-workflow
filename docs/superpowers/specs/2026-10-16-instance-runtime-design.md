@@ -225,7 +225,7 @@ File `instance/profiles/<nama>.yaml`. Profil adalah **konsep proyek ini**, bukan
 name: image
 requires: { vram_gb: 24, disk_gb: 40 }
 nodes:
-  - repo: city96/ComfyUI-GGUF
+  - repo: leejet/ComfyUI-GGUF
     commit: <hash>
 models:
   - file: <nama file>
