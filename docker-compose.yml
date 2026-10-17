@@ -52,6 +52,12 @@ services:
     # service use the instance 100.x IP.
     # dns:
     #   - 100.100.100.100
+    # Tailnet instances are reached by their bare MagicDNS name (vast-xxxxxxxx). Docker's embedded DNS gives
+    # the container "options ndots:0" and the host's search domain (the tailnet domain); Node on Alpine (musl)
+    # never applies the search domain to a name without dots when ndots is 0, so the lookup fails with
+    # ENOTFOUND. ndots:1 makes it try the search domain first. Verified on 2026-10-18 (T13, real instance).
+    dns_opt:
+      - ndots:1
     healthcheck:
       test:
         - CMD
