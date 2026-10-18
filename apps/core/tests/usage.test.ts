@@ -437,16 +437,78 @@ describe("UsageHistory server location", () => {
     expect(h.list(T0 + 60)[0]).toMatchObject({ instance_id: 900, location: null, down_mbps: null });
   });
 
-  it("drops an entry whose saved location is not plain or too long, or whose speed is bad", () => {
+  it("keeps the server facts beside the sessions: every entry keeps exactly the older file format", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-fmt-")), "usage.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    h.begin("vast-a", T0, "root");
+    h.noteOffer("vast-a", "RTX 3090", 0.2, { location: "Quebec, CA", down_mbps: 860 });
+    const file = JSON.parse(readFileSync(path, "utf8"));
+    expect(Object.keys(file.entries[0]).sort()).toEqual([
+      "dph", "ended_at", "gpu_name", "hostname", "instance_id", "last_agent", "pending_stop", "ready_at", "reason",
+      "started_at", "started_by", "stop_by",
+    ]);
+    expect(file.servers).toEqual({ "vast-a": { location: "Quebec, CA", down_mbps: 860 } });
+  });
+
+  it("drops a bad server record on its own and keeps the session; drops records of sessions no longer kept", () => {
     const path = join(mkdtempSync(join(tmpdir(), "usage-bad-")), "usage.json");
-    const e = (host: string, location: unknown, down: unknown) => ({
+    const e = (host: string) => ({
       hostname: host, instance_id: 900, gpu_name: null, dph: null, started_at: T0, ready_at: null, ended_at: T0 + 1,
-      started_by: null, reason: "gone", stop_by: null, pending_stop: null, last_agent: null, location, down_mbps: down,
+      started_by: null, reason: "gone", stop_by: null, pending_stop: null, last_agent: null,
     });
-    writeFileSync(path, JSON.stringify({ version: 1, entries: [
-      e("vast-ok", "Quebec, CA", 860), e("vast-a", "<b>", 1), e("vast-b", "x".repeat(65), 1), e("vast-c", "Paris", -3),
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [e("vast-ok"), e("vast-a"), e("vast-b"), e("vast-c")], servers: {
+      "vast-ok": { location: "Quebec, CA", down_mbps: 860 },
+      "vast-a": { location: "<b>", down_mbps: 1 },
+      "vast-b": { location: "x".repeat(65), down_mbps: 1 },
+      "vast-c": { location: "Paris", down_mbps: -3 },
+      "vast-gone": { location: "Oslo, NO", down_mbps: 5 },
+    } }));
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(h.list(T0).map((i) => i.location)).toEqual([null, null, null, "Quebec, CA"]);
+    h.begin("vast-new", T0 + 5, null); // persists
+    expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).servers)).toEqual(["vast-ok"]);
+  });
+});
+
+describe("UsageHistory stuck starts (kept next to the sessions, tolerant loader)", () => {
+  const rec = (over: Record<string, unknown> = {}) => ({
+    hostname: "vast-a", code: "start_stuck", at: T0, machine_id: 45608, location: "Quebec, CA", down_mbps: 860, ...over,
+  });
+
+  it("round trips through the file and keeps only the newest ones", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-stuck-")), "usage.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    for (let i = 0; i < 20; i++) h.noteStuck(rec({ hostname: `vast-${i}`, at: T0 + i }) as never);
+    const again = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    const list = again.stuckStarts();
+    expect(list).toHaveLength(16);
+    expect(list.at(-1)).toEqual(rec({ hostname: "vast-19", at: T0 + 19 }));
+    expect(list[0]!.hostname).toBe("vast-4");
+  });
+
+  it("drops a bad stuck record and keeps the good ones and the sessions", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-stuck-bad-")), "usage.json");
+    const session = {
+      hostname: "vast-old", instance_id: 900, gpu_name: null, dph: null, started_at: T0, ready_at: null, ended_at: T0 + 1,
+      started_by: null, reason: "gone", stop_by: null, pending_stop: null, last_agent: null,
+    };
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [session], stuck: [
+      rec(), rec({ code: "other" }), rec({ machine_id: -1 }), rec({ location: "<b>" }), rec({ hostname: "bad host" }), rec({ extra: 1 }), 5,
     ] }));
     const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
-    expect(h.list(T0).map((i) => i.location)).toEqual(["Quebec, CA"]);
+    expect(h.stuckStarts()).toEqual([rec()]);
+    expect(h.list(T0 + 1)).toHaveLength(1);
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [session], stuck: "nope" }));
+    const g = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(g.stuckStarts()).toEqual([]);
+    expect(g.list(T0 + 1)).toHaveLength(1);
+  });
+
+  it("a full file with the most stuck records still fits the file cap", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-stuck-cap-")), "usage.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    const long = "x".repeat(63);
+    for (let i = 0; i < 16; i++) h.noteStuck(rec({ hostname: `${long.slice(0, 60)}${i}`, location: "é".repeat(64) }) as never);
+    expect(statSync(path).size).toBeLessThan(usageFileCap(LIMITS.maxEntries));
   });
 });

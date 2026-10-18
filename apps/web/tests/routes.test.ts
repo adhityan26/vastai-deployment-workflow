@@ -208,6 +208,7 @@ interface Harness {
   app: FastifyInstance;
   vast: FakeVast;
   registry: Registry;
+  lifecycle: Lifecycle;
   dir: string;
   publicDir: string;
   agentSeen: Seen[];
@@ -373,7 +374,7 @@ async function harness(
   opts.extraRoutes?.(app);
   await app.ready();
   return {
-    app, vast, registry, dir, publicDir, clock, sessions, logs, creditReads, galleryStore,
+    app, vast, registry, lifecycle, dir, publicDir, clock, sessions, logs, creditReads, galleryStore,
     agentSeen: agent.seen,
     comfySeen: comfy.seen,
     setAgent: (fn) => (agentHandler = fn),
@@ -601,22 +602,27 @@ describe("GET /api/state", () => {
   it("shows a stuck start as a fixed code and plain message, for admins and members", async () => {
     expect((await call("GET", "/api/state", await member())).json().start_failure).toBeNull();
     h = await harness({ ready: false });
-    await h.registry.begin({ created_at: NOW_S, profile: "image", agent_token: TOKEN, tailnet_hostname: HOST });
-    await h.registry.update(HOST, { status: "booting", vast_instance_id: VAST_ID, start_stuck_at: NOW_S + 300, stuck_machine_id: 45608 });
-    await h.registry.markGone(HOST);
-    for (const who of [await admin(), await member()]) {
+    expect((await post("/api/start", await admin(), { confirm: true })).statusCode).toBe(200);
+    h.setAgent((_s, res) => json(res, 503, { error: "not up" }));
+    Object.assign(h.vast.instances[0]!, { actual_status: "created", intended_status: "stopped", last_started: null, machine_id: 45608 });
+    h.clock.ms += 4 * 60_000;
+    await h.lifecycle.reconcile();
+    h.clock.ms += 60_000;
+    expect((await h.lifecycle.reconcile()).destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
+    const server = { location: null, down_mbps: null, up_mbps: null, reliability: null };
+    for (const [who, expected] of [[await admin(), { ...server, machine_id: 45608 }], [await member(), server]] as const) {
       const res = await call("GET", "/api/state", who);
       expect(res.json().state).toBe("none");
       expect(res.json().start_failure).toEqual({
         code: "start_stuck",
         message: "The rented machine did not start. It was released; try Start again.",
-        server: null,
+        server: expected,
       });
-      expect(res.body).not.toContain("45608");
     }
+    expect((await call("GET", "/api/state", await member())).body).not.toContain("45608");
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     expect(doc.components.schemas.State.required).toContain("start_failure");
-    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck"]);
+    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck", "boot_stopped"]);
   });
 
   it("shows where the server is: location and speeds for everyone, the machine id for admins only", async () => {

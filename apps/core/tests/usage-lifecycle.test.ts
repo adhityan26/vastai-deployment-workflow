@@ -202,6 +202,8 @@ describe("usage history through the lifecycle", () => {
     await h.lc.start(undefined, "root");
     h.agent.status = async () => Promise.reject(new Error("unreachable"));
     Object.assign(h.vast.instances[0]!, { actual_status: "created", intended_status: "stopped", last_started: null });
+    h.clock.t = T0 + 4 * 60;
+    expect((await h.lc.reconcile()).destroyed).toEqual([]);
     h.clock.t = T0 + 5 * 60;
     expect((await h.lc.reconcile()).destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
     expect((await h.lc.history())[0]).toMatchObject({ reason: "boot_failed", active: false, ended_at: T0 + 5 * 60, stop_by: null });

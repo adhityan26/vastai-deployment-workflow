@@ -118,9 +118,11 @@ export interface ServerInfo {
   machine_id: number | null;
 }
 
-const LOCATION_MAX = 64;
+/** Longest location kept or sent (the page checks the same bound). */
+export const LOCATION_MAX = 64;
 const LOCATION_CHARS = /[^\p{L}\p{N} ,.'()-]/gu;
-const MAX_MBPS = 1_000_000;
+/** Largest network speed in Mbps taken as real. */
+export const MAX_MBPS = 1_000_000;
 
 /** Vast's free-text geolocation as a short plain string (letters, digits, spaces, ,.'()-), or null. */
 export function serverLocation(raw: unknown): string | null {
@@ -129,7 +131,8 @@ export function serverLocation(raw: unknown): string | null {
   return text === "" ? null : text;
 }
 
-function mbps(raw: unknown): number | null {
+/** A network speed in whole Mbps within [0, MAX_MBPS], else null. */
+export function mbps(raw: unknown): number | null {
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= MAX_MBPS ? Math.round(raw) : null;
 }
 

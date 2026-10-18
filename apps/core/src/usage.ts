@@ -1,7 +1,7 @@
 import type { AgentStatus } from "./agent.js";
 import type { AppsConfig } from "./config.js";
 import { JsonFileStore, type ConsoleStoreLike } from "./console.js";
-import { serverLocation } from "./vast.js";
+import { MAX_MBPS, mbps, serverLocation } from "./vast.js";
 
 // Usage history: one entry per instance session (Start accepted -> instance gone), persisted next
 // to the registry and bounded. Rules:
@@ -35,6 +35,10 @@ const USER_CHARS = /[^A-Za-z0-9._ -]/g;
 const GPU_CHARS = /[^A-Za-z0-9._ ()+-]/g;
 const ENTRY_BYTES = 4096; // generous upper bound of one serialised entry (6 bytes per escaped char)
 const FILE_SLACK_BYTES = 4096;
+/** Stuck starts kept (newest last); they name bad machines and the page's failure message. */
+export const STUCK_MAX = 16;
+const STUCK_BYTES = 1024; // generous upper bound of one serialised stuck record
+const SERVER_BYTES = 1024; // generous upper bound of one serialised server record (per entry)
 
 // Agent destroy states and reasons (instance/agent/vastcomfy_agent/state.py).
 const DESTROYING_STATES = new Set(["stopping", "destroy_failed"]);
@@ -88,12 +92,50 @@ export interface UsageEntry {
   /** The web's own stop decision, written before it acted; it wins over any inference. */
   pending_stop: { reason: StopReason; by: string | null } | null;
   last_agent: AgentObservation | null;
-  /** Where the server was (Vast geolocation, plain and short) and its download speed in Mbps. */
+}
+
+/** Why a start was released after Start returned: never started, or stopped during the boot. */
+export const STUCK_CODES = ["start_stuck", "boot_stopped"] as const;
+export type StuckCode = (typeof STUCK_CODES)[number];
+
+/**
+ * One start the web released because its container did not run. Kept in the usage file under
+ * the top-level `stuck` key, beside the sessions: an older web ignores that key, so a rollback
+ * never meets an unknown field (the registry file is strict and is not touched).
+ */
+export interface StuckStart {
+  hostname: string;
+  code: StuckCode;
+  at: number;
+  /** Set only when the machine should be avoided (it never started the container). */
+  machine_id: number | null;
   location: string | null;
   down_mbps: number | null;
 }
 
-/** What the history keeps about the server of a session. */
+const STUCK_KEYS = ["hostname", "code", "at", "machine_id", "location", "down_mbps"].sort().join(",");
+
+function validStuck(v: unknown): v is StuckStart {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  if (Object.keys(r).sort().join(",") !== STUCK_KEYS) return false;
+  const machine = r["machine_id"];
+  return (
+    typeof r["hostname"] === "string" && HOSTNAME.test(r["hostname"]) &&
+    (STUCK_CODES as readonly unknown[]).includes(r["code"]) &&
+    typeof r["at"] === "number" && Number.isSafeInteger(r["at"]) &&
+    (machine === null || (typeof machine === "number" && Number.isSafeInteger(machine) && machine > 0)) &&
+    (r["location"] === null || (typeof r["location"] === "string" && serverLocation(r["location"]) === r["location"])) &&
+    (r["down_mbps"] === null || (typeof r["down_mbps"] === "number" && mbps(r["down_mbps"]) === r["down_mbps"]))
+  );
+}
+
+/**
+ * What the history keeps about the server of a session: where it was (Vast geolocation, plain and
+ * short) and its download speed in Mbps. Kept under the top-level `servers` key by hostname, not
+ * in the entry: an older web refuses (and then drops) an entry with unknown keys, but it ignores
+ * an unknown top-level key, so a rollback loses no session.
+ */
 export interface SessionServer {
   location: string | null;
   down_mbps: number | null;
@@ -142,7 +184,7 @@ export function usageLimits(cfg: AppsConfig): UsageLimits {
 
 /** Upper bound of the persisted file for `maxEntries` entries. */
 export function usageFileCap(maxEntries: number): number {
-  return maxEntries * ENTRY_BYTES + FILE_SLACK_BYTES;
+  return maxEntries * (ENTRY_BYTES + SERVER_BYTES) + STUCK_MAX * STUCK_BYTES + FILE_SLACK_BYTES;
 }
 
 /** The usage history file (USAGE_LOG_PATH). */
@@ -229,13 +271,11 @@ export function inferStop(obs: AgentObservation | null, detectedAt: number, slac
 
 // ---- validation of a loaded file (anything unexpected drops that entry) ----
 
-const LEGACY_KEYS = [
+const ENTRY_KEYS = [
   "hostname", "instance_id", "gpu_name", "dph", "started_at", "ready_at", "ended_at",
   "started_by", "reason", "stop_by", "pending_stop", "last_agent",
-];
-// Entries written before the server location existed have exactly the legacy keys.
-const ENTRY_KEY_SETS = new Set([LEGACY_KEYS.sort().join(","), [...LEGACY_KEYS, "location", "down_mbps"].sort().join(",")]);
-const MAX_MBPS = 1_000_000;
+].sort().join(",");
+const SERVER_KEYS = ["down_mbps", "location"].join(",");
 const OBS_KEYS = ["seen_at", "state", "reason", "idle_destroy_at", "failsafe_at", "hard_cap_at", "destroy_pending"].sort().join(",");
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -244,12 +284,13 @@ const intOrNull = (v: unknown): boolean => v === null || isInt(v);
 const nameOrNull = (v: unknown): boolean => v === null || (typeof v === "string" && v.length > 0 && v.length <= LABEL_MAX);
 const isReason = (v: unknown): v is StopReason => typeof v === "string" && (STOP_REASONS as readonly string[]).includes(v);
 const textOrNull = (v: unknown): boolean => v === null || (typeof v === "string" && AGENT_TEXT.test(v));
-const locationOrNull = (v: unknown): boolean => v === undefined || v === null || (typeof v === "string" && serverLocation(v) === v);
-const mbpsOrNull = (v: unknown): boolean => v === undefined || v === null || (isInt(v) && v >= 0 && v <= MAX_MBPS);
+const locationOrNull = (v: unknown): boolean => v === null || (typeof v === "string" && serverLocation(v) === v);
+const mbpsOrNull = (v: unknown): boolean => v === null || (isInt(v) && v >= 0 && v <= MAX_MBPS);
 
-function mbps(raw: unknown): number | null {
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= MAX_MBPS ? Math.round(raw) : null;
+function validServer(v: unknown): v is SessionServer {
+  return isObject(v) && Object.keys(v).sort().join(",") === SERVER_KEYS && locationOrNull(v["location"]) && mbpsOrNull(v["down_mbps"]);
 }
+
 
 function validObservation(v: unknown): boolean {
   if (v === null) return true;
@@ -259,7 +300,7 @@ function validObservation(v: unknown): boolean {
 }
 
 function validEntry(v: unknown): v is UsageEntry {
-  if (!isObject(v) || !ENTRY_KEY_SETS.has(Object.keys(v).sort().join(","))) return false;
+  if (!isObject(v) || Object.keys(v).sort().join(",") !== ENTRY_KEYS) return false;
   const pending = v["pending_stop"];
   const pendingOk =
     pending === null ||
@@ -269,7 +310,7 @@ function validEntry(v: unknown): v is UsageEntry {
     intOrNull(v["instance_id"]) && nameOrNull(v["gpu_name"]) && (v["dph"] === null || price(v["dph"]) !== null) &&
     isInt(v["started_at"]) && intOrNull(v["ready_at"]) && intOrNull(v["ended_at"]) &&
     nameOrNull(v["started_by"]) && (v["reason"] === null || isReason(v["reason"])) && nameOrNull(v["stop_by"]) &&
-    pendingOk && validObservation(v["last_agent"]) && locationOrNull(v["location"]) && mbpsOrNull(v["down_mbps"]) &&
+    pendingOk && validObservation(v["last_agent"]) &&
     // An ended entry has a reason and an open one has none.
     (v["ended_at"] === null) === (v["reason"] === null)
   );
@@ -282,8 +323,6 @@ function cleanNames(e: UsageEntry): UsageEntry {
   e.stop_by = keep(e.stop_by, userLabel);
   e.gpu_name = keep(e.gpu_name, gpuLabel);
   if (e.pending_stop !== null) e.pending_stop.by = keep(e.pending_stop.by, userLabel);
-  e.location ??= null; // a legacy entry has neither field
-  e.down_mbps ??= null;
   return e;
 }
 
@@ -303,6 +342,8 @@ type Log = (level: "info" | "warn" | "error", message: string) => void;
 
 export class UsageHistory {
   private entries: UsageEntry[] | null = null; // oldest first; loaded on first use
+  private stuck: StuckStart[] = []; // oldest first; loaded with the entries
+  private readonly servers = new Map<string, SessionServer>(); // by hostname, for kept entries only
   // The exact last agent sighting per hostname, in this process only. The entry's `last_agent` is
   // the copy last written to the file: it may lag behind, but a deadline in it is never later than
   // the exact one and at most `slackS` earlier (see observe()).
@@ -322,7 +363,12 @@ export class UsageHistory {
     } catch {
       saved = null;
     }
-    const list = isObject(saved) && saved["version"] === FILE_VERSION && Array.isArray(saved["entries"]) ? saved["entries"] : [];
+    const file = isObject(saved) && saved["version"] === FILE_VERSION ? saved : null;
+    const list: unknown[] = file !== null && Array.isArray(file["entries"]) ? file["entries"] : [];
+    // Tolerant: a bad stuck record is dropped on its own; the sessions never depend on them.
+    const stuck: unknown[] = file !== null && Array.isArray(file["stuck"]) ? file["stuck"] : [];
+    this.stuck = stuck.filter(validStuck).map((r) => ({ ...r })).slice(-STUCK_MAX);
+    const servers = file !== null && isObject(file["servers"]) ? file["servers"] : {};
     const valid = list.filter(validEntry).map((e) => cleanNames(structuredClone(e)));
     // At most one open entry survives (the newest); a duplicate hostname keeps its first entry.
     const seen = new Set<string>();
@@ -330,12 +376,23 @@ export class UsageHistory {
     const open = unique.filter((e) => e.ended_at === null);
     const keep = new Set(open.slice(-1));
     this.entries = unique.filter((e) => e.ended_at !== null || keep.has(e)).slice(-this.limits.maxEntries);
+    // Tolerant: a bad server record is dropped on its own; one without a kept session too.
+    for (const e of this.entries) {
+      const server = Object.hasOwn(servers, e.hostname) ? servers[e.hostname] : undefined;
+      if (validServer(server)) this.servers.set(e.hostname, { location: server.location, down_mbps: server.down_mbps });
+    }
     return this.entries;
   }
 
   private persist(): void {
     try {
-      this.store?.save({ version: FILE_VERSION, entries: this.all() });
+      const entries = this.all();
+      const servers: Record<string, SessionServer> = {};
+      for (const e of entries) {
+        const server = this.servers.get(e.hostname);
+        if (server !== undefined) servers[e.hostname] = server;
+      }
+      this.store?.save({ version: FILE_VERSION, entries, servers, stuck: this.stuck });
     } catch {
       // best effort: the history stays in memory
     }
@@ -355,6 +412,7 @@ export class UsageHistory {
     while (list.length > this.limits.maxEntries) {
       const index = list.findIndex((e) => e.ended_at !== null);
       if (index === -1) break;
+      this.servers.delete(list[index]!.hostname);
       list.splice(index, 1);
     }
   }
@@ -366,7 +424,7 @@ export class UsageHistory {
     for (const other of this.openHostnames()) if (other !== hostname) this.finish(other, at);
     this.all().push({
       hostname, instance_id: null, gpu_name: null, dph: null, started_at: at, ready_at: null, ended_at: null,
-      started_by: by, reason: null, stop_by: null, pending_stop: null, last_agent: null, location: null, down_mbps: null,
+      started_by: by, reason: null, stop_by: null, pending_stop: null, last_agent: null,
     });
     this.evict();
     this.persist();
@@ -417,11 +475,11 @@ export class UsageHistory {
   }
 
   private applyServer(e: UsageEntry, server: SessionServer): boolean {
-    const location = serverLocation(server.location) ?? e.location;
-    const down = mbps(server.down_mbps) ?? e.down_mbps;
-    if (location === e.location && down === e.down_mbps) return false;
-    e.location = location;
-    e.down_mbps = down;
+    const old = this.servers.get(e.hostname) ?? { location: null, down_mbps: null };
+    const location = serverLocation(server.location) ?? old.location;
+    const down = mbps(server.down_mbps) ?? old.down_mbps;
+    if (location === old.location && down === old.down_mbps) return false;
+    this.servers.set(e.hostname, { location, down_mbps: down });
     return true;
   }
 
@@ -488,6 +546,27 @@ export class UsageHistory {
     return next.seen_at - saved.seen_at > this.limits.slackS;
   }
 
+  /** A start the web released because its container did not run (see StuckStart). */
+  noteStuck(record: StuckStart): void {
+    this.all();
+    const clean: StuckStart = {
+      ...record,
+      at: Math.floor(record.at),
+      location: serverLocation(record.location),
+      down_mbps: mbps(record.down_mbps),
+    };
+    if (!validStuck(clean)) return;
+    this.stuck.push(clean);
+    this.stuck = this.stuck.slice(-STUCK_MAX);
+    this.persist();
+  }
+
+  /** The stuck starts kept, oldest first. */
+  stuckStarts(): readonly StuckStart[] {
+    this.all();
+    return this.stuck;
+  }
+
   /** The web service is about to stop the instance for `reason`; the first request wins. */
   requestStop(hostname: string, reason: StopReason, by: string | null | undefined = null): void {
     this.patch(hostname, (e) => {
@@ -546,8 +625,8 @@ export class UsageHistory {
         reason: e.reason,
         stop_by: e.stop_by,
         active: e.ended_at === null,
-        location: e.location,
-        down_mbps: e.down_mbps,
+        location: this.servers.get(e.hostname)?.location ?? null,
+        down_mbps: this.servers.get(e.hostname)?.down_mbps ?? null,
       };
     });
   }

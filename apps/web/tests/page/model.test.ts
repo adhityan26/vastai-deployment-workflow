@@ -576,6 +576,7 @@ describe("boot console model", () => {
     expect(endedText("<b>x</b>")).toBe("Instance ended.");
     expect(endedText(null)).toBe("Instance ended.");
     expect(endedText("start_stuck")).toBe("Instance ended: the rented machine did not start.");
+    expect(endedText("boot_stopped")).toBe("Instance ended: the container stopped during the boot.");
   });
 
   it("bootSentence follows the running phase and is null otherwise", () => {

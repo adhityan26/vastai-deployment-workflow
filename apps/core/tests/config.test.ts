@@ -35,6 +35,10 @@ describe("loadConfig", () => {
     expect(cfg["vastBadMachineTtlMin"]).toBe(60);
     expect(() => loadConfig({ ...base, VAST_START_STUCK_MIN: "0" }, schema)).toThrow(/VAST_START_STUCK_MIN: below the minimum 1/);
     expect(() => loadConfig({ ...base, VAST_BAD_MACHINE_TTL_MIN: "0" }, schema)).toThrow(/VAST_BAD_MACHINE_TTL_MIN: below the minimum 1/);
+    expect(() => loadConfig({ ...base, VAST_START_STUCK_MIN: "25", BOOT_TIMEOUT_MIN: "25" }, schema)).toThrow(
+      /VAST_START_STUCK_MIN: must be less than BOOT_TIMEOUT_MIN/,
+    );
+    expect(loadConfig({ ...base, VAST_START_STUCK_MIN: "24", BOOT_TIMEOUT_MIN: "25" }, schema)["vastStartStuckMin"]).toBe(24);
   });
 
   it("rejects a failsafe longer than the hard cap", () => {

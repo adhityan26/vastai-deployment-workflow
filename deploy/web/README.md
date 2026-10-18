@@ -218,14 +218,25 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL` (superseded by the two
   `TS_OAUTH_CLIENT_*` keys), `DISCORD_BOT_TOKEN`.
 - Stuck start: sometimes Vast pulls the image but the host never starts the container (the
-  instance stays `created`/`stopped` while storage is billed). After `VAST_START_STUCK_MIN`
-  (default 5) the reconcile loop releases such an instance (usage reason "Boot failed", console
-  "the rented machine did not start", a `lifecycle: start stuck` warning in the log with the
-  instance and machine ids) and the page says "The rented machine did not start. It was released;
-  try Start again." It does not retry by itself. The next Starts, estimates and the GPU list skip
-  that machine for `VAST_BAD_MACHINE_TTL_MIN` (default 60; kept in the registry, so a restart
-  keeps it). An image that is still loading is not stuck: it only meets `BOOT_TIMEOUT_MIN` (25),
-  and neither is a running container whose agent does not answer yet.
+  instance stays `created` with intended/current state `stopped` and no `last_started`, while
+  storage is billed). The reconcile loop releases a booting instance whose agent does not answer
+  when that state held on two consecutive successful reconciles at least a minute apart and the
+  instance is older than `VAST_START_STUCK_MIN` (default 5; must be below `BOOT_TIMEOUT_MIN`).
+  One Vast sample is never enough, and any other sample (loading, running, an answering agent)
+  starts the count over; after a web restart the count starts over too (that only delays it).
+  Not stuck, so only `BOOT_TIMEOUT_MIN` (25) applies: an image still loading, `created` with a
+  running intent (the normal moment before the start) and a running container whose agent is not
+  up yet.
+  - Never started (`start_stuck`): usage reason "Boot failed", console "the rented machine did not
+    start", a `lifecycle: start stuck` warning with the instance and machine ids, and the page says
+    "The rented machine did not start. It was released; try Start again." The next Starts,
+    estimates and the GPU list skip that machine for `VAST_BAD_MACHINE_TTL_MIN` (default 60).
+  - Started, then exited/stopped during the boot (`boot_stopped`): released the same way, but the
+    page says "The rented machine stopped while it was starting" and the machine is not avoided
+    (the cause may be the boot itself).
+  - It never retries by itself. The stuck starts (and each session's server location) are kept in
+    the usage file (`USAGE_LOG_PATH`) under the top-level keys `stuck` and `servers`, never in the
+    registry: an older web ignores those keys, so rolling back needs no file edits.
 - Where the server is: the status card shows "Server: Quebec, CA, 860 Mbps down" (Vast's
   `geolocation` and `inet_down` of the instance, else of the offer chosen at Start; missing parts
   are left out), the start dialog shows it for each GPU and in the estimate, the stuck-start

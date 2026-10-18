@@ -3,7 +3,7 @@ import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
-import type { StopReason, UsageHistory, UsageItem } from "./usage.js";
+import type { StopReason, StuckCode, StuckStart, UsageHistory, UsageItem } from "./usage.js";
 import {
   ConsoleBuffer,
   logLines,
@@ -53,11 +53,18 @@ const DOWNLOAD_STATE = "downloading";
 const MODELS_PHASE = "models";
 const VAST_LOADING = "loading";
 const VAST_RUNNING = "running";
-// Vast statuses of a container that is not starting: the image is there (or was never needed)
-// but nothing runs. "loading" (image pull) is progress and only meets the boot timeout.
-const VAST_NOT_STARTING = new Set(["created", "exited", "stopped"]);
-const VAST_STOPPED_INTENT = "stopped";
+// Vast statuses of a container that is not running. "loading" (image pull) is progress and only
+// meets the boot timeout; "created" is also the normal moment between the pull and the start, so
+// it counts only together with a stopped intent or state.
+const VAST_CREATED = "created";
+const VAST_HALTED = new Set(["exited", "stopped"]);
+const VAST_STOPPED = "stopped";
 const STATUS_WORD = /^[a-z_]{1,32}$/; // a Vast status fit for a log line
+// A stuck start is released only when it held on this many consecutive successful reconciles,
+// the first and the last at least STUCK_DWELL_S apart: one Vast sample is never enough.
+const STUCK_CONFIRMATIONS = 2;
+const STUCK_DWELL_S = 60;
+const STUCK_MEMORY_MAX = 16; // stuck starts kept in memory (the usage file keeps as many)
 const PERCENT = 100;
 const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
 const HOST_PLACEHOLDER = "[host]";
@@ -67,6 +74,7 @@ const WATCHDOG_STOPS: Readonly<Record<string, { reason: StopReason }>> = {
   hard_cap: { reason: "hard_cap" },
   boot_timeout: { reason: "boot_failed" },
   start_stuck: { reason: "boot_failed" },
+  boot_stopped: { reason: "boot_failed" },
   unreachable: { reason: "agent_unreachable" },
 };
 
@@ -162,7 +170,7 @@ export interface VastLike {
 }
 
 /** Why a start failed after Start returned, as a fixed code (GET /api/state start_failure). */
-export type StartFailureCode = "start_stuck";
+export type StartFailureCode = StuckCode;
 
 export interface LifecycleDeps {
   cfg: AppsConfig;
@@ -350,15 +358,23 @@ function positiveId(raw: unknown): number | null {
 }
 
 /**
- * Vast says the container is not starting: it is not running and not pulling the image, and it is
- * created/exited/stopped, or it is meant to be stopped without ever having started. A running
- * container whose agent does not answer yet is booting, not stuck.
+ * One Vast sample of a booting instance whose container does not run, or null:
+ * - start_stuck: it never started (last_started null) and is exited/stopped, created with a stopped
+ *   intent or state, or meant to be stopped without a status (the live case of 2026-10-19);
+ * - boot_stopped: the same states after the container had started once (the boot stopped).
+ * Running (agent not up yet), loading (image pull) and created with a running intent are not stuck.
  */
-export function startStuck(inst: VastInstance): boolean {
+export function stuckKind(inst: VastInstance): StuckCode | null {
   const actual = inst.actual_status;
-  if (actual === VAST_RUNNING || actual === VAST_LOADING) return false;
-  if (actual !== null && VAST_NOT_STARTING.has(actual)) return true;
-  return inst["intended_status"] === VAST_STOPPED_INTENT && (inst["last_started"] ?? null) === null;
+  if (actual === VAST_RUNNING || actual === VAST_LOADING) return null;
+  const stoppedIntent = inst.intended_status === VAST_STOPPED || inst["cur_state"] === VAST_STOPPED;
+  const neverStarted = (inst["last_started"] ?? null) === null;
+  let stuck: boolean;
+  if (actual === VAST_CREATED) stuck = stoppedIntent;
+  else if (actual !== null && VAST_HALTED.has(actual)) stuck = true;
+  else stuck = inst.intended_status === VAST_STOPPED && neverStarted;
+  if (!stuck) return null;
+  return neverStarted ? "start_stuck" : "boot_stopped";
 }
 
 function message(err: unknown): string {
@@ -431,12 +447,13 @@ export class Lifecycle {
   // Consecutive successful Vast lists that omitted a record's instance, per hostname.
   private readonly vanishMisses = new Map<string, number>();
   // GPU model and machine of the offer the last start chose, until Vast's own row names them.
-  private startedGpu: { hostname: string; gpu_name: string | null; machine_id: number | null; server: ServerInfo } | null = null;
-  // The server of the last stuck start, for the failure message (memory only).
-  private stuckServer: { hostname: string; server: ServerInfo | null } | null = null;
-  // Machines of stuck starts (machine id -> when it was found stuck). The registry keeps the
-  // same facts per record (start_stuck_at, stuck_machine_id) so they survive a restart.
-  private readonly stuckMachines = new Map<number, number>();
+  private startedGpu: { hostname: string; gpu_name: string | null; server: ServerInfo } | null = null;
+  // Stuck starts released by this process; the usage file keeps them too (survives a restart).
+  // The registry file is never given these facts: an older web refuses unknown registry keys.
+  private readonly memoryStuck: StuckStart[] = [];
+  // The current stuck sighting: which instance, since when, how many consecutive reconciles.
+  // In memory only: after a restart it starts over, which only delays a release (the safe side).
+  private stuckSeen: { hostname: string; id: number; since: number; count: number } | null = null;
   // Boot console: the buffer (created on first use), when an admin last called console(), when
   // Vast was last read for it, the outcome of that read and the read in flight (single-flight).
   private consoleBuf: ConsoleBuffer | null = null;
@@ -562,25 +579,22 @@ export class Lifecycle {
     return intCfg(this.cfg, "vastBadMachineTtlMin", "VAST_BAD_MACHINE_TTL_MIN", 1) * SECONDS_PER_MINUTE;
   }
 
-  /**
-   * Machines a Start must not rent: those of a stuck start within VAST_BAD_MACHINE_TTL_MIN, from
-   * memory and from the registry (so a restart keeps them). An unreadable registry leaves memory.
-   */
+  /** The stuck starts known: the usage file's (kept across restarts), else this process's own. */
+  private stuckStarts(): readonly StuckStart[] {
+    try {
+      return this.deps.usage?.stuckStarts() ?? this.memoryStuck;
+    } catch {
+      return this.memoryStuck;
+    }
+  }
+
+  /** Machines a Start must not rent: those of a stuck start within VAST_BAD_MACHINE_TTL_MIN. */
   private async badMachines(): Promise<Set<number>> {
     const ttl = this.badMachineTtl();
     const now = this.now();
     const out = new Set<number>();
-    for (const [machine, at] of this.stuckMachines) {
-      if (now - at < ttl) out.add(machine);
-      else this.stuckMachines.delete(machine);
-    }
-    try {
-      for (const r of await this.deps.registry.all()) {
-        const machine = positiveId(r.stuck_machine_id);
-        if (machine !== null && typeof r.start_stuck_at === "number" && now - r.start_stuck_at < ttl) out.add(machine);
-      }
-    } catch {
-      // the registry cannot be read: memory only
+    for (const r of this.stuckStarts()) {
+      if (r.machine_id !== null && now - r.at < ttl) out.add(r.machine_id);
     }
     return out;
   }
@@ -734,7 +748,6 @@ export class Lifecycle {
     this.startedGpu = {
       hostname,
       gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null,
-      machine_id: offerServer.machine_id,
       server: offerServer,
     };
     this.withUsage((u) => u.noteOffer(hostname, offer.gpu_name, offer.dph_total, offerServer));
@@ -915,15 +928,20 @@ export class Lifecycle {
     // the console update at its end (see feedConsole).
     const consoleEpoch = this.consoleEpoch();
     const record = await this.deps.registry.active();
-    // The newest record (the active one, else the last one written) says whether its start got stuck.
+    // The newest record (the active one, else the last one written): its start may have been
+    // released as stuck. A new Start writes a newer record, which clears the failure.
     const latest = record ?? (await this.deps.registry.all().then((rs) => rs.at(-1) ?? null, () => null));
+    const stuck = latest === null ? undefined : this.stuckStarts().findLast((r) => r.hostname === latest.tailnet_hostname);
     const startFailure: StatusView["start_failure"] =
-      latest?.start_stuck_at != null
-        ? {
-            code: "start_stuck",
-            server: this.stuckServer?.hostname === latest.tailnet_hostname ? this.stuckServer.server : null,
-          }
-        : null;
+      stuck === undefined
+        ? null
+        : {
+            code: stuck.code,
+            server: mergeServer(
+              { ...NO_SERVER, location: stuck.location, down_mbps: stuck.down_mbps, machine_id: stuck.machine_id },
+              NO_SERVER,
+            ),
+          };
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
     try {
@@ -1471,18 +1489,30 @@ export class Lifecycle {
     // than the true start), so a missing start_date never switches the hard cap off.
     const startedAt = inst.start_date > 0 ? inst.start_date : (record.vast_start_date ?? record.created_at);
 
+    // A stuck sighting counts per instance and only on consecutive successful reconciles (a failed
+    // list returned above and changes nothing); any other sample of this instance resets it.
+    const kind = record.status === "booting" && agent === null ? stuckKind(inst) : null;
+    let stuckHeld: StuckCode | null = null;
+    if (kind === null) {
+      if (this.stuckSeen?.hostname === hostname) this.stuckSeen = null;
+    } else {
+      const seen = this.stuckSeen;
+      const next =
+        seen !== null && seen.hostname === hostname && seen.id === id
+          ? { ...seen, count: seen.count + 1 }
+          : { hostname, id, since: now, count: 1 };
+      this.stuckSeen = next;
+      if (next.count >= STUCK_CONFIRMATIONS && now - next.since >= STUCK_DWELL_S && now - record.created_at >= stuckLimit) {
+        stuckHeld = kind;
+      }
+    }
+
     // 5. Enforcement.
     let reason: string | null = null;
     if (record.status === "stopping") reason = "destroy_retry";
     else if (now - startedAt >= hardCap) reason = "hard_cap";
-    else if (
-      record.status === "booting" &&
-      agent === null &&
-      now - record.created_at >= stuckLimit &&
-      startStuck(inst)
-    ) {
-      reason = "start_stuck";
-    } else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
+    else if (stuckHeld !== null) reason = stuckHeld;
+    else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
     else if (
       agent === null &&
       inst.actual_status === "running" &&
@@ -1492,7 +1522,7 @@ export class Lifecycle {
       reason = "unreachable";
     }
     if (reason === null) return report;
-    if (reason === "start_stuck") record = await this.noteStuck(record, inst, now);
+    if (reason === "start_stuck" || reason === "boot_stopped") this.noteStuck(record, inst, now, reason);
     try {
       const result = await this.destroyRecord(record, id, "watchdog", WATCHDOG_STOPS[reason] ?? null);
       this.endConsole(hostname, reason as ConsoleEndReason);
@@ -1509,32 +1539,39 @@ export class Lifecycle {
   }
 
   /**
-   * Remember a stuck start before its instance is released: the machine is avoided for
-   * VAST_BAD_MACHINE_TTL_MIN (memory, and the record so a restart keeps it) and the page learns
-   * why. Called inside reconcile (exclusive): the record is the active one, never a newer Start's.
+   * Remember a released start before its instance is destroyed: the page learns why and, when the
+   * container never started (start_stuck), the machine is avoided for VAST_BAD_MACHINE_TTL_MIN. A
+   * container that started and then stopped (boot_stopped) does not blame the machine. Called
+   * inside reconcile (exclusive): the record is the active one, never a newer Start's.
    */
-  private async noteStuck(record: InstanceRecord, inst: VastInstance, now: number): Promise<InstanceRecord> {
+  private noteStuck(record: InstanceRecord, inst: VastInstance, now: number, code: StuckCode): void {
     const hostname = record.tailnet_hostname;
-    const offerMachine = this.startedGpu?.hostname === hostname ? this.startedGpu.machine_id : null;
-    const machine = positiveId(inst["machine_id"]) ?? offerMachine;
-    if (machine !== null) this.stuckMachines.set(machine, now);
     const offerServer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
-    this.stuckServer = { hostname, server: mergeServer(serverInfo(inst), offerServer) };
+    const server = mergeServer(serverInfo(inst), offerServer) ?? NO_SERVER;
+    const avoid = code === "start_stuck" ? server.machine_id : null;
+    const entry: StuckStart = {
+      hostname,
+      code,
+      at: now,
+      machine_id: avoid,
+      location: server.location,
+      down_mbps: server.down_mbps,
+    };
+    this.memoryStuck.push(entry);
+    this.memoryStuck.splice(0, Math.max(0, this.memoryStuck.length - STUCK_MEMORY_MAX));
+    this.withUsage((u) => u.noteStuck(entry));
     const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
-    const ttlMin = Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE);
+    const machine = server.machine_id ?? "unknown";
+    const text =
+      code === "start_stuck"
+        ? `lifecycle: start stuck: instance ${inst.id} on machine ${machine} did not start (actual_status=${status}); ` +
+          `releasing it and avoiding the machine for ${Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE)} min`
+        : `lifecycle: boot stopped: instance ${inst.id} on machine ${machine} stopped during the boot ` +
+          `(actual_status=${status}); releasing it`;
     try {
-      this.deps.log?.(
-        "warn",
-        `lifecycle: start stuck: instance ${inst.id} on machine ${machine ?? "unknown"} did not start ` +
-          `(actual_status=${status}); releasing it and avoiding the machine for ${ttlMin} min`,
-      );
+      this.deps.log?.("warn", text);
     } catch {
       // logging never stops the release
-    }
-    try {
-      return await this.deps.registry.update(hostname, { start_stuck_at: now, stuck_machine_id: machine });
-    } catch {
-      return record; // memory still avoids the machine; the release goes on
     }
   }
 }

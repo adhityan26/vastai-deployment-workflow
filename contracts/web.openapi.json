@@ -402,7 +402,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Where the released server was, when known (since the web started)"
+                "description": "Where the released server was, when known (location, download speed; machine_id for admins)"
               }
             }
           },
@@ -924,6 +924,7 @@
                   "hard_cap",
                   "boot_timeout",
                   "start_stuck",
+                  "boot_stopped",
                   "unreachable",
                   "destroy_retry",
                   "destroy_requested",
@@ -1109,9 +1110,10 @@
       },
       "StartFailureCode": {
         "enum": [
-          "start_stuck"
+          "start_stuck",
+          "boot_stopped"
         ],
-        "description": "Fixed code of a start that failed after POST /api/start returned. start_stuck: Vast had the instance but its container never started within VAST_START_STUCK_MIN (actual_status created, exited or stopped, or meant to be stopped without ever having started; an image still loading is not stuck); the web released it (usage reason boot_failed) and the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN."
+        "description": "Fixed code of a start that failed after POST /api/start returned. The container of a booting instance did not run on two consecutive reconciles at least a minute apart, once the instance was older than VAST_START_STUCK_MIN (an image still loading, a running container whose agent is not up yet and 'created' with a running intent are never stuck). start_stuck: it never started (last_started null; exited/stopped, created with a stopped intent or state, or a stopped intent without status); the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN. boot_stopped: it had started and then stopped during the boot; the machine is not avoided. Either way the web released it (usage reason boot_failed)."
       },
       "ServerInfo": {
         "type": "object",

@@ -13,9 +13,7 @@
     "agent_token": {"type": "string", "minLength": 16},
     "tailnet_hostname": {"type": "string"},
     "status": {"enum": ["creating", "booting", "ready", "stopping", "gone", "anomaly"]},
-    "unreachable_since": {"type": ["integer", "null"]},
-    "start_stuck_at": {"type": ["integer", "null"], "description": "epoch UTC seconds when the web found the start stuck (the container never started) and released the instance"},
-    "stuck_machine_id": {"type": ["integer", "null"], "description": "Vast machine id of that stuck start; the next Starts avoid it for VAST_BAD_MACHINE_TTL_MIN"}
+    "unreachable_since": {"type": ["integer", "null"]}
   },
   "if": {"properties": {"status": {"enum": ["booting", "ready", "stopping", "anomaly"]}}},
   "then": {"properties": {"vast_instance_id": {"type": "integer"}}}

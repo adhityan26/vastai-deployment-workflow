@@ -81,6 +81,7 @@ const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
 // Plain text per fixed code of a start that failed after Start returned (GET /api/state start_failure).
 const START_FAILURE_MESSAGES: Record<StartFailureCode, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
+  boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
 };
 
 /** An error's class name for a log line, or a fixed word when it is not a plain identifier. */

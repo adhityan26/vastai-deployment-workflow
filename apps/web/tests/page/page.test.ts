@@ -505,6 +505,13 @@ describe("failures", () => {
     expect(box.textContent).toContain("The rented machine did not start. It was released; try Start again.");
   });
 
+  it("a container that stopped during the boot is not called a machine that did not start", async () => {
+    await mount({ state: "none", start_failure: { code: "boot_stopped", message: "m" } });
+    const text = q("#alert-start-failure")!.textContent!;
+    expect(text).toContain("The rented machine stopped while it was starting. It was released; try Start again.");
+    expect(text).not.toContain("did not start");
+  });
+
   it("names the released server in the stuck message when known", async () => {
     await mount({ state: "none", start_failure: { code: "start_stuck", message: "m", server: { location: "Quebec, CA", down_mbps: 12 } } });
     expect(q("#alert-start-failure")!.textContent).toContain("Server: Quebec, CA, 12 Mbps down.");

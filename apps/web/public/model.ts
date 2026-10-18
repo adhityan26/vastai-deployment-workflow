@@ -129,7 +129,7 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 /** What the page shows about a server: its location (plain text) and download speed. */
 export interface ServerView { location: string | null; down_mbps: number | null }
 
-const MAX_LOCATION = 64; // the API sends at most 64 characters
+const MAX_LOCATION = 64; // the API sends at most 64 characters (LOCATION_MAX in apps/core/src/vast.ts)
 
 /** A location the API may send, else null (shown with textContent only). */
 function locationOf(v: unknown): string | null {
@@ -936,6 +936,7 @@ const END_REASON_TEXT: Record<string, string> = {
   hard_cap: "reached the hard cap",
   boot_timeout: "the boot took too long",
   start_stuck: "the rented machine did not start",
+  boot_stopped: "the container stopped during the boot",
   unreachable: "the agent stayed unreachable",
   destroy_retry: "destroyed after a retry",
   destroy_requested: "destroy requested",
@@ -947,6 +948,7 @@ const END_REASON_TEXT: Record<string, string> = {
 // Page text per start failure code; an unknown code shows the server's message.
 const START_FAILURE_TEXT: Record<string, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
+  boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
 };
 
 export function startFailureText(f: { code: string; message: string }): string {
