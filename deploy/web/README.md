@@ -185,12 +185,23 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
 Members can switch the Generate card to "Edit images", attach up to `EDIT_MAX_REFERENCES` PNG/JPEG/WebP
 files and describe the change. The files travel as base64 in the JSON body of `POST /api/edit`, are
 validated on the server (magic bytes, `EDIT_REFERENCE_MAX_BYTES`, `EDIT_REFERENCE_MAX_PIXELS`,
-`EDIT_REFERENCE_TYPES`), uploaded to the instance's ComfyUI under random names and are not stored by the
+`EDIT_REFERENCE_MAX_SIDE`, `EDIT_REFERENCE_TYPES`; animated PNG/WebP and multi-frame JPEG/MPO files are
+refused because ComfyUI would decode every frame), uploaded to the instance's ComfyUI under random names and are not stored by the
 web service. The route has its own request body limit derived from those values, so
 `WEB_BODY_LIMIT_BYTES` can stay small. A reverse proxy or the Cloudflare tunnel must allow a request body
 of that size (about `EDIT_MAX_REFERENCES` x `EDIT_REFERENCE_MAX_BYTES` x 1.34, about 45 MB with the defaults;
 Cloudflare's free plan allows 100 MB). The profile's `edit` section turns the feature on; without it the
 page shows only Generate.
+
+Limits to keep in mind:
+
+- Upload bandwidth: a full request (4 x 8 MiB with the defaults, about 45 MB as base64) must arrive
+  within `WEB_REQUEST_TIMEOUT_S` (default 30 s), which needs roughly 12 Mbit/s of upload from the
+  browser. Raise the timeout or lower `EDIT_REFERENCE_MAX_BYTES` for slower links.
+- The Cloudflare request body limit has not been verified against a real edit request yet; test a
+  4-reference request through the tunnel before relying on the defaults.
+- Reference images stay in ComfyUI's `input/` directory on the instance until the instance is
+  destroyed; the web service does not delete them after the job.
 
 ## Vast credit (admin)
 

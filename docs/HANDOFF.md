@@ -28,6 +28,11 @@ body instead of multipart, on purpose). Summary of what exists now:
 - Page: Generate/Edit switch, reference picker with previews, base64 via FileReader.
 - Not verified live: a real edit through the web stack (owner to run: start an instance, edit with 2
   references), the Cloudflare request body size, quality at 10 steps, `resolution` values other than 1024.
+- Edit limits: a 4 x 8 MiB request needs about 12 Mbit/s of upload to arrive within
+  `WEB_REQUEST_TIMEOUT_S` (30 s default); Cloudflare body size limits are unverified; references stay in
+  ComfyUI `input/` until the instance is destroyed. Animated/multi-frame references (APNG, animated WebP,
+  MPO, JPEG with two frame headers) are refused (`reference_animated`), and `EDIT_REFERENCE_MAX_SIDE`
+  (default 8192) bounds width and height (`reference_side_too_long`).
 - Ideas left out: client-side downscaling of big photos, prompt enhancer, saving results.
 
 ## Other pending work, in order
