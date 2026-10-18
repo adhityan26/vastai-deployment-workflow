@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AppsConfig } from "./config.js";
+import { ConfigError, type AppsConfig } from "./config.js";
 import type { ObjectStore } from "./object-store.js";
 import { inspectImage, type ReferenceType } from "./references.js";
 
@@ -83,11 +83,11 @@ const LIST_PAGE = 1000;
 
 function positive(cfg: AppsConfig, key: string, env: string): number {
   const v = cfg[key];
-  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) throw new Error(`${env} must be a positive integer`);
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) throw new ConfigError([`${env} must be a positive integer`]);
   return v;
 }
 
-/** The gallery limits from the configuration; throws a plain Error naming the key when one is unusable. */
+/** The gallery limits from the configuration; throws a ConfigError naming the key (never a value) when one is unusable. */
 export function galleryLimits(cfg: AppsConfig): GalleryLimits {
   return {
     maxImages: positive(cfg, "galleryMaxImagesPerUser", "GALLERY_MAX_IMAGES_PER_USER"),

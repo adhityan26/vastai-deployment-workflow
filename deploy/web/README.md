@@ -333,6 +333,8 @@ checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2
   folder order, a hash of the login) are left out of the view, never the oldest images of one member.
 - **What is stored:** the image with its own content type, plus prompt, settings label, owner name and kind
   as (URL-encoded, trimmed) object metadata. There is no database; deleting in the page deletes the object.
+  An admin may save any member's finished job (admins can read every job): the image, with that member's
+  prompt and settings, then lands in the admin's own gallery, under the admin's name.
 - **Abuse limits:** `GALLERY_SAVE_RATE_LIMIT_PER_HOUR` (120) saves per member per hour (`rate_limited`).
   One member's saves run one after the other (the quota check and the write cannot interleave), so a burst
   of saves never passes the quota; this holds for one web process, which is the only writer of the bucket.

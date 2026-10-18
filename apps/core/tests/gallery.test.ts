@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AppsConfig } from "../src/config.js";
+import { ConfigError, type AppsConfig } from "../src/config.js";
 import { Gallery, GalleryError, Semaphore, galleryLimits, type GalleryLimits, type SaveInput } from "../src/gallery.js";
 import { MemoryObjectStore, ObjectStoreError, type ObjectStore } from "../src/object-store.js";
 
@@ -270,6 +270,8 @@ describe("galleryLimits and ownerKey", () => {
     expect(galleryLimits(cfg())).toEqual({ maxImages: 300, maxBytes: 2_147_483_648, pageSize: 12, adminScanMax: 5000, maxImageBytes: 33_554_432 });
     expect(() => galleryLimits(cfg({ galleryPageSize: 0 }))).toThrow("GALLERY_PAGE_SIZE");
     expect(() => galleryLimits(cfg({ galleryMaxImagesPerUser: "3" }))).toThrow("GALLERY_MAX_IMAGES_PER_USER");
+    // A ConfigError, which the web process logs in full at startup (it names keys, never values).
+    expect(() => galleryLimits(cfg({ galleryPageSize: 0 }))).toThrow(ConfigError);
   });
 
   it("derives a stable 32-hex owner key that does not reveal the subject", () => {

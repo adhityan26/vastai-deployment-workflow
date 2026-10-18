@@ -1612,7 +1612,7 @@
       },
       "post": {
         "operationId": "gallerySave",
-        "summary": "Save one image of one of your finished jobs to the gallery. The server fetches the image from the instance itself; the browser sends no image data. Saving the same image again changes nothing (200, created false).",
+        "summary": "Save one image of one of your finished jobs to the gallery. The server fetches the image from the instance itself; the browser sends no image data. Saving the same image again changes nothing (200, created false). An admin may save any member's finished job: the copy (with that member's prompt and label) goes to the admin's own gallery, under the admin's name.",
         "security": [
           {
             "sessionCookie": []
