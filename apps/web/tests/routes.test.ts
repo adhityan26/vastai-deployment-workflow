@@ -789,7 +789,7 @@ describe("generate", () => {
     const before = snapshot([tmpdir(), h.dir]);
     const poll = await call("GET", "/api/generate/p-1", m);
     expect(poll.statusCode).toBe(200);
-    expect(poll.json()).toEqual({ status: "done", images: [{ index: 0, url: "/api/image/p-1/0" }] });
+    expect(poll.json()).toMatchObject({ status: "done", images: [{ index: 0, url: "/api/image/p-1/0" }] });
     expect(poll.body).not.toContain("ComfyUI_0001");
     const img = await call("GET", "/api/image/p-1/0", m);
     expect(img.statusCode).toBe(200);
@@ -824,6 +824,40 @@ describe("generate", () => {
     await post("/api/generate", m, okGen);
     h.clock.ms += 600_000;
     expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "failed", message: "generation timed out" });
+  });
+
+  it("says how long the image took: ComfyUI's execution time, and logs kind and seconds without the prompt", async () => {
+    const images = [{ filename: "a.png", subfolder: "", type: "output" }];
+    const messages = [["execution_start", { prompt_id: "p-1", timestamp: 1_000_000 }], ["execution_success", { prompt_id: "p-1", timestamp: 1_052_340 }]];
+    h.setComfy((s, res) => {
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-1" });
+      json(res, 200, { "p-1": { outputs: { "10": { images } }, status: { completed: true, status_str: "success", messages } } });
+    });
+    const m = await member();
+    await post("/api/generate", m, { ...okGen, prompt: "secret fox prompt" });
+    h.clock.ms += 90_000; // the server's own clock does not matter when ComfyUI says how long it took
+    const res = (await call("GET", "/api/generate/p-1", m)).json();
+    expect(res).toEqual({ status: "done", images: [{ index: 0, url: "/api/image/p-1/0" }], seconds: 52.3, queued_seconds: null });
+    expect((await call("GET", "/api/generate/p-1", m)).json().seconds).toBe(52.3);
+    expect(h.logs.filter((l) => l.startsWith("info job done"))).toEqual(["info job done: kind=generate seconds=52.3"]);
+    for (const l of h.logs) expect(l).not.toContain("secret fox");
+  });
+
+  it("falls back to the server's submit-to-done time when the history has no timestamps", async () => {
+    h.setComfy(comfyDone([{ filename: "a.png", subfolder: "", type: "output" }]));
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    h.clock.ms += 41_250;
+    expect((await call("GET", "/api/generate/p-1", m)).json()).toMatchObject({ status: "done", seconds: 41.3, queued_seconds: null });
+  });
+
+  it("documents seconds and queued_seconds on a finished job", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const done = doc.components.schemas.Job.oneOf.find((o: { properties: { status: { const: string } } }) => o.properties.status.const === "done");
+    expect(done.required).toEqual(expect.arrayContaining(["status", "images", "seconds", "queued_seconds"]));
+    expect(done.additionalProperties).toBe(false);
+    expect(done.properties.seconds.type).toBe("number");
+    expect(done.properties.queued_seconds.type).toEqual(["number", "null"]);
   });
 
   it("maps an unreachable ComfyUI during a poll to 502 without internals", async () => {
@@ -996,6 +1030,20 @@ describe("gallery", () => {
     expect(again.statusCode).toBe(200);
     expect(again.json().created).toBe(false);
     expect(h.galleryStore.keys()).toHaveLength(1);
+  });
+
+  it("stores how long the image took and lists it; the documented item has seconds", async () => {
+    const m = await member();
+    const job = await finishedJob(m);
+    expect((await save(m, job)).statusCode).toBe(201);
+    const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
+    expect(head!.metadata["seconds"]).toMatch(/^[0-9]+(\.[0-9])?$/);
+    const item = (await call("GET", "/api/gallery", m)).json().items[0];
+    expect(item.seconds).toBe(Number(head!.metadata["seconds"]));
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const schema = doc.paths["/api/gallery"].get.responses["200"].content["application/json"].schema.properties.items.items;
+    expect(schema.required).toContain("seconds");
+    expect(schema.properties.seconds.type).toEqual(["number", "null"]);
   });
 
   it("an edit job is saved with kind edit and its label", async () => {
@@ -1174,6 +1222,7 @@ describe("gallery", () => {
         owner_name: expect.any(String),
         mine: true,
         size: expect.any(Number),
+        seconds: expect.any(Number),
       });
       expect(p1.body).not.toMatch(/"key"|vast-gallery|u\/[0-9a-f]{32}\//);
       expect(body.next).toBe(body.items[1].id);
@@ -1407,7 +1456,7 @@ describe("edit with reference images", () => {
 
     // The edit job is polled against the edit workflow (SaveImage is node 9, not the generate template's 10).
     const poll = await call("GET", "/api/generate/p-edit", m);
-    expect(poll.json()).toEqual({ status: "done", images: [{ index: 0, url: "/api/image/p-edit/0" }] });
+    expect(poll.json()).toMatchObject({ status: "done", images: [{ index: 0, url: "/api/image/p-edit/0" }] });
     const img = await call("GET", "/api/image/p-edit/0", m);
     expect(img.statusCode).toBe(200);
     expect(img.rawPayload.equals(PNG)).toBe(true);

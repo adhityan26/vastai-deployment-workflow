@@ -51,6 +51,8 @@ export interface SaveInput {
   kind: GalleryKind;
   prompt: string;
   label: string;
+  /** How long the image took in seconds; optional (absent or null stores nothing). */
+  seconds?: number | null;
 }
 
 export interface GalleryItem {
@@ -64,6 +66,8 @@ export interface GalleryItem {
   ownerName: string;
   /** True when the viewer owns it. */
   mine: boolean;
+  /** How long the image took, or null (older images, or a value that is not a plain bounded number). */
+  seconds: number | null;
 }
 
 // Protocol constants of the key scheme.
@@ -80,6 +84,22 @@ const PROMPT_BUDGET = 900;
 const LABEL_BUDGET = 200;
 const NAME_BUDGET = 200;
 const LIST_PAGE = 1000;
+// `seconds` metadata: a plain decimal with at most one fraction digit, bounded to a day.
+const SECONDS_TEXT = /^[0-9]{1,5}(\.[0-9])?$/;
+const SECONDS_MAX = 86_400;
+
+/** The stored text for a duration, or null when it is not a plausible number of seconds. */
+function secondsText(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > SECONDS_MAX) return null;
+  return String(Math.round(value * 10) / 10);
+}
+
+/** A stored duration back as a number; anything else (missing, tampered) is null. */
+function parseSeconds(text: string | undefined): number | null {
+  if (text === undefined || !SECONDS_TEXT.test(text)) return null;
+  const value = Number(text);
+  return value <= SECONDS_MAX ? value : null;
+}
 
 function positive(cfg: AppsConfig, key: string, env: string): number {
   const v = cfg[key];
@@ -238,11 +258,13 @@ export class Gallery {
       after = page.entries[page.entries.length - 1]!.key;
     }
 
+    const seconds = secondsText(input.seconds);
     await this.store.put(parsed.key, input.bytes, input.contentType, {
       kind: input.kind,
       prompt: fitEncoded(input.prompt, PROMPT_BUDGET),
       label: fitEncoded(input.label, LABEL_BUDGET),
       "owner-name": fitEncoded(input.ownerName, NAME_BUDGET),
+      ...(seconds === null ? {} : { seconds }),
     });
     return { id: idOf(parsed), created: true };
   }
@@ -285,6 +307,7 @@ export class Gallery {
           label: decoded(head.metadata["label"]),
           ownerName: decoded(head.metadata["owner-name"]),
           mine: p.owner === mine,
+          seconds: parseSeconds(head.metadata["seconds"]),
         };
       }),
     );

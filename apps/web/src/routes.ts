@@ -26,6 +26,7 @@ import {
   labelHostname,
   pollResult,
   referenceLimits,
+  tenthsOfSeconds,
   userLabel,
   type AppsConfig,
   type CostEstimate,
@@ -768,7 +769,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       } else {
         try {
           const result = await pollResult(generateDeps(job.hostname, job.kind), job.id);
-          if (result !== null) job.state = { kind: "done", images: result.images };
+          if (result !== null) {
+            // ComfyUI's own execution time; without it, the time this server saw from submit to done.
+            const seconds = result.executionSeconds ?? tenthsOfSeconds(Math.max(0, now() - job.createdAt));
+            job.state = { kind: "done", images: result.images, seconds, queuedSeconds: null };
+            log("info", `job done: kind=${job.kind} seconds=${seconds}`);
+          }
         } catch (err) {
           if (err instanceof GenerateFailed) {
             job.state = { kind: "failed", message: scrubber(deps, [job.hostname])(err.message) };
@@ -790,6 +796,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return {
         status: "done",
         images: state.images.map((_img, index) => ({ index, url: `/api/image/${encodeURIComponent(job.id)}/${index}` })),
+        seconds: state.seconds,
+        queued_seconds: state.queuedSeconds,
       };
     }
     if (state.kind === "failed") return { status: "failed", message: state.message };
@@ -906,6 +914,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         kind: loaded.job.kind,
         prompt: loaded.job.prompt,
         label: loaded.job.label,
+        seconds: loaded.job.state.kind === "done" ? loaded.job.state.seconds : null,
       });
       return reply.code(saved.created ? 201 : 200).send(saved);
     } catch (err) {
@@ -929,6 +938,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           owner_name: i.ownerName,
           mine: i.mine,
           size: i.size,
+          seconds: i.seconds,
         })),
         next: page.next,
       };

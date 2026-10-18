@@ -31,7 +31,14 @@ export class RateLimiter {
 
 export type JobState =
   | { kind: "pending" }
-  | { kind: "done"; images: ResultImage[] }
+  | {
+      kind: "done";
+      images: ResultImage[];
+      /** How long the image took: ComfyUI's execution time, else the server's submit-to-done time. */
+      seconds: number;
+      /** Seconds the job waited before ComfyUI started it, when known (from the progress socket). */
+      queuedSeconds: number | null;
+    }
   | { kind: "failed"; message: string };
 
 /** Which workflow a job ran: its SaveImage node is looked up in that template when polling. */

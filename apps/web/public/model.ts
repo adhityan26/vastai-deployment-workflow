@@ -742,6 +742,32 @@ export function upscaleLabel(scale: string): string {
   return `Upscale: ${scale}`;
 }
 
+// ---- how long a job took ----
+
+export type JobKind = "generate" | "edit" | "upscale";
+const DURATION_VERB: Record<JobKind, string> = { generate: "Generated", edit: "Edited", upscale: "Upscaled" };
+const SECONDS_MAX_SHOWN = 86_400;
+const SECONDS_PER_MINUTE = 60;
+const ONE_DECIMAL_BELOW_S = 10;
+
+/** A server-sent duration in seconds, or null for anything that is not a plausible number. */
+export function parseSeconds(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= SECONDS_MAX_SHOWN ? v : null;
+}
+
+/** "4.2 s", "52 s", "2 min 5 s". */
+export function formatSeconds(seconds: number): string {
+  if (seconds < ONE_DECIMAL_BELOW_S) return `${(Math.round(seconds * 10) / 10).toFixed(1)} s`;
+  const whole = Math.round(seconds);
+  if (whole < SECONDS_PER_MINUTE * 2) return `${whole} s`;
+  return `${Math.floor(whole / SECONDS_PER_MINUTE)} min ${whole % SECONDS_PER_MINUTE} s`;
+}
+
+/** "Generated in 52 s" (the verb follows the kind of job); null when the duration is unknown. */
+export function durationText(kind: JobKind, seconds: number | null): string | null {
+  return seconds === null ? null : `${DURATION_VERB[kind]} in ${formatSeconds(seconds)}`;
+}
+
 export function characterCount(text: string): string {
   return `${text.length} character${text.length === 1 ? "" : "s"}`;
 }
@@ -1086,6 +1112,8 @@ export interface GalleryEntry {
   ownerName: string;
   mine: boolean;
   size: number;
+  /** How long the image took; null for older images. */
+  seconds: number | null;
 }
 
 export function isGalleryId(v: unknown): v is string {
@@ -1124,6 +1152,7 @@ export function parseGalleryPage(json: unknown): { items: GalleryEntry[]; next: 
       ownerName: typeof raw["owner_name"] === "string" ? raw["owner_name"] : "",
       mine: raw["mine"] === true,
       size,
+      seconds: parseSeconds(raw["seconds"]),
     });
   }
   return { items, next: isGalleryId(json["next"]) ? json["next"] : null };

@@ -6,7 +6,7 @@ import type { AppsConfig } from "../src/config.js";
 import { ComfyClient, Unreachable } from "../src/comfy.js";
 import { GenerateInputError, type Profile } from "../src/profile.js";
 import { parseStyles } from "../src/styles.js";
-import { awaitResult, generate, GenerateFailed, GenerateTimeout, pollResult, type GenerateDeps } from "../src/generate.js";
+import { awaitResult, executionSeconds, generate, GenerateFailed, GenerateTimeout, pollResult, type GenerateDeps } from "../src/generate.js";
 
 const template = JSON.parse(readFileSync(new URL("../../../instance/workflows/qwen-image-t2i.json", import.meta.url), "utf8"));
 const profile: Profile = {
@@ -145,7 +145,7 @@ describe("awaitResult", () => {
         },
       });
     });
-    expect(await awaitResult(deps, "p1")).toEqual({ images: [{ filename: "a.png", subfolder: "", type: "output" }] });
+    expect(await awaitResult(deps, "p1")).toEqual({ images: [{ filename: "a.png", subfolder: "", type: "output" }], executionSeconds: null });
     expect(sleeps).toEqual([2000, 2000]);
   });
 
@@ -196,7 +196,7 @@ describe("pollResult", () => {
     expect(await pollResult(deps, "p1")).toBeNull();
     expect(seen).toHaveLength(1);
     done = true;
-    expect(await pollResult(deps, "p1")).toEqual({ images: [{ filename: "a.png", subfolder: "", type: "output" }] });
+    expect(await pollResult(deps, "p1")).toEqual({ images: [{ filename: "a.png", subfolder: "", type: "output" }], executionSeconds: null });
     expect(seen).toHaveLength(2);
     expect(sleeps).toEqual([]);
   });
@@ -207,5 +207,40 @@ describe("pollResult", () => {
     expect(await pollResult(deps, "p1")).toBeNull();
     entry = { p1: { outputs: {}, status: { status_str: "error", messages: [] } } };
     await expect(pollResult(deps, "p1")).rejects.toThrow(new GenerateFailed("generation failed"));
+  });
+});
+
+describe("executionSeconds", () => {
+  const msg = (event: string, timestamp: unknown) => [event, { prompt_id: "p1", timestamp }];
+
+  it("is the time between execution_start and execution_success, one decimal", () => {
+    expect(executionSeconds({ messages: [msg("execution_start", 1_000_000), msg("execution_cached", 1_000_010), msg("execution_success", 1_052_345)] })).toBe(52.3);
+  });
+
+  it("is short but known when every node was cached", () => {
+    expect(executionSeconds({ messages: [msg("execution_start", 5_000), msg("execution_cached", 5_001), msg("execution_success", 5_040)] })).toBe(0);
+  });
+
+  it("is null when a message or its timestamp is missing, malformed or implausible", () => {
+    expect(executionSeconds(undefined)).toBeNull();
+    expect(executionSeconds({ messages: "x" })).toBeNull();
+    expect(executionSeconds({ messages: [msg("execution_start", 1_000)] })).toBeNull();
+    expect(executionSeconds({ messages: [msg("execution_success", 1_000)] })).toBeNull();
+    expect(executionSeconds({ messages: [msg("execution_start", "1000"), msg("execution_success", 2_000)] })).toBeNull();
+    expect(executionSeconds({ messages: [msg("execution_start", 9_000), msg("execution_success", 2_000)] })).toBeNull();
+    expect(executionSeconds({ messages: [msg("execution_start", 0), msg("execution_success", 90_000_000)] })).toBeNull();
+    expect(executionSeconds({ messages: [null, ["execution_start"], ["execution_start", null], msg("execution_start", 1_000), msg("execution_success", 3_000)] })).toBe(2);
+  });
+
+  it("is what pollResult reports for a finished prompt", async () => {
+    const { deps } = await fake((_s, res) =>
+      json(res, 200, {
+        p1: {
+          outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } },
+          status: { completed: true, status_str: "success", messages: [msg("execution_start", 10_000), msg("execution_success", 22_500)] },
+        },
+      }),
+    );
+    expect((await pollResult(deps, "p1"))?.executionSeconds).toBe(12.5);
   });
 });

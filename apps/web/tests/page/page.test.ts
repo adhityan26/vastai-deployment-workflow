@@ -1028,6 +1028,29 @@ describe("gallery: save, auto-save and the gallery card", () => {
   }
   const saveButtons = () => [...document.querySelectorAll<HTMLButtonElement>("#history button.save")];
 
+  it("says how long a result took, with the verb of its kind", async () => {
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "job-1" } },
+      "GET /api/generate/job-1": { body: { status: "done", images: [{ index: 0, url: "/api/image/job-1/0" }], seconds: 52.3, queued_seconds: null } },
+    });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a red fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#history .job-time")!.textContent).toBe("Generated in 52 s");
+  });
+
+  it("shows no duration when the server sends none or a nonsense value", async () => {
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "job-1" } },
+      "GET /api/generate/job-1": { body: { status: "done", images: [{ index: 0, url: "/api/image/job-1/0" }], seconds: "52" } },
+    });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a red fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#history .job-time")).toBeNull();
+    expect(q("#history img")).not.toBeNull();
+  });
+
   it("offers nothing when the server has no gallery", async () => {
     await mount({ gallery: false }, { "POST /api/generate": { status: 202, body: { id: "job-1" } }, "GET /api/generate/job-1": { body: { status: "done", images: [{ index: 0, url: "/x" }] } } });
     q<HTMLTextAreaElement>("#prompt")!.value = "x";
@@ -1123,6 +1146,18 @@ describe("gallery: save, auto-save and the gallery card", () => {
       await flush();
       expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
       expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    });
+
+    it("puts how long a saved image took into its caption; older images have none", async () => {
+      await mount({ gallery: true }, {
+        "GET /api/gallery": { body: { items: [item(1, { kind: "edit", seconds: 4.25 }), item(2, { seconds: null }), item(3, { kind: "upscale", seconds: 130 })], next: null } },
+      });
+      q("#gal-open")!.click();
+      await flush();
+      const captions = [...document.querySelectorAll("#gal-list .gal-caption")].map((c) => c.textContent ?? "");
+      expect(captions[0]).toContain("Edited in 4.3 s");
+      expect(captions[1]).not.toContain(" in ");
+      expect(captions[2]).toContain("Upscaled in 2 min 10 s");
     });
 
     it("shows no continue buttons when the server offers neither edit nor upscale", async () => {

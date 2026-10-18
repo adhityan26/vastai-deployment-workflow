@@ -169,7 +169,9 @@
             "type": "object",
             "required": [
               "status",
-              "images"
+              "images",
+              "seconds",
+              "queued_seconds"
             ],
             "properties": {
               "status": {
@@ -193,8 +195,22 @@
                     }
                   }
                 }
+              },
+              "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long the image took: ComfyUI's execution time (execution_start to execution_success in its history), else the server's own time from submit to done"
+              },
+              "queued_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Seconds the job waited before ComfyUI started it, when the server saw that on the progress socket; null when unknown"
               }
-            }
+            },
+            "additionalProperties": false
           },
           {
             "type": "object",
@@ -1822,7 +1838,8 @@
                           "label",
                           "owner_name",
                           "mine",
-                          "size"
+                          "size",
+                          "seconds"
                         ],
                         "additionalProperties": false,
                         "properties": {
@@ -1860,6 +1877,13 @@
                           },
                           "size": {
                             "type": "integer"
+                          },
+                          "seconds": {
+                            "type": [
+                              "number",
+                              "null"
+                            ],
+                            "description": "How long the image took when it was made; null for images saved before this was recorded"
                           }
                         }
                       }

@@ -48,9 +48,19 @@ export interface ResultImage {
   type: "input" | "output" | "temp";
 }
 
+/** A finished prompt: its images and, when ComfyUI's history says so, how long it executed. */
+export interface JobResult {
+  images: ResultImage[];
+  /** Seconds (one decimal) between execution_start and execution_success; null when unknown. */
+  executionSeconds: number | null;
+}
+
 const MAX_SEED = Number.MAX_SAFE_INTEGER; // 2^53 - 1
 const VIEW_TYPES = ["input", "output", "temp"];
 const MESSAGE_MAX = 300;
+/** Longest execution time taken from a history entry; anything longer (or negative) is a broken clock. */
+const MAX_EXECUTION_MS = 86_400_000;
+const MS_PER_TENTH = 100;
 
 function intKey(cfg: AppsConfig, key: string): number {
   const v = cfg[key];
@@ -224,6 +234,34 @@ function errorMessage(status: Record<string, unknown> | undefined): string {
   return "generation failed";
 }
 
+/** Milliseconds rounded to seconds with one decimal. */
+export function tenthsOfSeconds(ms: number): number {
+  return Math.round(ms / MS_PER_TENTH) / 10;
+}
+
+/**
+ * How long ComfyUI executed the prompt, from the `execution_start` and `execution_success` status
+ * messages of its history entry (each carries a millisecond `timestamp`). A prompt whose nodes were
+ * all cached (`execution_cached`) still has both messages, so it simply reports a short time. Null
+ * when either message or its timestamp is missing or the difference is implausible.
+ */
+export function executionSeconds(status: Record<string, unknown> | undefined): number | null {
+  const messages = status?.["messages"];
+  if (!Array.isArray(messages)) return null;
+  let start: number | null = null;
+  let end: number | null = null;
+  for (const m of messages) {
+    if (!Array.isArray(m) || m.length < 2 || typeof m[1] !== "object" || m[1] === null) continue;
+    const ts = (m[1] as Record<string, unknown>)["timestamp"];
+    if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
+    if (m[0] === "execution_start" && start === null) start = ts;
+    else if (m[0] === "execution_success") end = ts;
+  }
+  if (start === null || end === null) return null;
+  const ms = end - start;
+  return ms < 0 || ms > MAX_EXECUTION_MS ? null : tenthsOfSeconds(ms);
+}
+
 function saveImageNodes(template: unknown): Set<string> {
   const ids = new Set<string>();
   if (typeof template === "object" && template !== null) {
@@ -239,7 +277,7 @@ function saveImageNodes(template: unknown): Set<string> {
  * Throws GenerateFailed when ComfyUI reports an error or produced no images; Unreachable and
  * ComfyError propagate. Never sleeps, so a web request can poll without blocking.
  */
-export async function pollResult(deps: GenerateDeps, promptId: string): Promise<{ images: ResultImage[] } | null> {
+export async function pollResult(deps: GenerateDeps, promptId: string): Promise<JobResult | null> {
   const entry = await deps.comfy.history(promptId);
   if (!entry) return null;
   const status = entry.status as Record<string, unknown> | undefined;
@@ -259,11 +297,11 @@ export async function pollResult(deps: GenerateDeps, promptId: string): Promise<
     }
   }
   if (images.length === 0) throw new GenerateFailed("no images");
-  return { images };
+  return { images, executionSeconds: executionSeconds(status) };
 }
 
 /** Poll history until the prompt finishes; throws GenerateTimeout / GenerateFailed. Unreachable and ComfyError propagate. */
-export async function awaitResult(deps: GenerateDeps, promptId: string): Promise<{ images: ResultImage[] }> {
+export async function awaitResult(deps: GenerateDeps, promptId: string): Promise<JobResult> {
   const pollMs = intKey(deps.cfg, "statusPollS") * 1000;
   const timeoutMs = intKey(deps.cfg, "generateTimeoutS") * 1000;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));

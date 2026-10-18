@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  durationText,
+  formatSeconds,
+  parseSeconds,
   CONSOLE_POLL_MAX_MS,
   CONSOLE_POLL_MS,
   EMPTY_CONSOLE_VIEW,
@@ -622,7 +625,7 @@ describe("gallery helpers", () => {
     const page = parseGalleryPage({ items: [entry({ url: "https://evil.example/x.png" }), entry({ id: "bad" }), entry({ kind: "weird" }), entry({ size: "big" }), 5], next: ID });
     expect(page).not.toBeNull();
     expect(page!.items).toHaveLength(2);
-    expect(page!.items[0]).toEqual({ id: ID, url: `/api/gallery/${ID}/image`, createdAt: 1_800_000_000, kind: "generate", prompt: "a fox", label: "preview, 1:1", ownerName: "Ayu", mine: true, size: 12345 });
+    expect(page!.items[0]).toEqual({ id: ID, url: `/api/gallery/${ID}/image`, createdAt: 1_800_000_000, kind: "generate", prompt: "a fox", label: "preview, 1:1", ownerName: "Ayu", mine: true, size: 12345, seconds: null });
     expect(page!.items[1]!.kind).toBe("generate"); // an unknown kind falls back instead of dropping the image
     expect(parseGalleryPage({ items: [entry({ kind: "upscale" }), entry({ kind: "edit" })], next: null })!.items.map((i) => i.kind)).toEqual(["upscale", "edit"]);
     expect(page!.next).toBe(ID);
@@ -728,5 +731,28 @@ describe("upscale info from the state", () => {
     expect(upscaleAsEdit(up)).toMatchObject({ max_references: 1, max_bytes: 8_388_608, types: ["png", "jpeg"] });
     expect(upscaleHint(up)).toBe("One image (PNG, JPEG), 8.0 MB at most. The result size is limited by the server.");
     expect(upscaleLabel("2x")).toBe("Upscale: 2x");
+  });
+});
+
+describe("job durations", () => {
+  it("formats seconds for people", () => {
+    expect(formatSeconds(0)).toBe("0.0 s");
+    expect(formatSeconds(4.25)).toBe("4.3 s");
+    expect(formatSeconds(9.96)).toBe("10.0 s");
+    expect(formatSeconds(52.3)).toBe("52 s");
+    expect(formatSeconds(119.4)).toBe("119 s");
+    expect(formatSeconds(125)).toBe("2 min 5 s");
+  });
+
+  it("uses the verb of the kind and says nothing when the duration is unknown", () => {
+    expect(durationText("generate", 52.3)).toBe("Generated in 52 s");
+    expect(durationText("edit", 30)).toBe("Edited in 30 s");
+    expect(durationText("upscale", 3)).toBe("Upscaled in 3.0 s");
+    expect(durationText("generate", null)).toBeNull();
+  });
+
+  it("accepts only plausible numbers from the server", () => {
+    expect(parseSeconds(12.5)).toBe(12.5);
+    for (const bad of ["12", -1, Number.NaN, Number.POSITIVE_INFINITY, 1e9, null, undefined, {}]) expect(parseSeconds(bad)).toBeNull();
   });
 });

@@ -59,6 +59,22 @@ describe("save", () => {
     expect(items.map((i) => [i.kind, i.label])).toEqual([["generate", "preview, 1:1"], ["upscale", "Upscale: 2x"], ["edit", "preview, 1:1"]]);
   });
 
+  it("keeps how long the image took as bounded metadata; older or tampered objects read back as null", async () => {
+    const { store, gallery } = make({ pageSize: 10 });
+    await gallery.save(input({ jobId: "t", seconds: 52.34, createdMs: T0 + 1 }));
+    await gallery.save(input({ jobId: "old", createdMs: T0 + 2 })); // saved before durations existed
+    await gallery.save(input({ jobId: "neg", seconds: -1, createdMs: T0 + 3 }));
+    await gallery.save(input({ jobId: "nan", seconds: Number.NaN, createdMs: T0 + 4 }));
+    await gallery.save(input({ jobId: "bad", seconds: 9, createdMs: T0 + 5 }));
+    const keyOf = (job: string) => (store as MemoryObjectStore).keys().find((k) => k.endsWith(`-${job}-0`))!;
+    expect((await store.head(keyOf("t")))!.metadata["seconds"]).toBe("52.3");
+    for (const job of ["old", "neg", "nan"]) expect((await store.head(keyOf(job)))!.metadata).not.toHaveProperty("seconds");
+    const bad = await store.head(keyOf("bad"));
+    await store.put(keyOf("bad"), png(), "image/png", { ...bad!.metadata, seconds: "1e9" });
+    const items = (await gallery.list(AYU, { scope: "mine" })).items;
+    expect(Object.fromEntries(items.map((i) => [i.id.split(".")[2], i.seconds]))).toEqual({ t: 52.3, old: null, neg: null, nan: null, bad: null });
+  });
+
   it("a later image sorts before an earlier one", async () => {
     const { store, gallery } = make();
     await gallery.save(input({ jobId: "old", createdMs: T0 }));

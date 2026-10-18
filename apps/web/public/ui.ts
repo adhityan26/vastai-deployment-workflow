@@ -53,6 +53,9 @@ import {
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
   characterCount,
+  durationText,
+  parseSeconds,
+  type JobKind,
   chooseGpu,
   clockView,
   controls,
@@ -138,8 +141,11 @@ interface Reference {
 
 interface HistoryEntry {
   id: string;
+  kind: JobKind;
   prompt: string;
   label: string;
+  /** How long the job took, once the server said so. */
+  seconds: number | null;
   status: "pending" | "done" | "failed";
   message: string;
   images: string[];
@@ -1147,7 +1153,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${style ? `, ${style.title}` : ""}`);
+      const entry = addEntry(id, "generate", prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${style ? `, ${style.title}` : ""}`);
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1180,7 +1186,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
+      const entry = addEntry(id, "edit", prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1203,7 +1209,7 @@ export function mountApp(doc: Document, env: Env): App {
       const res = await call("POST", API.upscale, { image, scale });
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
-      const entry = addEntry(id, file.name, upscaleLabel(scale));
+      const entry = addEntry(id, "upscale", file.name, upscaleLabel(scale));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1215,8 +1221,8 @@ export function mountApp(doc: Document, env: Env): App {
   // ---- results ----
 
   const historyBox = $("history");
-  function addEntry(id: string, prompt: string, label: string): HistoryEntry {
-    const entry: HistoryEntry = { id, prompt, label, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
+  function addEntry(id: string, kind: JobKind, prompt: string, label: string): HistoryEntry {
+    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
     history.unshift(entry);
     historyBox.prepend(entry.node);
     $("hist-empty").hidden = true;
@@ -1284,6 +1290,8 @@ export function mountApp(doc: Document, env: Env): App {
       kids.push(make("p", `Failed: ${e.message}`, "alert bad"));
       kids[kids.length - 1]!.setAttribute("role", "alert");
     } else {
+      const took = durationText(e.kind, e.seconds);
+      if (took !== null) kids.push(make("p", took, "muted job-time"));
       const grid = make("div", undefined, "grid");
       e.images.forEach((src, i) => {
         const fig = make("figure");
@@ -1402,7 +1410,7 @@ export function mountApp(doc: Document, env: Env): App {
     img.src = item.url;
     img.alt = item.prompt === "" ? "Saved image" : `Saved image: ${item.prompt}`;
     img.loading = "lazy";
-    const caption = [item.label, formatSavedAt(item.createdAt), formatBytes(item.size)];
+    const caption = [item.label, durationText(item.kind, item.seconds) ?? "", formatSavedAt(item.createdAt), formatBytes(item.size)];
     if (everyone && !item.mine && item.ownerName !== "") caption.push(item.ownerName);
     const dl = make("a", "Download", "dl");
     dl.href = item.url;
@@ -1506,6 +1514,7 @@ export function mountApp(doc: Document, env: Env): App {
           e.images.push(url);
           e.indexes.push(idx as number);
         }
+        e.seconds = parseSeconds(r["seconds"]);
         return finishEntry(e, "done");
       }
       if (r["status"] === "failed") {
