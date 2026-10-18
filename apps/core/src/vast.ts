@@ -13,6 +13,13 @@ const GONE_TEXT = /instance\b.*\bnot found/i;
 const VERSIONED_BASE = /\/v\d+\/?$/;
 const MAX_PAGES = 1000;
 const RUNTYPE_SSH_DIRECT = "ssh_direc ssh_proxy"; // ssh + direct, as built by the vastai CLI
+// Container logs (vastai `logs`, SDK api/instances.py): PUT instances/request_logs/{id}/ with
+// {"tail": "<n>"} answers {"result_url": ...}; the SDK then GETs that URL WITHOUT the API key
+// every 0.3 s until it answers 200 (the file is written asynchronously). Same delay here.
+const LOG_RESULT_RETRY_MS = 300;
+/** A log download stops after this many times BOOT_LOG_MAX_BYTES (a body that never ends). */
+const LOG_READ_FACTOR = 4;
+const HTTPS = "https:";
 /** Vast reports and filters gpu_ram in MB; the CLI converts GB with 1000 per GB. */
 export const MB_PER_GB = 1000;
 
@@ -75,6 +82,11 @@ export interface VastInstance {
   actual_status: string | null;
   start_date: number;
   dph_total: number;
+  /**
+   * Vast's free-text status (docker pull progress while actual_status is "loading"). Always set
+   * by listInstances (null when absent); optional so hand-built rows in tests stay valid.
+   */
+  status_msg?: string | null;
   [key: string]: unknown;
 }
 
@@ -115,12 +127,30 @@ interface Reply {
   json: unknown;
 }
 
+export interface VastClientOptions {
+  /** Fetch implementation (tests inject one); defaults to the global fetch. */
+  fetch?: typeof fetch;
+  /** Waits between log-result polls; defaults to a real timer. */
+  sleep?(ms: number): Promise<void>;
+}
+
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class VastClient {
   private readonly key: string;
   private readonly base: string;
   private readonly timeoutMs: number;
+  private readonly fetchImpl: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor(cfg: AppsConfig) {
+  constructor(
+    private readonly cfg: AppsConfig,
+    opts: VastClientOptions = {},
+  ) {
+    this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
+    this.sleep = opts.sleep ?? realSleep;
     this.key = String(cfg["vastApiKey"] ?? "");
     if (this.key === "") throw new VastError("VAST_API_KEY is not configured");
     const url = String(cfg["vastApiUrl"] ?? "");
@@ -150,7 +180,7 @@ export class VastClient {
     let res: Response;
     let text: string;
     try {
-      res = await fetch(url, init);
+      res = await this.fetchImpl(url, init);
       text = await res.text();
     } catch (e) {
       const err = e as Error;
@@ -280,6 +310,7 @@ export class VastClient {
           actual_status: typeof row["actual_status"] === "string" ? row["actual_status"] : null,
           start_date: Number(row["start_date"] ?? 0),
           dph_total: Number(row["dph_total"] ?? 0),
+          status_msg: typeof row["status_msg"] === "string" ? row["status_msg"] : null,
         });
       }
       token = typeof body.next_token === "string" && body.next_token !== "" ? body.next_token : undefined;
@@ -327,5 +358,114 @@ export class VastClient {
       if (obj?.["error"] === true && GONE_TEXT.test(reply.text)) return "gone";
     }
     throw new DestroyError(`destroy instance ${id} failed (HTTP ${reply.status}): ${this.describe(reply)}`);
+  }
+
+  /**
+   * The last `tail` lines of the instance's container log (PID 1 stdout), as text. Keeps at most
+   * the last BOOT_LOG_MAX_BYTES of the log file (whole lines only, see readCapped); waits for the file
+   * at most HTTP_TIMEOUT_S_APPS. The file URL must be https without credentials and is fetched
+   * WITHOUT the Authorization header (it is a pre-signed download, not the Vast API). Every error
+   * is a VastError with fixed text: never the URL (it carries a signature) or the key.
+   * UNVERIFIED against the live API: the request/response shapes come from the vastai SDK source.
+   */
+  async instanceLogs(id: number, tail: number): Promise<string> {
+    if (!Number.isInteger(id) || id <= 0) throw new VastError("instance id must be a positive integer");
+    if (!Number.isInteger(tail) || tail <= 0) throw new VastError("tail must be a positive integer");
+    const maxBytes = positiveNumber("BOOT_LOG_MAX_BYTES", this.cfg["bootLogMaxBytes"]);
+    const reply = await this.send("PUT", this.url(`instances/request_logs/${id}/`), { tail: String(tail) });
+    this.failIfNotOk("request logs", reply);
+    const raw = (reply.json as { result_url?: unknown } | null)?.result_url;
+    if (typeof raw !== "string" || raw === "") throw new VastError("request logs: response has no result_url");
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new VastError("request logs: result_url is not a URL");
+    }
+    if (url.protocol !== HTTPS) throw new VastError("request logs: refusing a log URL that is not https");
+    if (url.username !== "" || url.password !== "") throw new VastError("request logs: refusing a log URL with credentials");
+    return this.downloadLog(url, maxBytes);
+  }
+
+  private async downloadLog(url: URL, maxBytes: number): Promise<string> {
+    const deadline = Date.now() + this.timeoutMs;
+    for (;;) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new VastError("request logs: the log file was not ready in time");
+      const abort = new AbortController();
+      let res: Response;
+      try {
+        // No Authorization header and no cookies: the API key must never go to the file host.
+        res = await this.fetchImpl(url, {
+          method: "GET",
+          headers: { Accept: "text/plain" },
+          redirect: "error",
+          credentials: "omit",
+          signal: AbortSignal.any([AbortSignal.timeout(left), abort.signal]),
+        });
+      } catch (e) {
+        const name = (e as Error).name;
+        if (name === "TimeoutError" || name === "AbortError") {
+          throw new VastError("request logs: the log download timed out");
+        }
+        throw new VastError("request logs: the log download failed");
+      }
+      if (res.status === 200) return this.readCapped(res, maxBytes, abort);
+      await res.body?.cancel().catch(() => undefined);
+      // Not written yet (the SDK polls until 200): wait and ask again, within the deadline.
+      if (deadline - Date.now() <= LOG_RESULT_RETRY_MS) throw new VastError("request logs: the log file was not ready in time");
+      await this.sleep(LOG_RESULT_RETRY_MS);
+    }
+  }
+
+  /**
+   * At most the LAST `maxBytes` of the body (the most recent lines). A longer body loses its
+   * start, then the partial first line; reading stops after LOG_READ_FACTOR x `maxBytes` (a body
+   * that keeps coming), and then the partial last line is dropped too.
+   */
+  private async readCapped(res: Response, maxBytes: number, abort: AbortController): Promise<string> {
+    if (res.body === null) return "";
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let kept = 0;
+    let read = 0;
+    let stopped = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        kept += value.byteLength;
+        read += value.byteLength;
+        // Drop whole chunks that are entirely before the last maxBytes.
+        while (chunks.length > 1 && kept - chunks[0]!.byteLength >= maxBytes) kept -= chunks.shift()!.byteLength;
+        if (read >= maxBytes * LOG_READ_FACTOR) {
+          stopped = true;
+          break;
+        }
+      }
+    } catch {
+      throw new VastError("request logs: the log download failed");
+    }
+    // When reading stopped at LOG_READ_FACTOR, the kept tail is the end of that first 4x window,
+    // not the true end of the body.
+    if (stopped) {
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+    let bytes = Buffer.concat(chunks, kept);
+    const cut = bytes.byteLength > maxBytes || read > kept;
+    if (bytes.byteLength > maxBytes) bytes = bytes.subarray(bytes.byteLength - maxBytes);
+    let text = new TextDecoder("utf-8").decode(bytes);
+    if (cut) {
+      // The first line lost its start (and possibly half a UTF-8 character).
+      const start = text.indexOf("\n");
+      text = start < 0 ? "" : text.slice(start + 1);
+    }
+    if (stopped) {
+      const end = text.lastIndexOf("\n");
+      text = end < 0 ? "" : text.slice(0, end + 1);
+    }
+    return text;
   }
 }

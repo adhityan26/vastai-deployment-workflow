@@ -60,6 +60,7 @@
       <p id="progress-text" class="progress-text" hidden></p>
       <p id="progress-file" class="muted"></p>
     </div>
+    <p id="boot-sentence" class="alert ok" role="status" hidden></p>
     <div id="alert-agent" class="alert warn" role="alert" hidden>
       The instance is running but the agent cannot be reached. It may be starting up or broken.
     </div>
@@ -82,6 +83,21 @@
       <div><dt>Queue</dt><dd id="f-queue">&mdash;</dd></div>
       <div><dt>VRAM</dt><dd id="f-vram">&mdash;</dd></div>
     </dl>
+  </section>
+
+  <section id="console-card" class="card" aria-labelledby="console-title" hidden>
+    <h2 id="console-title">Boot console</h2>
+    <p id="console-ended" class="alert warn" role="status" hidden></p>
+    <ol id="console-steps" class="steps" aria-label="Boot steps"></ol>
+    <p id="console-error" class="muted" role="status" hidden></p>
+    <p id="console-note" class="muted" hidden></p>
+    <div id="console-log" class="console-log" role="log" aria-label="Boot console output" aria-live="off" tabindex="0"></div>
+    <div id="console-actions" class="row console-actions">
+      <button id="console-pause" type="button" aria-pressed="false">Pause</button>
+      <button id="console-copy" type="button">Copy</button>
+      <button id="console-clear" type="button">Clear view</button>
+    </div>
+    <p id="console-status" class="muted" role="status"></p>
   </section>
 
   <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>

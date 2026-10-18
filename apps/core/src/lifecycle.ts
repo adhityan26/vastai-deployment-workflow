@@ -2,6 +2,16 @@ import { camelCase, type AppsConfig } from "./config.js";
 import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
+import { TailscaleError } from "./tailscale.js";
+import {
+  ConsoleBuffer,
+  logLines,
+  type ConsoleEndReason,
+  type ConsoleLimits,
+  type ConsoleLine,
+  type ConsoleStoreLike,
+  type PhaseInfo,
+} from "./console.js";
 import {
   CreateRejected,
   DestroyError,
@@ -38,6 +48,10 @@ const VANISH_CONFIRMATIONS = 2; // consecutive lists without the instance before
 const MB_PER_GIB = 1024; // Vast reports gpu_ram in MiB; shown as whole GiB (24564 -> 24)
 const DOWNLOAD_STATE = "downloading";
 const MODELS_PHASE = "models";
+const VAST_LOADING = "loading";
+const PERCENT = 100;
+const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
+const HOST_PLACEHOLDER = "[host]";
 
 export class NoOffersError extends Error {
   constructor() {
@@ -71,13 +85,15 @@ export class NoActiveInstanceError extends Error {
 
 /**
  * Why a start failed, as a fixed identifier (safe to log and to show; never provider text).
- * ts_key_missing: the Tailscale key file is unreadable or empty; vast_unavailable: the offer
+ * ts_key_missing: the Tailscale key file is unreadable or empty; ts_key_mint_failed: the Tailscale
+ * OAuth client could not mint a key (or OAuth is half-configured); vast_unavailable: the offer
  * search failed; config_invalid: a start setting is missing; vast_rejected: Vast definitely
  * refused the create; create_uncertain: the create may or may not have happened;
  * registry_failed: the instance was created but could not be recorded.
  */
 export type StartFailReason =
   | "ts_key_missing"
+  | "ts_key_mint_failed"
   | "vast_unavailable"
   | "config_invalid"
   | "vast_rejected"
@@ -124,6 +140,8 @@ export interface VastLike {
   createInstance(offerId: number, req: CreateRequest): Promise<{ id: number }>;
   listInstances(): Promise<VastInstance[]>;
   destroyInstance(id: number): Promise<DestroyOutcome>;
+  /** Container log tail (VastClient.instanceLogs); without it the console shows no container logs. */
+  instanceLogs?(id: number, tail: number): Promise<string>;
 }
 
 export interface LifecycleDeps {
@@ -133,6 +151,7 @@ export interface LifecycleDeps {
   agentFor(record: InstanceRecord): AgentLike;
   /** Epoch UTC seconds. */
   clock(): number;
+  /** The auth key for the new instance; may reject with TailscaleError when minted through OAuth. */
   tsAuthKey(): Promise<string>;
   newToken(): string;
   newHostname(): string;
@@ -140,6 +159,21 @@ export interface LifecycleDeps {
   sleep?(seconds: number): Promise<void>;
   /** The profile's model files in download order, for the overall download progress. */
   profileModels?: readonly ModelSpec[];
+  /** Where the boot console persists (BOOT_LOG_PATH); without it the console lives in memory only. */
+  consoleStore?: ConsoleStoreLike;
+}
+
+/** GET /api/console: the boot console after `after`. Every text is masked; no hostname or token. */
+export interface ConsolePayload {
+  /** Changes when a new Start clears the console (the page then drops its lines). */
+  generation: number;
+  instance: { state: string; ended: boolean; ended_reason: string | null };
+  phases: PhaseInfo[];
+  lines: ConsoleLine[];
+  last_seq: number;
+  truncated: boolean;
+  /** The last Vast read for the console failed; the lines shown are the ones kept so far. */
+  source_error: "vast_logs_unavailable" | null;
 }
 
 /** A registry record as it may leave this module: never the agent token. */
@@ -300,6 +334,22 @@ export function overallDownload(
   };
 }
 
+/** One console line summarising the agent's /status (progress in steps of PERCENT_STEP). */
+function agentLine(a: AgentStatus): string {
+  const parts = [`agent: state=${a.state ?? "unknown"}`];
+  if (a.reason) parts.push(`reason=${a.reason}`);
+  const p = a.progress;
+  if (p !== null) {
+    parts.push(`phase=${p.phase}`);
+    if (typeof p.file === "string" && p.file !== "") parts.push(`file=${baseName(p.file)}`);
+    if (typeof p.bytes_total === "number" && p.bytes_total > 0 && Number.isFinite(p.bytes_done)) {
+      const ratio = Math.min(1, Math.max(0, p.bytes_done / p.bytes_total));
+      parts.push(`${Math.floor((ratio * PERCENT) / PERCENT_STEP) * PERCENT_STEP}%`);
+    }
+  }
+  return parts.join(" ");
+}
+
 function realSleep(seconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
@@ -318,6 +368,13 @@ export class Lifecycle {
   private readonly vanishMisses = new Map<string, number>();
   // GPU model of the offer the last start chose, until Vast's own row names it.
   private startedGpu: { hostname: string; gpu_name: string | null } | null = null;
+  // Boot console: the buffer (created on first use), when an admin last called console(), when
+  // Vast was last read for it, the outcome of that read and the read in flight (single-flight).
+  private consoleBuf: ConsoleBuffer | null = null;
+  private consoleWatchedAt: number | null = null;
+  private consolePolledAt: number | null = null;
+  private consoleError: ConsolePayload["source_error"] = null;
+  private consoleRefresh: Promise<void> | null = null;
 
   constructor(private readonly deps: LifecycleDeps) {
     this.cfg = deps.cfg;
@@ -499,10 +556,13 @@ export class Lifecycle {
       agent_token: token,
       tailnet_hostname: hostname,
     });
+    // A new Start clears the console of the previous instance.
+    this.withConsole((buf) => buf.reset(hostname));
 
     // Until create is called nothing exists on Vast: every failure marks the record gone.
     const failBeforeCreate = async (err: unknown, reason: StartFailReason): Promise<never> => {
       await registry.markGone(record.tailnet_hostname);
+      this.endConsole(record.tailnet_hostname, "start_failed");
       if (err instanceof NoOffersError) throw err;
       throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason);
     };
@@ -510,8 +570,12 @@ export class Lifecycle {
     let authKey = "";
     try {
       authKey = await this.deps.tsAuthKey();
-    } catch {
+    } catch (err) {
       // Fixed text: a read error may name the file or, from a broken reader, echo its content.
+      // A TailscaleError carries only a fixed code. Never a fallback to another key source.
+      if (err instanceof TailscaleError) {
+        return failBeforeCreate(new Error(`the Tailscale auth key could not be minted (${err.code})`), "ts_key_mint_failed");
+      }
       return failBeforeCreate(new Error("the Tailscale auth key could not be read"), "ts_key_missing");
     }
     this.secrets.add(authKey);
@@ -552,6 +616,7 @@ export class Lifecycle {
     } catch (err) {
       if (err instanceof CreateRejected) {
         await registry.markGone(record.tailnet_hostname);
+        this.endConsole(record.tailnet_hostname, "start_failed");
         throw new StartError(this.scrub(`Vast refused to create the instance: ${err.message}`), false, "vast_rejected");
       }
       // Ambiguous: the instance may exist. Keep the record `creating` (blocks another start)
@@ -574,7 +639,10 @@ export class Lifecycle {
     } catch (err) {
       // The instance exists but the registry could not record it: destroy it right away.
       const outcome = await this.vastDestroy(created.id).catch(() => null);
-      if (outcome !== null) await registry.markGone(record.tailnet_hostname).catch(() => undefined);
+      if (outcome !== null) {
+        await registry.markGone(record.tailnet_hostname).catch(() => undefined);
+        this.endConsole(record.tailnet_hostname, "start_failed");
+      }
       throw new StartError(
         this.scrub(
           `could not record instance ${created.id}: ${message(err)}; ` +
@@ -656,7 +724,9 @@ export class Lifecycle {
         }
         id = match.id;
       }
-      return this.destroyRecord(record, id, "manual");
+      const result = await this.destroyRecord(record, id, "manual");
+      this.endConsole(record.tailnet_hostname, "destroyed");
+      return result;
     });
   }
 
@@ -697,6 +767,9 @@ export class Lifecycle {
   /** Merged status of registry, Vast and agent. Never throws because one source is down. */
   async view(): Promise<StatusView> {
     const now = this.now();
+    // Taken before the first await: a Start while this view is in flight must not be undone by
+    // the console update at its end (see feedConsole).
+    const consoleEpoch = this.consoleEpoch();
     const record = await this.deps.registry.active();
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
@@ -765,6 +838,7 @@ export class Lifecycle {
     const startGpu =
       record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.gpu_name : null;
     const progress = agent?.progress ?? null;
+    this.feedConsole(consoleEpoch, record, inst, agent, instances, now);
 
     return {
       state,
@@ -788,6 +862,231 @@ export class Lifecycle {
         hard_cap_s: left(hardCapAt),
       },
       unknown,
+    };
+  }
+
+  // ---- boot console ----
+
+  private consoleLimits(): ConsoleLimits & { pollMinS: number; watchS: number } {
+    return {
+      maxLines: intCfg(this.cfg, "bootLogMaxLines", "BOOT_LOG_MAX_LINES", 1),
+      maxLineChars: intCfg(this.cfg, "bootLogMaxLineChars", "BOOT_LOG_MAX_LINE_CHARS", 2),
+      tailLines: intCfg(this.cfg, "bootLogTailLines", "BOOT_LOG_TAIL_LINES", 1),
+      pollMinS: intCfg(this.cfg, "bootLogPollMinS", "BOOT_LOG_POLL_MIN_S", 1),
+      watchS: intCfg(this.cfg, "bootLogWatchS", "BOOT_LOG_WATCH_S", 1),
+    };
+  }
+
+  /** The console buffer, restored from the store on first use (an unusable file starts empty). */
+  private consoleBuffer(): ConsoleBuffer {
+    if (this.consoleBuf !== null) return this.consoleBuf;
+    const limits = this.consoleLimits();
+    const secrets = (): string[] => [...this.secrets];
+    const clock = (): number => this.now();
+    let saved: unknown = null;
+    try {
+      saved = this.deps.consoleStore?.load() ?? null;
+    } catch {
+      saved = null;
+    }
+    let buf: ConsoleBuffer;
+    try {
+      buf = saved === null ? new ConsoleBuffer(limits, secrets, clock) : ConsoleBuffer.fromJSON(saved, limits, secrets, clock);
+    } catch {
+      buf = new ConsoleBuffer(limits, secrets, clock); // corrupt or foreign file: start empty
+    }
+    this.consoleBuf = buf;
+    return buf;
+  }
+
+  /** Run `fn` on the console and persist it; the console never makes a lifecycle operation fail. */
+  private withConsole(fn: (buf: ConsoleBuffer) => void): void {
+    try {
+      const buf = this.consoleBuffer();
+      fn(buf);
+      this.persistConsole(buf);
+    } catch {
+      // best effort (e.g. BOOT_LOG_* missing in a test config)
+    }
+  }
+
+  private persistConsole(buf: ConsoleBuffer): void {
+    if (!buf.takeDirty()) return;
+    try {
+      this.deps.consoleStore?.save(buf.toJSON());
+    } catch {
+      // best effort: the lines stay in memory
+    }
+  }
+
+  private endConsole(hostname: string, reason: ConsoleEndReason): void {
+    this.withConsole((buf) => {
+      if (buf.owner === hostname) buf.markEnded(reason);
+    });
+  }
+
+  /** Point the console at the active record: another instance starts a fresh console; no record ends it. */
+  private syncConsoleOwner(buf: ConsoleBuffer, record: InstanceRecord | null): void {
+    if (record === null) {
+      if (buf.owner !== null && !buf.ended) buf.markEnded("gone");
+      return;
+    }
+    this.secrets.add(record.agent_token);
+    if (buf.owner !== record.tailnet_hostname) buf.reset(record.tailnet_hostname);
+  }
+
+  private feedVast(buf: ConsoleBuffer, inst: VastInstance | undefined, maxLines: number): void {
+    if (inst === undefined) return;
+    buf.setVastStatus(inst.actual_status);
+    if (typeof inst.status_msg === "string" && inst.status_msg !== "") {
+      buf.append("vast_status", inst.status_msg.split("\n").slice(-maxLines));
+    }
+  }
+
+  /**
+   * The console generation now, or null when the console cannot be used. Callers take it
+   * synchronously BEFORE their first await and act on the console only while it is unchanged:
+   * every reset (a Start, or another call pointing the console at a new owner) bumps it, and a
+   * record read before that reset is stale (acting on it would end the new boot's console as
+   * "gone" or reset it back to the old owner).
+   */
+  private consoleEpoch(): number | null {
+    try {
+      return this.consoleBuffer().generation;
+    } catch {
+      return null;
+    }
+  }
+
+  /** From view(): Vast's status and the agent summary (no extra requests), then a watched refresh. */
+  private feedConsole(
+    epoch: number | null,
+    record: InstanceRecord | null,
+    inst: VastInstance | undefined,
+    agent: AgentStatus | null,
+    instances: VastInstance[] | null,
+    now: number,
+  ): void {
+    this.withConsole((buf) => {
+      const current = (): boolean => epoch !== null && buf.generation === epoch;
+      if (!current()) return; // the console was reset while this view was in flight
+      this.syncConsoleOwner(buf, record);
+      if (record === null || buf.owner !== record.tailnet_hostname || buf.ended) return;
+      this.feedVast(buf, inst, this.consoleLimits().maxLines);
+      if (agent !== null) buf.append("agent", [agentLine(agent)]);
+      // While an admin watches the console, the status poll keeps the container log fresh too.
+      if (instances !== null) void this.refreshConsole(record, now, instances).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Read Vast for the console under two rules: only while an admin watches (console() called
+   * within BOOT_LOG_WATCH_S) and at most once per BOOT_LOG_POLL_MIN_S. Single-flight.
+   */
+  private refreshConsole(record: InstanceRecord, now: number, listed: VastInstance[] | null): Promise<void> {
+    if (this.consoleRefresh !== null) return this.consoleRefresh;
+    const limits = this.consoleLimits();
+    if (this.consoleWatchedAt === null || now - this.consoleWatchedAt > limits.watchS) return Promise.resolve();
+    if (this.consolePolledAt !== null && now - this.consolePolledAt < limits.pollMinS) return Promise.resolve();
+    this.consolePolledAt = now;
+    const run = this.doRefreshConsole(record, listed, limits.tailLines, limits.maxLines).finally(() => {
+      this.consoleRefresh = null;
+    });
+    this.consoleRefresh = run;
+    return run;
+  }
+
+  private async doRefreshConsole(
+    record: InstanceRecord,
+    listed: VastInstance[] | null,
+    tail: number,
+    maxLines: number,
+  ): Promise<void> {
+    const buf = this.consoleBuffer();
+    const generation = buf.generation;
+    const current = (): boolean => buf.generation === generation && buf.owner === record.tailnet_hostname && !buf.ended;
+    let instances = listed;
+    if (instances === null) {
+      try {
+        instances = await this.deps.vast.listInstances();
+      } catch {
+        this.consoleError = "vast_logs_unavailable";
+        return;
+      }
+    }
+    if (!current()) return;
+    const inst = instances.find(
+      (i) =>
+        (record.vast_instance_id !== null && i.id === record.vast_instance_id) ||
+        labelHostname(i.label) === record.tailnet_hostname,
+    );
+    this.feedVast(buf, inst, maxLines);
+    this.persistConsole(buf);
+    const vast = this.deps.vast;
+    // While the image is pulled the container has no log yet; status_msg carries the progress.
+    if (inst === undefined || vast.instanceLogs === undefined || inst.actual_status === VAST_LOADING) {
+      this.consoleError = null;
+      return;
+    }
+    let text: string;
+    try {
+      text = await vast.instanceLogs(inst.id, tail);
+    } catch {
+      // Fixed flag only: the error may carry provider text.
+      this.consoleError = "vast_logs_unavailable";
+      return;
+    }
+    this.consoleError = null;
+    if (!current()) return;
+    buf.append("vast_logs", logLines(text).slice(-tail));
+    this.persistConsole(buf);
+  }
+
+  /** Waits for a console refresh in flight (tests; a refresh started by view() runs in the background). */
+  async flushConsole(): Promise<void> {
+    await (this.consoleRefresh ?? Promise.resolve()).catch(() => undefined);
+  }
+
+  /**
+   * The boot console for an admin: lines with seq > `after`, the phases and whether the instance
+   * ended. Counts as watching (see refreshConsole). Vast failures never throw: they set
+   * source_error and the kept lines are returned. A new Start clears the console; when the
+   * instance is gone the last lines stay until then.
+   */
+  async console(after: number): Promise<ConsolePayload> {
+    if (!Number.isSafeInteger(after) || after < 0) throw new RangeError("after must be an integer >= 0");
+    const now = this.now();
+    this.consoleWatchedAt = now;
+    // Taken before the first await (see consoleEpoch).
+    const buf = this.consoleBuffer();
+    const epoch = buf.generation;
+    const current = (): boolean => buf.generation === epoch;
+    let record = await this.deps.registry.active();
+    if (current()) {
+      this.syncConsoleOwner(buf, record);
+      this.persistConsole(buf);
+      if (record !== null && buf.owner === record.tailnet_hostname && !buf.ended) {
+        await this.refreshConsole(record, now, null);
+      }
+    } else {
+      // Reset (a Start) while the registry was read: that record is stale. Leave the console as
+      // the reset made it and describe it with a fresh read.
+      record = await this.deps.registry.active();
+    }
+    const owner = buf.owner;
+    const page = buf.since(after);
+    // The tailnet hostname never leaves the server (Tailscale prints it while joining).
+    const lines = owner === null ? page.lines : page.lines.map((l) => ({ ...l, text: l.text.split(owner).join(HOST_PLACEHOLDER) }));
+    const state = record !== null && !buf.ended ? record.status : null;
+    const live = state !== null;
+    return {
+      generation: buf.generation,
+      instance: { state: state ?? "none", ended: buf.ended, ended_reason: buf.endedReason },
+      phases: buf.phases(),
+      lines,
+      last_seq: page.last_seq,
+      truncated: page.truncated,
+      source_error: live ? this.consoleError : null,
     };
   }
 
@@ -843,6 +1142,7 @@ export class Lifecycle {
           this.destroyRequested.delete(hostname);
           try {
             const result = await this.destroyRecord(record, match.id, "manual");
+            this.endConsole(hostname, "destroy_requested");
             report.destroyed.push({
               tailnet_hostname: hostname,
               vast_instance_id: match.id,
@@ -865,6 +1165,7 @@ export class Lifecycle {
       } else if (now - record.created_at >= grace) {
         this.destroyRequested.delete(hostname);
         await registry.markGone(hostname);
+        this.endConsole(hostname, "never_created");
         report.gone.push({ tailnet_hostname: hostname, reason: "never_created" });
         record = null;
       } else {
@@ -891,6 +1192,7 @@ export class Lifecycle {
         if (misses >= VANISH_CONFIRMATIONS) {
           this.vanishMisses.delete(hostname);
           await registry.markGone(hostname);
+          this.endConsole(hostname, "vanished");
           report.gone.push({ tailnet_hostname: hostname, reason: "vanished" });
         } else {
           this.vanishMisses.set(hostname, misses);
@@ -944,6 +1246,7 @@ export class Lifecycle {
     if (reason === null) return report;
     try {
       const result = await this.destroyRecord(record, id, "watchdog");
+      this.endConsole(hostname, reason as ConsoleEndReason);
       report.destroyed.push({
         tailnet_hostname: hostname,
         vast_instance_id: id,

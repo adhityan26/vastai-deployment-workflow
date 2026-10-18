@@ -12,6 +12,7 @@ import {
   ComfyClient,
   Lifecycle,
   Registry,
+  TailscaleError,
   loadProfile,
   type AppsConfig,
   type CreateRequest,
@@ -169,6 +170,12 @@ class FakeVast {
   creates = 0;
   searches: OfferFilters[] = [];
   nextId = 1000;
+  logText = "";
+  logCalls = 0;
+  async instanceLogs(): Promise<string> {
+    this.logCalls++;
+    return this.logText;
+  }
   async searchOffers(filters: OfferFilters): Promise<Offer[]> {
     this.searches.push(filters);
     return this.offers;
@@ -289,6 +296,11 @@ async function harness(
     editReferenceMaxPixels: 1_000_000,
     editReferenceMaxSide: 8192,
     editReferenceTypes: ["png", "jpeg", "webp"],
+    bootLogMaxLines: 500,
+    bootLogMaxLineChars: 400,
+    bootLogPollMinS: 5,
+    bootLogWatchS: 60,
+    bootLogTailLines: 300,
     secretNames: ["VAST_API_KEY", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...opts.cfg,
   } as unknown as AppsConfig;
@@ -1634,6 +1646,87 @@ describe("GPU choice", () => {
       }
       expect(h.vast.searches).toHaveLength(0);
     }
+  });
+
+  it("a failed OAuth key mint is start_failed with reason ts_key_mint_failed and a fixed English message", async () => {
+    h = await harness({ ready: false, authKey: async () => Promise.reject(new TailscaleError("oauth_failed")) });
+    const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({
+      error: {
+        code: "start_failed",
+        reason: "ts_key_mint_failed",
+        message: "a Tailscale auth key could not be created through the OAuth client; nothing was rented",
+      },
+    });
+    expect(h.logs).toContain("warn start failed: StartError (internal: ts_key_mint_failed)");
+    for (const text of [res.body, h.logs.join("\n")]) {
+      for (const secret of [AUTH_KEY, VAST_KEY, TOKEN]) expect(text).not.toContain(secret);
+    }
+    expect(h.vast.searches).toHaveLength(0);
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8")) as { components: { schemas: Record<string, { enum?: string[] }> } };
+    expect(doc.components.schemas["StartFailReason"]?.enum).toContain("ts_key_mint_failed");
+  });
+});
+
+describe("boot console route", () => {
+  it("401 without a session, 403 for a member, 200 no-store for an admin", async () => {
+    expect((await call("GET", "/api/console")).statusCode).toBe(401);
+    const m = await member();
+    const forbidden = await call("GET", "/api/console", m);
+    expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json().error.code).toBe("forbidden");
+    expect(h.vast.logCalls).toBe(0);
+    h.vast.logText = "[boot] step 1/8: install_tools\nhello\n";
+    const res = await call("GET", "/api/console", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const body = res.json();
+    expect(Object.keys(body).sort()).toEqual(["generation", "instance", "last_seq", "lines", "phases", "source_error", "truncated"]);
+    expect(body.instance).toEqual({ state: "ready", ended: false, ended_reason: null });
+    expect(body.lines.map((l: { text: string }) => l.text)).toEqual(["[boot] step 1/8: install_tools", "hello"]);
+    expect(body.phases.map((p: { id: string }) => p.id)).toEqual([
+      "image_pull", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready",
+    ]);
+    expect(body.phases[1]).toEqual({ id: "install_tools", name: "Install tools", status: "running" });
+  });
+
+  it("validates after", async () => {
+    const a = await admin();
+    for (const q of ["abc", "-1", "1.5", "01", "1e3", "9007199254740992", "99999999999999999", "", "1&after=2", "1&x=1"]) {
+      const res = await call("GET", `/api/console?after=${q}`, a);
+      expect(res.statusCode, q).toBe(400);
+    }
+    for (const q of ["0", "7", "9007199254740991"]) expect((await call("GET", `/api/console?after=${q}`, a)).statusCode, q).toBe(200);
+    expect((await call("GET", "/api/console", a)).statusCode).toBe(200);
+  });
+
+  it("never returns a secret or the instance hostname", async () => {
+    h.vast.logText = [
+      `key ${VAST_KEY}`,
+      `token ${TOKEN}`,
+      `auth ${AUTH_KEY}`,
+      `secret ${CLIENT_SECRET} ${SESSION_SECRET}`,
+      `joined as ${HOST}`,
+      "Authorization: Bearer abc.def",
+      "",
+    ].join("\n");
+    const res = await call("GET", "/api/console?after=0", await admin());
+    expect(res.statusCode).toBe(200);
+    for (const secret of [VAST_KEY, TOKEN, AUTH_KEY, CLIENT_SECRET, SESSION_SECRET, HOST, "abc.def", "SECRETKEY"]) {
+      expect(res.body).not.toContain(secret);
+    }
+    expect(res.json().lines.map((l: { text: string }) => l.text)).toContain("joined as [host]");
+  });
+
+  it("matches the documented Console schema", async () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const schema = doc.components.schemas.Console;
+    const body = (await call("GET", "/api/console", await admin())).json();
+    expect(Object.keys(body).sort()).toEqual([...schema.required].sort());
+    expect(Object.keys(schema.properties.instance.properties).sort()).toEqual(Object.keys(body.instance).sort());
+    expect(doc.components.schemas.ConsolePhase.properties.id.enum).toEqual(body.phases.map((p: { id: string }) => p.id));
+    expect(doc.paths["/api/console"].get.parameters[0].name).toBe("after");
   });
 });
 

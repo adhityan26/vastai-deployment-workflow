@@ -19,6 +19,7 @@ import {
   type VastInstance,
 } from "../src/vast.js";
 import { loadProfile, type ModelSpec } from "../src/profile.js";
+import { TailscaleError } from "../src/tailscale.js";
 import {
   DestroyFailedError,
   GpuNotAllowedError,
@@ -1092,6 +1093,44 @@ describe("Lifecycle start failure reasons", () => {
       expect(vast.calls.filter((c) => c.startsWith("vast."))).toEqual([]);
       expect(await registry.active()).toBeNull();
     }
+  });
+
+  it("a failed OAuth mint is ts_key_mint_failed, before any Vast call, with a fixed message", async () => {
+    for (const code of ["oauth_failed", "key_rejected", "tailscale_unavailable", "invalid_response"] as const) {
+      const { life, vast, registry } = setup({ authKey: async () => Promise.reject(new TailscaleError(code)) });
+      const err = await errorOf(life.start());
+      expect(err).toBeInstanceOf(StartError);
+      expect((err as StartError).reason).toBe("ts_key_mint_failed");
+      expect((err as StartError).ambiguous).toBe(false);
+      expect(err.message).toBe(`start failed before create: the Tailscale auth key could not be minted (${code})`);
+      expect(vast.calls.filter((c) => c.startsWith("vast."))).toEqual([]);
+      expect(await registry.active()).toBeNull();
+    }
+    // Any other error from the source stays ts_key_missing (the key file path).
+    const other = setup({ authKey: async () => Promise.reject(new Error(`boom ${AUTH_KEY}`)) });
+    expect(((await errorOf(other.life.start())) as StartError).reason).toBe("ts_key_missing");
+  });
+
+  it("redacts each freshly minted key from start errors", async () => {
+    let n = 0;
+    const minted: string[] = [];
+    const { life, vast } = setup({
+      authKey: async () => {
+        const key = `tskey-auth-fakeMINT${n++}-0123456789`;
+        minted.push(key);
+        return key;
+      },
+    });
+    vast.createImpl = async (_offer, req) => {
+      throw new CreateRejected(`bad env ${req.env["TS_AUTHKEY"]}`);
+    };
+    for (let i = 0; i < 2; i++) {
+      const err = (await errorOf(life.start())) as StartError;
+      expect(err.reason).toBe("vast_rejected");
+      expect(err.message).toContain("[redacted]");
+      for (const key of minted) expect(err.message).not.toContain(key);
+    }
+    expect(new Set(minted).size).toBe(2);
   });
 
   it("names the other cases it can tell apart", async () => {
