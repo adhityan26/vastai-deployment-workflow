@@ -84,6 +84,10 @@ afterEach(() => {
 describe("history model", () => {
   it("parses only a well formed list", () => {
     expect(parseHistory({ entries: [entry()] })).toHaveLength(1);
+    // An older server without the location fields still parses; a bad location is refused.
+    expect(parseHistory({ entries: [entry({ location: "Quebec, CA", down_mbps: 860 })] })![0]).toMatchObject({ location: "Quebec, CA", down_mbps: 860 });
+    expect(parseHistory({ entries: [entry()] })![0]).toMatchObject({ location: null, down_mbps: null });
+    expect(parseHistory({ entries: [entry({ location: 5 })] })).toBeNull();
     for (const bad of [null, {}, { entries: {} }, { entries: [{ ...entry(), started_at: "x" }] }, { entries: [{ ...entry(), active: "yes" }] }]) {
       expect(parseHistory(bad)).toBeNull();
     }
@@ -139,6 +143,13 @@ describe("history card", () => {
     expect(r[1]).toContain("$0.30");
     expect(r[2]).toContain("Disappeared");
     expect(q("#usage-empty").hidden).toBe(true);
+  });
+
+  it("each session shows where its server was and its download speed, when known", async () => {
+    await mount({ history: { entries: [entry({ location: "Quebec, CA", down_mbps: 860 }), entry({ vast_instance_id: 901 })] } });
+    const [withServer, without] = rows();
+    expect(withServer).toContain("Quebec, CA, 860 Mbps down");
+    expect(without).not.toContain("Mbps");
   });
 
   it("an empty history says so", async () => {

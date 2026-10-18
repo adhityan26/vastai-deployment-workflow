@@ -226,6 +226,17 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
   that machine for `VAST_BAD_MACHINE_TTL_MIN` (default 60; kept in the registry, so a restart
   keeps it). An image that is still loading is not stuck: it only meets `BOOT_TIMEOUT_MIN` (25),
   and neither is a running container whose agent does not answer yet.
+- Where the server is: the status card shows "Server: Quebec, CA, 860 Mbps down" (Vast's
+  `geolocation` and `inet_down` of the instance, else of the offer chosen at Start; missing parts
+  are left out), the start dialog shows it for each GPU and in the estimate, the stuck-start
+  message names it, and each usage history session keeps it. Members get location and speeds;
+  admins also get the Vast machine id; host ids and addresses are never sent. The location is
+  Vast's free text reduced to letters, digits, spaces and `,.'()-` (at most 64 characters).
+- Download speed dominates the boot: the profile downloads about 15 GB of models. 15 GB is
+  120 Gbit, so at 200 Mbps it takes about 600 s (10 min), at 500 Mbps about 4 min and at 860 Mbps
+  under 2.5 min (plus the image pull). `VAST_MIN_DOWNLOAD_MBPS` (default 500) is sent in the offer
+  search and re-checked locally: an offer that reports a slower `inet_down` is never listed or
+  rented (one that reports no speed is kept, as Vast already filtered it).
 
 ## Boot console
 

@@ -41,6 +41,8 @@ import {
   formatEta,
   formatSpeed,
   gpuOptionLabel,
+  parseEstimate,
+  serverText,
   nextSamples,
   parseGpus,
   windowSpeed,
@@ -193,10 +195,28 @@ describe("form helpers", () => {
   });
   it("parses a start failure and drops a broken one", () => {
     expect(parseState({ ...base })!.start_failure).toBeNull();
-    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m" });
+    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m", server: null });
     expect(parseState({ ...base, start_failure: { code: 5 } })!.start_failure).toBeNull();
     expect(parseState({ ...base, start_failure: "start_stuck" })!.start_failure).toBeNull();
   });
+  it("parses the server and words it, leaving out what is missing", () => {
+    expect(parseState({ ...base })!.server).toBeNull();
+    const s = parseState({ ...base, server: { location: "Quebec, CA", down_mbps: 860, up_mbps: 400, reliability: 0.99 } })!;
+    expect(s.server).toEqual({ location: "Quebec, CA", down_mbps: 860 });
+    expect(serverText(s.server)).toBe("Quebec, CA, 860 Mbps down");
+    expect(serverText({ location: null, down_mbps: 860 })).toBe("860 Mbps down");
+    expect(serverText({ location: "Quebec, CA", down_mbps: null })).toBe("Quebec, CA");
+    expect(serverText({ location: null, down_mbps: null })).toBeNull();
+    expect(serverText(null)).toBeNull();
+    expect(parseState({ ...base, server: { location: "x".repeat(65), down_mbps: "fast" } })!.server).toBeNull();
+    const f = parseState({ ...base, start_failure: { code: "start_stuck", message: "m", server: { location: "Paris, FR", down_mbps: null } } })!;
+    expect(f.start_failure?.server).toEqual({ location: "Paris, FR", down_mbps: null });
+    expect(parseEstimate({ gpu_name: "A", dph: 0.2, horizon_hours: 3, max_cost: 0.6, location: "Paris, FR", down_mbps: 300 })).toMatchObject({
+      location: "Paris, FR", down_mbps: 300,
+    });
+    expect(parseEstimate({ gpu_name: "A", dph: 0.2, horizon_hours: 3, max_cost: 0.6 })).toMatchObject({ location: null, down_mbps: null });
+  });
+
   it("rejects unusable state payloads", () => {
     expect(parseState(null)).toBeNull();
     expect(parseState({ state: "ready" })).toBeNull();
@@ -234,19 +254,21 @@ describe("login helpers", () => {
 
 describe("GPU choice", () => {
   const list = [
-    { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true },
-    { name: "RTX 3090", dph: null, vram_gb: null, available: false },
-    { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+    { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true, location: null, down_mbps: null },
+    { name: "RTX 3090", dph: null, vram_gb: null, available: false, location: null, down_mbps: null },
+    { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true, location: "Quebec, CA", down_mbps: 860 },
   ];
   it("parses the list and treats a missing price as unavailable", () => {
     expect(parseGpus({ gpus: list })).toEqual(list);
-    expect(parseGpus({ gpus: [{ name: "X", dph: null, vram_gb: 1, available: true }, { name: "", dph: 1 }, 5] })).toEqual([{ name: "X", dph: null, vram_gb: 1, available: false }]);
+    expect(parseGpus({ gpus: [{ name: "X", dph: null, vram_gb: 1, available: true }, { name: "", dph: 1 }, 5] })).toEqual([{ name: "X", dph: null, vram_gb: 1, available: false, location: null, down_mbps: null }]);
+    expect(parseGpus({ gpus: [{ name: "Y", dph: 1, vram_gb: 1, available: true, location: 7, down_mbps: -1 }] })![0]).toMatchObject({ location: null, down_mbps: null });
     expect(parseGpus({})).toBeNull();
     expect(parseGpus(null)).toBeNull();
   });
   it("labels options", () => {
     expect(gpuOptionLabel(list[0]!)).toBe("RTX A5000 - $0.25/h");
     expect(gpuOptionLabel(list[1]!)).toBe("RTX 3090 - no offers now");
+    expect(gpuOptionLabel(list[2]!)).toBe("RTX 4090 - $0.45/h - Quebec, CA, 860 Mbps down");
   });
   it("chooses remembered, else cheapest available, else null", () => {
     expect(chooseGpu("RTX 4090", list)).toBe("RTX 4090");

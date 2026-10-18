@@ -19,10 +19,12 @@ import {
   MB_PER_GB,
   normalizeGpuName,
   offerFiltersFromConfig,
+  serverInfo,
   type CreateRequest,
   type DestroyOutcome,
   type Offer,
   type OfferFilters,
+  type ServerInfo,
   type VastInstance,
 } from "./vast.js";
 
@@ -207,6 +209,9 @@ export interface CostEstimate {
   dph: number;
   horizon_hours: number;
   max_cost: number;
+  /** Where the offer's server is and its download speed (Mbps), when Vast says. */
+  location: string | null;
+  down_mbps: number | null;
 }
 
 /** One selectable GPU model with its cheapest current offer (no offer id leaves the server). */
@@ -215,6 +220,9 @@ export interface GpuOption {
   dph: number | null;
   vram_gb: number | null;
   available: boolean;
+  /** Location and download speed (Mbps) of that cheapest offer's server. */
+  location: string | null;
+  down_mbps: number | null;
 }
 
 /** Overall model download progress across all profile files (the agent reports one file). */
@@ -259,7 +267,9 @@ export interface StatusView {
   /** GPU model of the active instance: Vast's row, else the offer chosen at start. */
   gpu_name: string | null;
   /** The newest start failed after Start returned (e.g. it was released as stuck); cleared by the next Start. */
-  start_failure: { code: StartFailureCode } | null;
+  start_failure: { code: StartFailureCode; server: ServerInfo | null } | null;
+  /** Where the active instance's server is: Vast's row, else the offer chosen at start (per field). */
+  server: ServerInfo | null;
   download: DownloadView | null;
   remaining: { idle_s: number | null; failsafe_s: number | null; hard_cap_s: number | null };
   unknown: UnknownInstance[];
@@ -319,6 +329,20 @@ function unknownOf(inst: VastInstance): UnknownInstance {
     start_date: inst.start_date,
     dph: inst.dph_total,
   };
+}
+
+const NO_SERVER: ServerInfo = { location: null, down_mbps: null, up_mbps: null, reliability: null, machine_id: null };
+
+/** Each field from `first` when known, else from `second`; null when nothing is known. */
+function mergeServer(first: ServerInfo, second: ServerInfo): ServerInfo | null {
+  const out: ServerInfo = {
+    location: first.location ?? second.location,
+    down_mbps: first.down_mbps ?? second.down_mbps,
+    up_mbps: first.up_mbps ?? second.up_mbps,
+    reliability: first.reliability ?? second.reliability,
+    machine_id: first.machine_id ?? second.machine_id,
+  };
+  return Object.values(out).every((v) => v === null) ? null : out;
 }
 
 function positiveId(raw: unknown): number | null {
@@ -407,7 +431,9 @@ export class Lifecycle {
   // Consecutive successful Vast lists that omitted a record's instance, per hostname.
   private readonly vanishMisses = new Map<string, number>();
   // GPU model and machine of the offer the last start chose, until Vast's own row names them.
-  private startedGpu: { hostname: string; gpu_name: string | null; machine_id: number | null } | null = null;
+  private startedGpu: { hostname: string; gpu_name: string | null; machine_id: number | null; server: ServerInfo } | null = null;
+  // The server of the last stuck start, for the failure message (memory only).
+  private stuckServer: { hostname: string; server: ServerInfo | null } | null = null;
   // Machines of stuck starts (machine id -> when it was found stuck). The registry keeps the
   // same facts per record (start_stuck_at, stuck_machine_id) so they survive a restart.
   private readonly stuckMachines = new Map<number, number>();
@@ -466,12 +492,15 @@ export class Lifecycle {
 
   private estimateFor(offer: Offer): CostEstimate {
     const horizon = this.horizonHours();
+    const server = serverInfo(offer);
     return {
       offer_id: offer.id,
       gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null,
       dph: offer.dph_total,
       horizon_hours: horizon,
       max_cost: offer.dph_total * horizon,
+      location: server.location,
+      down_mbps: server.down_mbps,
     };
   }
 
@@ -516,6 +545,12 @@ export class Lifecycle {
         const machine = positiveId(o["machine_id"]);
         return machine === null || !avoid.has(machine);
       })
+      // VAST_MIN_DOWNLOAD_MBPS is in the query too; a reported speed below it is dropped here
+      // (an offer without a speed is kept: the query already asked Vast for the minimum).
+      .filter((o) => {
+        const down = serverInfo(o).down_mbps;
+        return down === null || down >= filters.minDownloadMbps;
+      })
       .filter((o) => typeof o.gpu_name === "string" && models.includes(normalizeGpuName(o.gpu_name)))
       .filter((o) => typeof o.dph_total === "number" && Number.isFinite(o.dph_total) && o.dph_total > 0)
       .filter((o) => o.dph_total <= filters.maxDph)
@@ -556,13 +591,16 @@ export class Lifecycle {
     const offers = await this.offersFor(models, this.baseFilters(), await this.badMachines());
     return models.map((name) => {
       const best = offers.find((o) => normalizeGpuName(o.gpu_name as string) === name);
-      if (best === undefined) return { name, dph: null, vram_gb: null, available: false };
+      if (best === undefined) return { name, dph: null, vram_gb: null, available: false, location: null, down_mbps: null };
       const ram = best.gpu_ram;
+      const server = serverInfo(best);
       return {
         name,
         dph: best.dph_total,
         vram_gb: typeof ram === "number" && Number.isFinite(ram) && ram > 0 ? Math.round(ram / MB_PER_GIB) : null,
         available: true,
+        location: server.location,
+        down_mbps: server.down_mbps,
       };
     });
   }
@@ -692,12 +730,14 @@ export class Lifecycle {
     } catch (err) {
       return failBeforeCreate(err, "config_invalid");
     }
+    const offerServer = serverInfo(offer);
     this.startedGpu = {
       hostname,
       gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null,
-      machine_id: positiveId(offer["machine_id"]),
+      machine_id: offerServer.machine_id,
+      server: offerServer,
     };
-    this.withUsage((u) => u.noteOffer(hostname, offer.gpu_name, offer.dph_total));
+    this.withUsage((u) => u.noteOffer(hostname, offer.gpu_name, offer.dph_total, offerServer));
 
     let created: { id: number };
     try {
@@ -877,7 +917,13 @@ export class Lifecycle {
     const record = await this.deps.registry.active();
     // The newest record (the active one, else the last one written) says whether its start got stuck.
     const latest = record ?? (await this.deps.registry.all().then((rs) => rs.at(-1) ?? null, () => null));
-    const startFailure: StatusView["start_failure"] = latest?.start_stuck_at != null ? { code: "start_stuck" } : null;
+    const startFailure: StatusView["start_failure"] =
+      latest?.start_stuck_at != null
+        ? {
+            code: "start_stuck",
+            server: this.stuckServer?.hostname === latest.tailnet_hostname ? this.stuckServer.server : null,
+          }
+        : null;
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
     try {
@@ -945,6 +991,9 @@ export class Lifecycle {
     const startGpu =
       record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.gpu_name : null;
     const progress = agent?.progress ?? null;
+    const startServer =
+      record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.server : NO_SERVER;
+    const server = record === null ? null : mergeServer(inst !== undefined ? serverInfo(inst) : NO_SERVER, startServer);
     this.feedConsole(consoleEpoch, record, inst, agent, instances, now);
     if (record !== null) this.noteUsage(record, inst, agent, now);
     await this.syncUsage(record, now);
@@ -965,6 +1014,7 @@ export class Lifecycle {
       progress,
       gpu_name: record === null ? null : (rowGpu ?? startGpu),
       start_failure: startFailure,
+      server,
       download: overallDownload(state, progress, this.deps.profileModels ?? []),
       remaining: {
         idle_s: left(agent?.idle_destroy_at),
@@ -999,7 +1049,10 @@ export class Lifecycle {
     this.withUsage((u) => {
       u.adopt(hostname, record.created_at);
       if (record.vast_instance_id !== null) u.noteInstance(hostname, record.vast_instance_id);
-      if (inst !== undefined) u.noteDph(hostname, inst.dph_total);
+      if (inst !== undefined) {
+        u.noteDph(hostname, inst.dph_total);
+        u.noteServer(hostname, serverInfo(inst));
+      }
       if (agent !== null) {
         u.observe(hostname, agent, now);
         if (READY_STATES.has(agent.state ?? "")) u.noteReady(hostname, now);
@@ -1465,6 +1518,8 @@ export class Lifecycle {
     const offerMachine = this.startedGpu?.hostname === hostname ? this.startedGpu.machine_id : null;
     const machine = positiveId(inst["machine_id"]) ?? offerMachine;
     if (machine !== null) this.stuckMachines.set(machine, now);
+    const offerServer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
+    this.stuckServer = { hostname, server: mergeServer(serverInfo(inst), offerServer) };
     const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
     const ttlMin = Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE);
     try {

@@ -18,6 +18,7 @@ import {
   consoleKeepsPolling,
   endedText,
   startFailureText,
+  serverText,
   isNearBottom,
   lineTime,
   mergeConsole,
@@ -503,8 +504,10 @@ export function mountApp(doc: Document, env: Env): App {
           return;
         }
         const name = estimate.gpu_name === null ? "" : ` (${estimate.gpu_name})`;
+        const where = serverText({ location: estimate.location, down_mbps: estimate.down_mbps });
         estBox.replaceChildren(
           make("p", `Price: ${formatPrice(estimate.dph)}${name}.`),
+          ...(where === null ? [] : [make("p", `Server: ${where}.`)]),
           make("p", `Estimated cost if it runs for the full failsafe time (${estimate.horizon_hours} hours): up to ${formatCost(estimate.max_cost)}.`),
         );
       };
@@ -794,12 +797,15 @@ export function mountApp(doc: Document, env: Env): App {
     failed.hidden = !(s.state === "failed" || s.failed !== null);
     $("failed-reason").textContent = s.failed?.reason ?? "";
     $("alert-start-failure").hidden = s.start_failure === null;
-    $("start-failure-text").textContent = s.start_failure === null ? "" : startFailureText(s.start_failure);
+    const failedAt = s.start_failure === null ? null : serverText(s.start_failure.server);
+    $("start-failure-text").textContent =
+      s.start_failure === null ? "" : `${startFailureText(s.start_failure)}${failedAt === null ? "" : ` Server: ${failedAt}.`}`;
     const df = $("alert-destroy-failed");
     df.hidden = !(s.state === "destroy_failed" || s.destroy_failed !== null);
     $("destroy-failed-error").textContent = s.destroy_failed?.error ?? "";
     $("f-price").textContent = formatPrice(s.dph);
     $("f-gpu").textContent = s.gpu_name ?? "—";
+    $("f-server").textContent = serverText(s.server) ?? "—";
     $("f-queue").textContent = formatQueue(s.agent?.queue ?? null);
     $("f-vram").textContent = formatVram(s.agent?.gpu.vram_used_mb ?? null, s.agent?.gpu.vram_total_mb ?? null);
     const role = $("role");
@@ -1814,6 +1820,8 @@ export function mountApp(doc: Document, env: Env): App {
     const meta = make("div", undefined, "um");
     meta.append(make("span", stopReasonText(e.reason, e.stop_by, e.active)), doc.createTextNode(" · "), make("span", `${formatCost(e.estimated_cost)} est.`));
     if (e.started_by !== null) meta.append(doc.createTextNode(" · "), make("span", `started by ${e.started_by}`));
+    const where = serverText({ location: e.location, down_mbps: e.down_mbps });
+    if (where !== null) meta.append(doc.createTextNode(" · "), make("span", where));
     li.append(head, meta);
     return li;
   }

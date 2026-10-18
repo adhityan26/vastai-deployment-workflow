@@ -610,12 +610,42 @@ describe("GET /api/state", () => {
       expect(res.json().start_failure).toEqual({
         code: "start_stuck",
         message: "The rented machine did not start. It was released; try Start again.",
+        server: null,
       });
       expect(res.body).not.toContain("45608");
     }
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     expect(doc.components.schemas.State.required).toContain("start_failure");
     expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck"]);
+  });
+
+  it("shows where the server is: location and speeds for everyone, the machine id for admins only", async () => {
+    Object.assign(h.vast.instances[0]!, { geolocation: "Quebec, CA", inet_down: 860, inet_up: 400, reliability2: 0.99, machine_id: 45608, host_id: 123 });
+    const m = (await call("GET", "/api/state", await member())).json();
+    expect(m.server).toEqual({ location: "Quebec, CA", down_mbps: 860, up_mbps: 400, reliability: 0.99 });
+    const a = (await call("GET", "/api/state", await admin())).json();
+    expect(a.server).toEqual({ location: "Quebec, CA", down_mbps: 860, up_mbps: 400, reliability: 0.99, machine_id: 45608 });
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    expect(doc.components.schemas.State.required).toContain("server");
+    expect(Object.keys(doc.components.schemas.ServerInfo.properties).sort()).toEqual(["down_mbps", "location", "machine_id", "reliability", "up_mbps"]);
+  });
+
+  it("has no server without an instance", async () => {
+    h = await harness({ ready: false });
+    expect((await call("GET", "/api/state", await admin())).json().server).toBeNull();
+  });
+
+  it("estimate, gpus and history carry the offer's location and download speed", async () => {
+    h = await harness({ ready: false });
+    h.vast.offers = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564, geolocation: "Quebec, CA", inet_down: 860, machine_id: 5 }];
+    const a = await admin();
+    expect((await call("GET", "/api/estimate", a)).json()).toMatchObject({ location: "Quebec, CA", down_mbps: 860 });
+    const gpus = await call("GET", "/api/gpus", a);
+    expect(gpus.json().gpus[0]).toMatchObject({ name: "RTX A5000", location: "Quebec, CA", down_mbps: 860 });
+    expect(gpus.body).not.toContain("machine_id");
+    expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200);
+    const [e] = (await call("GET", "/api/history", a)).json().entries;
+    expect(e).toMatchObject({ location: "Quebec, CA", down_mbps: 860 });
   });
 
   it("redacts a Vast error that echoes the key", async () => {
@@ -634,7 +664,7 @@ describe("start, estimate, destroy, extend", () => {
     const est = await call("GET", "/api/estimate", a);
     expect(est.statusCode).toBe(200);
     // Offer ids stay inside the server.
-    expect(est.json()).toEqual({ gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3 });
+    expect(est.json()).toEqual({ gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3, location: null, down_mbps: null });
     const first = await post("/api/start", a, { confirm: true });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({ status: "booting", vast_instance_id: 1000, estimate: { gpu_name: "RTX A5000", dph: 0.3 } });
@@ -1896,9 +1926,9 @@ describe("GPU choice", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.json()).toEqual({
       gpus: [
-        { name: "RTX A5000", dph: 0.3, vram_gb: 24, available: true },
-        { name: "RTX 3090", dph: null, vram_gb: null, available: false },
-        { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+        { name: "RTX A5000", dph: 0.3, vram_gb: 24, available: true, location: null, down_mbps: null },
+        { name: "RTX 3090", dph: null, vram_gb: null, available: false, location: null, down_mbps: null },
+        { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true, location: null, down_mbps: null },
       ],
     });
     expect(res.body).not.toMatch(/P40|offer|"id"/);
@@ -1910,7 +1940,7 @@ describe("GPU choice", () => {
     const a = await admin();
     const ok = await call("GET", "/api/estimate?gpu=RTX%204090", a);
     expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3 });
+    expect(ok.json()).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3, location: null, down_mbps: null });
     expect(h.vast.searches.at(-1)!.allowedGpus).toEqual(["RTX 4090"]);
     const before = h.vast.searches.length;
     const bad = await call("GET", "/api/estimate?gpu=Tesla%20P40", a);
@@ -1961,7 +1991,7 @@ describe("GPU choice", () => {
     expect(none.json().error.code).toBe("no_offers");
     const ok = await post("/api/start", a, { confirm: true, gpu: "RTX 4090" });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json().estimate).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3 });
+    expect(ok.json().estimate).toEqual({ gpu_name: "RTX 4090", dph: 0.45, horizon_hours: 3, max_cost: 0.45 * 3, location: null, down_mbps: null });
     expect(h.vast.searches.map((f) => f.allowedGpus)).toEqual([["RTX 3090"], ["RTX 4090"]]);
     expect(h.vast.creates).toBe(1);
   });

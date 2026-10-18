@@ -244,7 +244,7 @@ const GPUS = {
     { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
   ],
 };
-const est = (name: string, dph: number) => ({ body: { gpu_name: name, dph, horizon_hours: 3, max_cost: dph * 3 } });
+const est = (name: string, dph: number, over: Record<string, unknown> = {}) => ({ body: { gpu_name: name, dph, horizon_hours: 3, max_cost: dph * 3, ...over } });
 const START_ROUTES: Record<string, Handler> = {
   "GET /api/gpus": { body: GPUS },
   "GET /api/estimate?gpu=RTX%20A5000": est("RTX A5000", 0.25),
@@ -277,6 +277,16 @@ describe("start dialog", () => {
     expect(text).toContain("Disk storage is billed separately, per hour");
     expect(posts("/api/start")).toHaveLength(0);
     expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(false);
+  });
+
+  it("shows where the offer's server is and its download speed", async () => {
+    await adminNone({
+      "GET /api/gpus": { body: { gpus: [{ name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true, location: "Quebec, CA", down_mbps: 860 }] } },
+      "GET /api/estimate?gpu=RTX%20A5000": est("RTX A5000", 0.25, { location: "Quebec, CA", down_mbps: 860 }),
+    });
+    await openStart();
+    expect([...gpuSelect().options][0]!.textContent).toBe("RTX A5000 - $0.25/h - Quebec, CA, 860 Mbps down");
+    expect(q("#modal")!.textContent).toContain("Server: Quebec, CA, 860 Mbps down.");
   });
 
   it("uses the remembered GPU when it is still available", async () => {
@@ -493,6 +503,19 @@ describe("failures", () => {
     expect(box.hidden).toBe(false);
     expect(box.getAttribute("role")).toBe("alert");
     expect(box.textContent).toContain("The rented machine did not start. It was released; try Start again.");
+  });
+
+  it("names the released server in the stuck message when known", async () => {
+    await mount({ state: "none", start_failure: { code: "start_stuck", message: "m", server: { location: "Quebec, CA", down_mbps: 12 } } });
+    expect(q("#alert-start-failure")!.textContent).toContain("Server: Quebec, CA, 12 Mbps down.");
+  });
+
+  it("shows where the server is in the status card, as plain text", async () => {
+    await mount({ server: { location: "<b>Quebec</b>, CA", down_mbps: 860 } });
+    expect(q("#f-server")!.textContent).toBe("<b>Quebec</b>, CA, 860 Mbps down");
+    expect(q("#f-server b")).toBeNull();
+    await mount({ server: null });
+    expect(q("#f-server")!.textContent).toBe("—");
   });
 
   it("shows the server message for a start failure code the page does not know", async () => {

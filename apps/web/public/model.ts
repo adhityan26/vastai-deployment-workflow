@@ -92,7 +92,9 @@ export interface ApiState {
   failed: { reason: string | null } | null;
   destroy_failed: { error: string } | null;
   /** The newest start failed after Start returned (fixed code plus the server's plain text). */
-  start_failure: { code: string; message: string } | null;
+  start_failure: { code: string; message: string; server: ServerView | null } | null;
+  /** Where the active instance's server is. */
+  server: ServerView | null;
   dph: number | null;
   uptime_s: number | null;
   cost_so_far: number | null;
@@ -110,10 +112,50 @@ export interface ApiState {
   upscale: UpscaleInfo | null;
 }
 
-export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
+export interface Estimate {
+  gpu_name: string | null;
+  dph: number;
+  horizon_hours: number;
+  max_cost: number;
+  location: string | null;
+  down_mbps: number | null;
+}
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+// ---- where the rented server is ----
+
+/** What the page shows about a server: its location (plain text) and download speed. */
+export interface ServerView { location: string | null; down_mbps: number | null }
+
+const MAX_LOCATION = 64; // the API sends at most 64 characters
+
+/** A location the API may send, else null (shown with textContent only). */
+function locationOf(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" && v.length <= MAX_LOCATION ? v : null;
+}
+
+function mbpsOf(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n >= 0 ? Math.round(n) : null;
+}
+
+/** The server object of the state, an estimate or a GPU row; null when nothing usable is in it. */
+export function parseServer(v: unknown): ServerView | null {
+  if (!isObj(v)) return null;
+  const out = { location: locationOf(v["location"]), down_mbps: mbpsOf(v["down_mbps"]) };
+  return out.location === null && out.down_mbps === null ? null : out;
+}
+
+/** "Quebec, CA, 860 Mbps down"; the missing parts are left out; null when nothing is known. */
+export function serverText(s: ServerView | null): string | null {
+  if (s === null) return null;
+  const parts: string[] = [];
+  if (s.location !== null) parts.push(s.location);
+  if (s.down_mbps !== null) parts.push(`${s.down_mbps} Mbps down`);
+  return parts.length === 0 ? null : parts.join(", ");
+}
 
 const EDIT_TYPES = ["png", "jpeg", "webp"];
 const posInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -223,8 +265,9 @@ export function parseState(json: unknown): ApiState | null {
     destroy_failed: df ? { error: typeof df["error"] === "string" ? df["error"] : "" } : null,
     start_failure:
       sf && typeof sf["code"] === "string"
-        ? { code: sf["code"], message: typeof sf["message"] === "string" ? sf["message"] : "" }
+        ? { code: sf["code"], message: typeof sf["message"] === "string" ? sf["message"] : "", server: parseServer(sf["server"]) }
         : null,
+    server: parseServer(json["server"]),
     dph: num(json["dph"]),
     uptime_s: num(json["uptime_s"]),
     cost_so_far: num(json["cost_so_far"]),
@@ -266,12 +309,26 @@ export function parseEstimate(json: unknown): Estimate | null {
   const hours = num(json["horizon_hours"]);
   const max = num(json["max_cost"]);
   if (dph === null || hours === null || max === null) return null;
-  return { gpu_name: typeof json["gpu_name"] === "string" ? json["gpu_name"] : null, dph, horizon_hours: hours, max_cost: max };
+  return {
+    gpu_name: typeof json["gpu_name"] === "string" ? json["gpu_name"] : null,
+    dph,
+    horizon_hours: hours,
+    max_cost: max,
+    location: locationOf(json["location"]),
+    down_mbps: mbpsOf(json["down_mbps"]),
+  };
 }
 
 // ---- GPU choice ----
 
-export interface GpuOption { name: string; dph: number | null; vram_gb: number | null; available: boolean }
+export interface GpuOption {
+  name: string;
+  dph: number | null;
+  vram_gb: number | null;
+  available: boolean;
+  location: string | null;
+  down_mbps: number | null;
+}
 
 /** Check GET /api/gpus; null when the payload is unusable. An entry without a price is unavailable. */
 export function parseGpus(json: unknown): GpuOption[] | null {
@@ -280,14 +337,23 @@ export function parseGpus(json: unknown): GpuOption[] | null {
   for (const g of json["gpus"]) {
     if (!isObj(g) || typeof g["name"] !== "string" || g["name"] === "" || g["name"].length > MAX_GPU_NAME) continue;
     const dph = num(g["dph"]);
-    out.push({ name: g["name"], dph, vram_gb: num(g["vram_gb"]), available: g["available"] === true && dph !== null && dph > 0 });
+    out.push({
+      name: g["name"],
+      dph,
+      vram_gb: num(g["vram_gb"]),
+      available: g["available"] === true && dph !== null && dph > 0,
+      location: locationOf(g["location"]),
+      down_mbps: mbpsOf(g["down_mbps"]),
+    });
   }
   return out;
 }
 
-/** Option text: "RTX A5000 - $0.24/h", or "RTX 3090 - no offers now". */
+/** Option text: "RTX A5000 - $0.24/h - Quebec, CA, 860 Mbps down", or "RTX 3090 - no offers now". */
 export function gpuOptionLabel(g: GpuOption): string {
-  return g.available && g.dph !== null ? `${g.name} - $${g.dph.toFixed(2)}/h` : `${g.name} - no offers now`;
+  if (!g.available || g.dph === null) return `${g.name} - no offers now`;
+  const where = serverText({ location: g.location, down_mbps: g.down_mbps });
+  return `${g.name} - $${g.dph.toFixed(2)}/h${where === null ? "" : ` - ${where}`}`;
 }
 
 /** The remembered model if it is listed and available, else the cheapest available one, else null. */
@@ -935,6 +1001,9 @@ export interface UsageEntry {
   reason: string | null;
   stop_by: string | null;
   active: boolean;
+  /** Where the session's server was (null for older sessions or when unknown). */
+  location: string | null;
+  down_mbps: number | null;
 }
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -952,10 +1021,17 @@ export function parseHistory(json: unknown): UsageEntry[] | null {
     return (
       numOrNull(r["vast_instance_id"]) && strOrNull(r["gpu_name"]) && numOrNull(r["dph"]) && isNum(r["started_at"]) &&
       numOrNull(r["ready_at"]) && numOrNull(r["ended_at"]) && isNum(r["duration_s"]) && numOrNull(r["estimated_cost"]) &&
-      strOrNull(r["started_by"]) && strOrNull(r["reason"]) && strOrNull(r["stop_by"]) && typeof r["active"] === "boolean"
+      strOrNull(r["started_by"]) && strOrNull(r["reason"]) && strOrNull(r["stop_by"]) && typeof r["active"] === "boolean" &&
+      (r["location"] === undefined || strOrNull(r["location"])) && (r["down_mbps"] === undefined || numOrNull(r["down_mbps"]))
     );
   });
-  return ok ? (list as UsageEntry[]) : null;
+  if (!ok) return null;
+  // An older server sends no location fields: they read as unknown.
+  return (list as Record<string, unknown>[]).map((r) => ({
+    ...(r as unknown as UsageEntry),
+    location: locationOf(r["location"]),
+    down_mbps: mbpsOf(r["down_mbps"]),
+  }));
 }
 
 const STOP_REASON_TEXT: Record<string, string> = {

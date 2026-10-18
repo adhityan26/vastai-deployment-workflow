@@ -252,7 +252,7 @@ describe("Lifecycle.start", () => {
     expect(out.record.vast_instance_id).toBe(900);
     // Vast's own start timestamp is unknown until reconcile reads it from the list.
     expect(out.record.vast_start_date).toBeNull();
-    expect(out.estimate).toEqual({ offer_id: 11, gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3 });
+    expect(out.estimate).toEqual({ offer_id: 11, gpu_name: "RTX A5000", dph: 0.3, horizon_hours: 3, max_cost: 0.3 * 3, location: null, down_mbps: null });
     expect(JSON.stringify(out)).not.toContain(TOKEN);
     expect((await registry.active())?.agent_token).toBe(TOKEN);
   });
@@ -941,9 +941,9 @@ describe("Lifecycle GPU choice", () => {
     vast.offers = [P40, R4090, A5000, A5000_CHEAP];
     const options = await life.gpuOptions();
     expect(options).toEqual([
-      { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true },
-      { name: "RTX 3090", dph: null, vram_gb: null, available: false },
-      { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+      { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true, location: null, down_mbps: null },
+      { name: "RTX 3090", dph: null, vram_gb: null, available: false, location: null, down_mbps: null },
+      { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true, location: null, down_mbps: null },
     ]);
     expect(vast.searches).toHaveLength(1);
     expect(vast.searches[0]!.allowedGpus).toEqual(ALLOWED);
@@ -1004,7 +1004,7 @@ describe("Lifecycle GPU choice", () => {
     const { life, vast } = setup();
     vast.offers = [{ id: 30, dph_total: 0.2, gpu_name: "RTX 3090", gpu_ram: 24576 }];
     // Config says RTX_3090; the query and the option list say RTX 3090.
-    expect((await life.gpuOptions())[1]).toEqual({ name: "RTX 3090", dph: 0.2, vram_gb: 24, available: true });
+    expect((await life.gpuOptions())[1]).toEqual({ name: "RTX 3090", dph: 0.2, vram_gb: 24, available: true, location: null, down_mbps: null });
     expect((await life.estimate("RTX_3090")).gpu_name).toBe("RTX 3090");
     expect((await life.estimate("RTX 3090")).offer_id).toBe(30);
     expect(vast.searches.slice(1).map((f) => f.allowedGpus)).toEqual([["RTX 3090"], ["RTX 3090"]]);
@@ -1041,7 +1041,7 @@ describe("Lifecycle re-checks every offer locally (Vast may ignore its filters)"
     await expect(life.estimate()).rejects.toBeInstanceOf(NoOffersError);
     expect(vast.requests).toHaveLength(0);
     expect(await registry.active()).toBeNull();
-    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: null, vram_gb: null, available: false });
+    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: null, vram_gb: null, available: false, location: null, down_mbps: null });
   });
 
   it("drops offers below VAST_MIN_VRAM_GB or without a usable price or VRAM", async () => {
@@ -1071,7 +1071,7 @@ describe("Lifecycle re-checks every offer locally (Vast may ignore its filters)"
       { id: 31, dph_total: 0.05, gpu_name: "RTX 4090", gpu_ram: 12000 },
       ok,
     ];
-    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: 0.4, vram_gb: 24, available: true });
+    expect((await life.gpuOptions())[2]).toEqual({ name: "RTX 4090", dph: 0.4, vram_gb: 24, available: true, location: null, down_mbps: null });
     await life.start("RTX 4090");
     expect(vast.createdOffers).toEqual([20]);
   });
@@ -1248,6 +1248,8 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     last_started: null,
     status_msg: "Successfully loaded vastai/comfy:v0.41.0-cuda-12.9-py312",
     machine_id: BAD,
+    geolocation: "Quebec, CA",
+    inet_down: 860,
   };
 
   function stuckSetup(over: Parameters<typeof setup>[0] = {}) {
@@ -1279,7 +1281,10 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     expect(await registry.active()).toBeNull();
     const view = await life.view();
     expect(view.state).toBe("none");
-    expect(view.start_failure).toEqual({ code: "start_stuck" });
+    expect(view.start_failure).toEqual({
+      code: "start_stuck",
+      server: { location: "Quebec, CA", down_mbps: 860, up_mbps: null, reliability: null, machine_id: BAD },
+    });
     const line = logs.find((l) => l.includes("start stuck"));
     expect(line).toBeDefined();
     expect(line).toContain("900");
@@ -1410,7 +1415,7 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
       newHostname: () => "vast-other",
       sleep: async () => undefined,
     });
-    expect((await life2.view()).start_failure).toEqual({ code: "start_stuck" });
+    expect((await life2.view()).start_failure).toEqual({ code: "start_stuck", server: null });
     await life2.start();
     expect(vast.createdOffers).toEqual([11, 12]);
   });
@@ -1441,5 +1446,46 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     const [startErr, report] = await Promise.all([errorOf(life.start()), life.reconcile()]);
     expect(startErr.name).toBe("AlreadyActiveError");
     expect(report.destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
+  });
+});
+
+describe("Lifecycle server location (where the rented machine is)", () => {
+  const offer = (id: number, dph: number, over: Record<string, unknown> = {}): Offer => ({
+    id, dph_total: dph, gpu_name: "RTX A5000", gpu_ram: 24564, ...over,
+  });
+
+  it("view shows Vast's row for the instance, else the chosen offer, field by field", async () => {
+    const { life, vast } = setup();
+    vast.offers = [offer(11, 0.3, { geolocation: "Quebec, CA", inet_down: 860, inet_up: 400, reliability2: 0.99, machine_id: 5 })];
+    expect((await life.view()).server).toBeNull();
+    await life.start();
+    expect((await life.view()).server).toEqual({ location: "Quebec, CA", down_mbps: 860, up_mbps: 400, reliability: 0.99, machine_id: 5 });
+    Object.assign(vast.instances[0]!, { geolocation: "Montreal, CA", inet_down: 700 });
+    expect((await life.view()).server).toEqual({ location: "Montreal, CA", down_mbps: 700, up_mbps: 400, reliability: 0.99, machine_id: 5 });
+  });
+
+  it("view has no server when nothing is known", async () => {
+    const { life } = setup();
+    await life.start();
+    expect((await life.view()).server).toBeNull();
+  });
+
+  it("gpuOptions and the estimate carry the cheapest offer's location and download speed", async () => {
+    const { life, vast } = setup();
+    vast.offers = [offer(11, 0.3, { geolocation: "Quebec, CA", inet_down: 860 }), offer(12, 0.4, { geolocation: "Paris, FR" })];
+    const a5000 = (await life.gpuOptions()).find((g) => g.name === "RTX A5000");
+    expect(a5000).toMatchObject({ dph: 0.3, location: "Quebec, CA", down_mbps: 860 });
+    const missing = (await life.gpuOptions()).find((g) => g.name === "RTX 4090");
+    expect(missing).toMatchObject({ available: false, location: null, down_mbps: null });
+    expect(await life.estimate()).toMatchObject({ offer_id: 11, location: "Quebec, CA", down_mbps: 860 });
+  });
+
+  it("re-checks VAST_MIN_DOWNLOAD_MBPS locally: a slower offer is never rented, an unknown speed is kept", async () => {
+    const { life, vast } = setup();
+    vast.offers = [offer(11, 0.1, { inet_down: 499 }), offer(12, 0.2), offer(13, 0.3, { inet_down: 900 })];
+    expect((await life.estimate()).offer_id).toBe(12);
+    vast.offers = [offer(11, 0.1, { inet_down: 499 }), offer(13, 0.3, { inet_down: 500 })];
+    await life.start();
+    expect(vast.createdOffers).toEqual([13]);
   });
 });

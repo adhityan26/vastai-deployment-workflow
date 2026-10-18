@@ -37,6 +37,7 @@ import {
   type Viewer,
   type StartFailReason,
   type StartFailureCode,
+  type ServerInfo,
   type StatusView,
   type UsageItem,
 } from "@vast-comfy/core";
@@ -90,7 +91,22 @@ function errorName(err: unknown): string {
 
 /** The estimate as the browser may see it: the offer id stays inside the server. */
 function publicEstimate(e: CostEstimate) {
-  return { gpu_name: e.gpu_name, dph: e.dph, horizon_hours: e.horizon_hours, max_cost: e.max_cost };
+  return {
+    gpu_name: e.gpu_name, dph: e.dph, horizon_hours: e.horizon_hours, max_cost: e.max_cost,
+    location: e.location, down_mbps: e.down_mbps,
+  };
+}
+
+/** Where the server is: location and speeds for everyone, the Vast machine id for admins only. */
+function publicServer(server: ServerInfo | null, isAdmin: boolean, scrub: (t: string) => string) {
+  if (server === null) return null;
+  const base = {
+    location: server.location === null ? null : scrub(server.location),
+    down_mbps: server.down_mbps,
+    up_mbps: server.up_mbps,
+    reliability: server.reliability,
+  };
+  return isAdmin ? { ...base, machine_id: server.machine_id } : base;
 }
 
 function intCfg(cfg: AppsConfig, key: string, env: string): number {
@@ -138,6 +154,8 @@ function publicUsage(e: UsageItem) {
     reason: e.reason,
     stop_by: e.stop_by,
     active: e.active,
+    location: e.location,
+    down_mbps: e.down_mbps,
   };
 }
 
@@ -183,10 +201,15 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
     cost_so_far: view.cost_so_far,
     progress: view.progress,
     gpu_name: view.gpu_name === null ? null : scrub(view.gpu_name).slice(0, GPU_NAME_MAX),
-    // A fixed code and its fixed text only: no machine or instance ids.
+    // A fixed code and its fixed text, plus where the server was (machine id for admins only).
     start_failure: view.start_failure
-      ? { code: view.start_failure.code, message: START_FAILURE_MESSAGES[view.start_failure.code] }
+      ? {
+          code: view.start_failure.code,
+          message: START_FAILURE_MESSAGES[view.start_failure.code],
+          server: publicServer(view.start_failure.server, isAdmin, scrub),
+        }
       : null,
+    server: publicServer(view.server, isAdmin, scrub),
     // Numbers plus a profile file name: no instance internals.
     download: view.download,
     remaining: view.remaining,

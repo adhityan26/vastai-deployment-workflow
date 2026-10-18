@@ -50,8 +50,9 @@ class FakeVast {
   nextId = ID + 1;
   createImpl: ((req: CreateRequest) => Promise<{ id: number }>) | null = null;
   destroyQueue: (DestroyOutcome | Error)[] = [];
+  offerOver: Record<string, unknown> = {};
   async searchOffers(): Promise<Offer[]> {
-    return [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 }];
+    return [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564, ...this.offerOver }];
   }
   async createInstance(_offer: number, req: CreateRequest): Promise<{ id: number }> {
     if (this.createImpl) return this.createImpl(req);
@@ -173,6 +174,7 @@ describe("usage history through the lifecycle", () => {
     expect(e).toEqual({
       instance_id: ID + 1, gpu_name: "RTX A5000", dph: 0.32, started_at: T0, ready_at: T0 + 120, ended_at: T0 + 3600,
       duration_s: 3600, estimated_cost: expect.closeTo(0.32, 6), started_by: "root", reason: "destroy_button", stop_by: "ayu", active: false,
+      location: null, down_mbps: null,
     });
     expect(h.logs).toContain("info usage: start gpu=RTX A5000 dph=0.300 by=root");
     expect(h.logs).toContain("info usage: stop reason=destroy_button duration_s=3600 by=ayu");
@@ -204,6 +206,16 @@ describe("usage history through the lifecycle", () => {
     expect((await h.lc.reconcile()).destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
     expect((await h.lc.history())[0]).toMatchObject({ reason: "boot_failed", active: false, ended_at: T0 + 5 * 60, stop_by: null });
     expect(h.logs).toContain("info usage: stop reason=boot_failed duration_s=300");
+  });
+
+  it("each session keeps where the server was and its download speed", async () => {
+    const h = await harness();
+    h.vast.offerOver = { geolocation: "Quebec, CA", inet_down: 860 };
+    await h.lc.start(undefined, "root");
+    expect((await h.lc.history())[0]).toMatchObject({ location: "Quebec, CA", down_mbps: 860 });
+    Object.assign(h.vast.instances[0]!, { geolocation: "Montreal, CA", inet_down: 650 });
+    await h.lc.view();
+    expect((await h.lc.history())[0]).toMatchObject({ location: "Montreal, CA", down_mbps: 650 });
   });
 
   it("an ambiguous create that never shows up is boot_failed (never created)", async () => {

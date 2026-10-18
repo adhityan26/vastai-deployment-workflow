@@ -58,7 +58,24 @@ export interface OfferFilters {
   allowedGpus: readonly string[];
 }
 
-export interface Offer {
+// Optional facts about the host, as Vast sends them on offers and instance rows. Unvalidated
+// here: serverInfo() is the one reader that checks and bounds them.
+interface HostFields {
+  /** Free text such as "Quebec, CA". */
+  geolocation?: unknown;
+  /** Mbps. */
+  inet_down?: unknown;
+  inet_up?: unknown;
+  /** 0..1 (newer field; `reliability` on older rows). */
+  reliability2?: unknown;
+  machine_id?: unknown;
+  host_id?: unknown;
+  verification?: unknown;
+  cpu_ram?: unknown;
+  disk_space?: unknown;
+}
+
+export interface Offer extends HostFields {
   id: number;
   dph_total: number;
   gpu_name?: string;
@@ -76,7 +93,7 @@ export interface CreateRequest {
   label: string;
 }
 
-export interface VastInstance {
+export interface VastInstance extends HostFields {
   id: number;
   label: string | null;
   actual_status: string | null;
@@ -91,6 +108,46 @@ export interface VastInstance {
 }
 
 export type DestroyOutcome = "destroyed" | "gone";
+
+/** Where a rented server is and how fast its network is; every field null when unknown or invalid. */
+export interface ServerInfo {
+  location: string | null;
+  down_mbps: number | null;
+  up_mbps: number | null;
+  reliability: number | null;
+  machine_id: number | null;
+}
+
+const LOCATION_MAX = 64;
+const LOCATION_CHARS = /[^\p{L}\p{N} ,.'()-]/gu;
+const MAX_MBPS = 1_000_000;
+
+/** Vast's free-text geolocation as a short plain string (letters, digits, spaces, ,.'()-), or null. */
+export function serverLocation(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = raw.replace(/\s+/g, " ").replace(LOCATION_CHARS, "").replace(/ +/g, " ").trim().slice(0, LOCATION_MAX).trim();
+  return text === "" ? null : text;
+}
+
+function mbps(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= MAX_MBPS ? Math.round(raw) : null;
+}
+
+function ratio(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : null;
+}
+
+/** The host facts of an offer or instance row, checked and bounded. */
+export function serverInfo(row: HostFields & { reliability?: unknown }): ServerInfo {
+  const machine = row.machine_id;
+  return {
+    location: serverLocation(row.geolocation),
+    down_mbps: mbps(row.inet_down),
+    up_mbps: mbps(row.inet_up),
+    reliability: ratio(row.reliability2) ?? ratio(row.reliability),
+    machine_id: typeof machine === "number" && Number.isSafeInteger(machine) && machine > 0 ? machine : null,
+  };
+}
 
 /**
  * The GPU model name as the offer query sends it: underscores become spaces (config may say

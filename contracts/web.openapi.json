@@ -49,7 +49,9 @@
           "gpu_name",
           "dph",
           "horizon_hours",
-          "max_cost"
+          "max_cost",
+          "location",
+          "down_mbps"
         ],
         "properties": {
           "gpu_name": {
@@ -66,6 +68,22 @@
           },
           "max_cost": {
             "type": "number"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "Location of that offer's server (see ServerInfo.location)"
+          },
+          "down_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Download speed of that offer's server in Mbps; offers below VAST_MIN_DOWNLOAD_MBPS are never listed"
           }
         },
         "description": "The cost estimate as the browser sees it; the offer id stays inside the server.",
@@ -78,7 +96,9 @@
           "name",
           "dph",
           "vram_gb",
-          "available"
+          "available",
+          "location",
+          "down_mbps"
         ],
         "properties": {
           "name": {
@@ -100,6 +120,22 @@
           },
           "available": {
             "type": "boolean"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "Location of that offer's server (see ServerInfo.location)"
+          },
+          "down_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Download speed of that offer's server in Mbps; offers below VAST_MIN_DOWNLOAD_MBPS are never listed"
           }
         }
       },
@@ -191,6 +227,7 @@
           "failed",
           "destroy_failed",
           "start_failure",
+          "server",
           "dph",
           "uptime_s",
           "cost_so_far",
@@ -342,10 +379,11 @@
               "object",
               "null"
             ],
-            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code and its fixed plain text only: no machine or instance ids.",
+            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code, its fixed plain text and where the server was.",
             "required": [
               "code",
-              "message"
+              "message",
+              "server"
             ],
             "properties": {
               "code": {
@@ -354,8 +392,30 @@
               "message": {
                 "type": "string",
                 "description": "e.g. 'The rented machine did not start. It was released; try Start again.'"
+              },
+              "server": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ServerInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Where the released server was, when known (since the web started)"
               }
             }
+          },
+          "server": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ServerInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the active instance's server is: Vast's instance row, else the offer chosen at Start (per field); null without an instance or when nothing is known"
           },
           "dph": {
             "type": [
@@ -940,7 +1000,9 @@
           "started_by",
           "reason",
           "stop_by",
-          "active"
+          "active",
+          "location",
+          "down_mbps"
         ],
         "properties": {
           "vast_instance_id": {
@@ -1026,6 +1088,22 @@
           "active": {
             "type": "boolean",
             "description": "True for the running session (ended_at and reason are null)"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "Where the session's server was (Vast's row, else the offer); null for sessions recorded before this field existed"
+          },
+          "down_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Download speed of that server in Mbps"
           }
         }
       },
@@ -1034,6 +1112,59 @@
           "start_stuck"
         ],
         "description": "Fixed code of a start that failed after POST /api/start returned. start_stuck: Vast had the instance but its container never started within VAST_START_STUCK_MIN (actual_status created, exited or stopped, or meant to be stopped without ever having started; an image still loading is not stuck); the web released it (usage reason boot_failed) and the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN."
+      },
+      "ServerInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "location",
+          "down_mbps",
+          "up_mbps",
+          "reliability"
+        ],
+        "description": "Where the rented server is and how fast its network is, as Vast reports it (null when unknown). machine_id (the Vast machine) is sent to admins only; no host id or IP address is ever sent.",
+        "properties": {
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "Vast geolocation of the server (e.g. 'Quebec, CA'), reduced to letters, digits, spaces and ,.'()- and at most 64 characters; show it as plain text"
+          },
+          "down_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Download speed of the server in Mbps (Vast inet_down)"
+          },
+          "up_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Upload speed in Mbps (Vast inet_up)"
+          },
+          "reliability": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Vast host reliability (reliability2, else reliability)"
+          },
+          "machine_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Admins only"
+          }
+        }
       }
     }
   },

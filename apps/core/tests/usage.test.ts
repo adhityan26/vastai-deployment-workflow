@@ -146,6 +146,7 @@ describe("UsageHistory", () => {
       {
         instance_id: 900, gpu_name: "RTX A5000", dph: 0.3, started_at: T0, ready_at: T0 + 300, ended_at: null,
         duration_s: 600, estimated_cost: 0.05, started_by: "root", reason: null, stop_by: null, active: true,
+        location: null, down_mbps: null,
       },
     ]);
     h.requestStop("vast-a", "destroy_button", "ayu");
@@ -408,5 +409,44 @@ describe("usageLimits and the reason list", () => {
 
   it("is the fixed enum", () => {
     expect([...STOP_REASONS]).toEqual(["destroy_button", "idle_timeout", "failsafe_deadline", "hard_cap", "boot_failed", "agent_unreachable", "gone"]);
+  });
+});
+
+describe("UsageHistory server location", () => {
+  it("keeps the offer's location and download speed, then Vast's own row, through the file", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-srv-")), "usage.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    h.begin("vast-a", T0, "root");
+    h.noteOffer("vast-a", "RTX 3090", 0.2, { location: "Quebec, CA", down_mbps: 860 });
+    expect(h.list(T0)[0]).toMatchObject({ location: "Quebec, CA", down_mbps: 860 });
+    h.noteServer("vast-a", { location: "Montreal, CA", down_mbps: null });
+    expect(h.list(T0)[0]).toMatchObject({ location: "Montreal, CA", down_mbps: 860 });
+    const again = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(again.list(T0)[0]).toMatchObject({ location: "Montreal, CA", down_mbps: 860 });
+  });
+
+  it("an entry written before the location existed still loads, with null location", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-old-")), "usage.json");
+    const old = {
+      hostname: "vast-old", instance_id: 900, gpu_name: "RTX A5000", dph: 0.3, started_at: T0, ready_at: null,
+      ended_at: T0 + 60, started_by: null, reason: "gone", stop_by: null, pending_stop: null, last_agent: null,
+    };
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [old] }));
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(h.list(T0 + 60)).toHaveLength(1);
+    expect(h.list(T0 + 60)[0]).toMatchObject({ instance_id: 900, location: null, down_mbps: null });
+  });
+
+  it("drops an entry whose saved location is not plain or too long, or whose speed is bad", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-bad-")), "usage.json");
+    const e = (host: string, location: unknown, down: unknown) => ({
+      hostname: host, instance_id: 900, gpu_name: null, dph: null, started_at: T0, ready_at: null, ended_at: T0 + 1,
+      started_by: null, reason: "gone", stop_by: null, pending_stop: null, last_agent: null, location, down_mbps: down,
+    });
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [
+      e("vast-ok", "Quebec, CA", 860), e("vast-a", "<b>", 1), e("vast-b", "x".repeat(65), 1), e("vast-c", "Paris", -3),
+    ] }));
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(h.list(T0).map((i) => i.location)).toEqual(["Quebec, CA"]);
   });
 });

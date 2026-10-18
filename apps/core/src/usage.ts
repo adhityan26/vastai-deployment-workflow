@@ -1,6 +1,7 @@
 import type { AgentStatus } from "./agent.js";
 import type { AppsConfig } from "./config.js";
 import { JsonFileStore, type ConsoleStoreLike } from "./console.js";
+import { serverLocation } from "./vast.js";
 
 // Usage history: one entry per instance session (Start accepted -> instance gone), persisted next
 // to the registry and bounded. Rules:
@@ -87,6 +88,15 @@ export interface UsageEntry {
   /** The web's own stop decision, written before it acted; it wins over any inference. */
   pending_stop: { reason: StopReason; by: string | null } | null;
   last_agent: AgentObservation | null;
+  /** Where the server was (Vast geolocation, plain and short) and its download speed in Mbps. */
+  location: string | null;
+  down_mbps: number | null;
+}
+
+/** What the history keeps about the server of a session. */
+export interface SessionServer {
+  location: string | null;
+  down_mbps: number | null;
 }
 
 /** One session as GET /api/history shows it (no hostname). */
@@ -104,6 +114,8 @@ export interface UsageItem {
   reason: StopReason | null;
   stop_by: string | null;
   active: boolean;
+  location: string | null;
+  down_mbps: number | null;
 }
 
 export interface UsageLimits {
@@ -217,10 +229,13 @@ export function inferStop(obs: AgentObservation | null, detectedAt: number, slac
 
 // ---- validation of a loaded file (anything unexpected drops that entry) ----
 
-const ENTRY_KEYS = [
+const LEGACY_KEYS = [
   "hostname", "instance_id", "gpu_name", "dph", "started_at", "ready_at", "ended_at",
   "started_by", "reason", "stop_by", "pending_stop", "last_agent",
-].sort().join(",");
+];
+// Entries written before the server location existed have exactly the legacy keys.
+const ENTRY_KEY_SETS = new Set([LEGACY_KEYS.sort().join(","), [...LEGACY_KEYS, "location", "down_mbps"].sort().join(",")]);
+const MAX_MBPS = 1_000_000;
 const OBS_KEYS = ["seen_at", "state", "reason", "idle_destroy_at", "failsafe_at", "hard_cap_at", "destroy_pending"].sort().join(",");
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -229,6 +244,12 @@ const intOrNull = (v: unknown): boolean => v === null || isInt(v);
 const nameOrNull = (v: unknown): boolean => v === null || (typeof v === "string" && v.length > 0 && v.length <= LABEL_MAX);
 const isReason = (v: unknown): v is StopReason => typeof v === "string" && (STOP_REASONS as readonly string[]).includes(v);
 const textOrNull = (v: unknown): boolean => v === null || (typeof v === "string" && AGENT_TEXT.test(v));
+const locationOrNull = (v: unknown): boolean => v === undefined || v === null || (typeof v === "string" && serverLocation(v) === v);
+const mbpsOrNull = (v: unknown): boolean => v === undefined || v === null || (isInt(v) && v >= 0 && v <= MAX_MBPS);
+
+function mbps(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= MAX_MBPS ? Math.round(raw) : null;
+}
 
 function validObservation(v: unknown): boolean {
   if (v === null) return true;
@@ -238,7 +259,7 @@ function validObservation(v: unknown): boolean {
 }
 
 function validEntry(v: unknown): v is UsageEntry {
-  if (!isObject(v) || Object.keys(v).sort().join(",") !== ENTRY_KEYS) return false;
+  if (!isObject(v) || !ENTRY_KEY_SETS.has(Object.keys(v).sort().join(","))) return false;
   const pending = v["pending_stop"];
   const pendingOk =
     pending === null ||
@@ -248,7 +269,7 @@ function validEntry(v: unknown): v is UsageEntry {
     intOrNull(v["instance_id"]) && nameOrNull(v["gpu_name"]) && (v["dph"] === null || price(v["dph"]) !== null) &&
     isInt(v["started_at"]) && intOrNull(v["ready_at"]) && intOrNull(v["ended_at"]) &&
     nameOrNull(v["started_by"]) && (v["reason"] === null || isReason(v["reason"])) && nameOrNull(v["stop_by"]) &&
-    pendingOk && validObservation(v["last_agent"]) &&
+    pendingOk && validObservation(v["last_agent"]) && locationOrNull(v["location"]) && mbpsOrNull(v["down_mbps"]) &&
     // An ended entry has a reason and an open one has none.
     (v["ended_at"] === null) === (v["reason"] === null)
   );
@@ -261,6 +282,8 @@ function cleanNames(e: UsageEntry): UsageEntry {
   e.stop_by = keep(e.stop_by, userLabel);
   e.gpu_name = keep(e.gpu_name, gpuLabel);
   if (e.pending_stop !== null) e.pending_stop.by = keep(e.pending_stop.by, userLabel);
+  e.location ??= null; // a legacy entry has neither field
+  e.down_mbps ??= null;
   return e;
 }
 
@@ -343,7 +366,7 @@ export class UsageHistory {
     for (const other of this.openHostnames()) if (other !== hostname) this.finish(other, at);
     this.all().push({
       hostname, instance_id: null, gpu_name: null, dph: null, started_at: at, ready_at: null, ended_at: null,
-      started_by: by, reason: null, stop_by: null, pending_stop: null, last_agent: null,
+      started_by: by, reason: null, stop_by: null, pending_stop: null, last_agent: null, location: null, down_mbps: null,
     });
     this.evict();
     this.persist();
@@ -378,13 +401,28 @@ export class UsageHistory {
     if (e !== undefined && fn(e)) this.persist();
   }
 
-  /** The offer the Start chose. */
-  noteOffer(hostname: string, gpu: unknown, dph: unknown): void {
+  /** The offer the Start chose (and where its server is, when the offer says). */
+  noteOffer(hostname: string, gpu: unknown, dph: unknown, server?: SessionServer): void {
     this.patch(hostname, (e) => {
       e.gpu_name = gpuLabel(gpu) ?? e.gpu_name;
       e.dph = price(dph) ?? e.dph;
+      if (server !== undefined) this.applyServer(e, server);
       return true;
     });
+  }
+
+  /** Vast's own row for the instance: its location and speed win over the offer's when known. */
+  noteServer(hostname: string, server: SessionServer): void {
+    this.patch(hostname, (e) => this.applyServer(e, server));
+  }
+
+  private applyServer(e: UsageEntry, server: SessionServer): boolean {
+    const location = serverLocation(server.location) ?? e.location;
+    const down = mbps(server.down_mbps) ?? e.down_mbps;
+    if (location === e.location && down === e.down_mbps) return false;
+    e.location = location;
+    e.down_mbps = down;
+    return true;
   }
 
   /** Vast created the instance: the session bills from here (logged once). */
@@ -508,6 +546,8 @@ export class UsageHistory {
         reason: e.reason,
         stop_by: e.stop_by,
         active: e.ended_at === null,
+        location: e.location,
+        down_mbps: e.down_mbps,
       };
     });
   }
