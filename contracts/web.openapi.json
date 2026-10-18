@@ -3396,7 +3396,7 @@
     "/api/upscale": {
       "post": {
         "operationId": "upscale",
-        "summary": "Upscale one image with the profile's upscale model (member or admin; shares the generate rate limit). 404 upscale_unavailable when the profile has no enabled upscale section. The image is base64 in the JSON body, validated like a reference (magic bytes, size, pixels), and the result size is bounded by UPSCALE_MAX_OUTPUT_PIXELS before anything is sent. Poll the returned id with GET /api/generate/{id}.",
+        "summary": "Upscale one image with the profile's upscale model (member or admin; shares the generate rate limit). 404 upscale_unavailable when the profile has no enabled upscale section. The image is base64 in the JSON body, validated like an edit reference (magic bytes, size, pixels, side), and both the model's intermediate image (input x model_factor squared, UPSCALE_MAX_INTERMEDIATE_PIXELS) and the result (input x factor squared, UPSCALE_MAX_OUTPUT_PIXELS) are bounded before anything is sent. Poll the returned id with GET /api/generate/{id}; the job's label is \"Upscale: <scale>, <w>x<h> to <W>x<H>\" and a saved result has gallery kind upscale.",
         "security": [
           {
             "sessionCookie": []
@@ -3467,7 +3467,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the upscale service (codes unknown_scale, upscale_too_large, no_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3477,7 +3477,7 @@
             }
           },
           "413": {
-            "description": "Body larger than the edit body limit derived from EDIT_MAX_REFERENCES and EDIT_REFERENCE_MAX_BYTES (code body_too_large)",
+            "description": "Body larger than the upscale body limit, derived from EDIT_REFERENCE_MAX_BYTES for one base64 image (code body_too_large)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3527,7 +3527,7 @@
             }
           },
           "502": {
-            "description": "ComfyUI unavailable (also while uploading a reference) or oversized response (codes comfy_unavailable, upstream_too_large)",
+            "description": "ComfyUI unavailable (also while uploading the image) or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3537,7 +3537,7 @@
             }
           },
           "404": {
-            "description": "Edit is not available on this server (code edit_unavailable)",
+            "description": "Upscale is not available on this server (code upscale_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
