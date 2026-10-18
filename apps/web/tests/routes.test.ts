@@ -308,6 +308,7 @@ async function harness(
     editReferenceMaxSide: 8192,
     editReferenceTypes: ["png", "jpeg", "webp"],
     upscaleMaxOutputPixels: 100_000,
+    upscaleMaxIntermediatePixels: 1_600_000,
     bootLogMaxLines: 500,
     bootLogMaxLineChars: 400,
     bootLogPollMinS: 5,
@@ -2336,6 +2337,21 @@ describe("upscale", () => {
     expect(res.statusCode).toBe(status);
     expect(res.json().error.code).toBe(code);
     expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("400 when the x4 model's own image is over its bound although the 2x result is not", async () => {
+    // 100x100 at 2x is a 40 000 pixel result, but ImageUpscaleWithModel first makes 400x400 = 160 000.
+    h = await harness({ profile: upscaleProfile(), cfg: { upscaleMaxIntermediatePixels: 100_000 } });
+    h.setComfy(comfyUp());
+    const res = await post("/api/upscale", await member(), ok);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("upscale_too_large");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("reads the pixel bounds at startup: a bad value stops the server, not a request", async () => {
+    await expect(harness({ profile: upscaleProfile(), cfg: { upscaleMaxIntermediatePixels: 0 } })).rejects.toThrow("UPSCALE_MAX_INTERMEDIATE_PIXELS");
+    await expect(harness({ profile: upscaleProfile(), cfg: { upscaleMaxOutputPixels: "x" } })).rejects.toThrow("UPSCALE_MAX_OUTPUT_PIXELS");
   });
 
   it("needs a session and a ready instance", async () => {

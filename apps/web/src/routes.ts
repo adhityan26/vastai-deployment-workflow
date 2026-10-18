@@ -20,6 +20,7 @@ import {
   edit as runEdit,
   upscale as runUpscale,
   type UpscaleDeps,
+  type UpscaleLimits,
   type UpscaleRequest,
   generate,
   labelHostname,
@@ -320,6 +321,14 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const upscaleSpec = deps.profile.upscale;
   const upscaleTemplate = deps.upscaleTemplate ?? null;
   const upscaleLimits: ReferenceLimits | null = upscaleSpec !== null && upscaleTemplate !== null ? referenceLimits(cfg) : null;
+  // The pixel bounds are read here, at startup, like every other limit (a bad value stops the server).
+  const upscalePixels: UpscaleLimits | null =
+    upscaleLimits === null
+      ? null
+      : {
+          maxOutputPixels: intCfg(cfg, "upscaleMaxOutputPixels", "UPSCALE_MAX_OUTPUT_PIXELS"),
+          maxIntermediatePixels: intCfg(cfg, "upscaleMaxIntermediatePixels", "UPSCALE_MAX_INTERMEDIATE_PIXELS"),
+        };
 
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
@@ -327,11 +336,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     template: kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : deps.template,
     cfg,
   });
-  const upscaleDeps = (hostname: string): UpscaleDeps => ({
+  const upscaleDeps = (hostname: string, limits: UpscaleLimits): UpscaleDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
     template: upscaleTemplate,
     cfg,
+    limits,
   });
   const editDeps = (hostname: string): EditDeps => ({
     comfy: deps.comfyFor(hostname),
@@ -680,7 +690,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     { ...member, schema: { body: UPSCALE_BODY }, ...(upscaleLimits === null ? {} : { bodyLimit: editBodyLimit({ ...upscaleLimits, maxCount: 1 }, 0) }) },
     async (req, reply) => {
       const identity = req.identity!;
-      if (upscaleLimits === null) return sendError(reply, 404, "upscale_unavailable", "upscale is not available on this server");
+      if (upscaleLimits === null || upscalePixels === null) return sendError(reply, 404, "upscale_unavailable", "upscale is not available on this server");
       const view = await deps.lifecycle.view();
       const hostname = view.record?.tailnet_hostname;
       if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
@@ -691,7 +701,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       let promptId: string;
       try {
-        ({ promptId } = await runUpscale(upscaleDeps(hostname), req.body as UpscaleRequest));
+        ({ promptId } = await runUpscale(upscaleDeps(hostname, upscalePixels), req.body as UpscaleRequest));
       } catch (err) {
         return submitFailure(reply, err, "upscale");
       }

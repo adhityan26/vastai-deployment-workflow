@@ -8,7 +8,7 @@ export interface ScaleOption {
   readonly name: string;
   /** What goes into the workflow's scale input (the model upscales by a fixed factor; this trims it). */
   readonly value: number;
-  /** The final enlargement factor, used only to bound the output size before anything is sent. */
+  /** The final enlargement factor: model factor times value. Bounds the result size before anything is sent. */
   readonly factor: number;
 }
 
@@ -16,6 +16,11 @@ export interface UpscaleSpec {
   readonly workflow: string;
   /** The profile `models` file the workflow's upscale model loader reads. */
   readonly model: string;
+  /**
+   * The model's own enlargement (ImageUpscaleWithModel always makes it, before the scale trims it):
+   * the intermediate image is width x height x modelFactor squared.
+   */
+  readonly modelFactor: number;
   /** The loader input that takes the model file name (set from `model`, so the file is named once). */
   readonly modelLoader: { readonly node: string; readonly input: string };
   readonly image: { readonly node: string; readonly input: string };
@@ -27,8 +32,11 @@ const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
 const NODE_ID = /^[A-Za-z0-9_]{1,32}$/;
 const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
 const SCALE_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._x-]{0,15}$/;
-const KEYS = new Set(["enabled", "workflow", "model", "model_loader", "image", "scale", "scales"]);
+const KEYS = new Set(["enabled", "workflow", "model", "model_factor", "model_loader", "image", "scale", "scales"]);
 const MAX_FACTOR = 16;
+const MAX_MODEL_FACTOR = 8;
+// Tolerance when checking a declared factor against model_factor x value (values like 0.5 are exact; 1/3 is not).
+const FACTOR_EPSILON = 1e-9;
 
 const mapping = (v: unknown, what: string): Record<string, unknown> => {
   if (typeof v !== "object" || v === null || Array.isArray(v)) throw new ProfileError(`${what} must be a mapping`);
@@ -55,20 +63,28 @@ export function parseUpscale(raw: unknown, modelFiles: readonly string[]): Upsca
   if (typeof workflow !== "string" || !WORKFLOW_NAME.test(workflow)) throw new ProfileError("upscale workflow is not a valid workflow name");
   const model = m["model"];
   if (typeof model !== "string" || model === "") throw new ProfileError("upscale model must be a file name");
+  const modelFactor = m["model_factor"];
+  if (typeof modelFactor !== "number" || !Number.isInteger(modelFactor) || modelFactor < 1 || modelFactor > MAX_MODEL_FACTOR) {
+    throw new ProfileError(`upscale model_factor must be the model's whole enlargement factor (1 to ${MAX_MODEL_FACTOR})`);
+  }
   const list = m["scales"];
   if (!Array.isArray(list) || list.length === 0) throw new ProfileError("upscale scales must be a non-empty list");
   const scales = list.map((item): ScaleOption => {
     const s = mapping(item, "upscale scale");
-    const { name, value, factor } = s;
+    const { name, value } = s;
     if (typeof name !== "string" || !SCALE_NAME.test(name)) throw new ProfileError("upscale scale name is not plain");
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new ProfileError(`upscale scale ${name} value must be a positive number`);
-    if (typeof factor !== "number" || !Number.isFinite(factor) || factor <= 0 || factor > MAX_FACTOR) {
-      throw new ProfileError(`upscale scale ${name} factor must be between 0 and ${MAX_FACTOR}`);
+    // The final enlargement follows from the model and the trim; a declared `factor` must agree with it.
+    const factor = modelFactor * value;
+    if (factor > MAX_FACTOR) throw new ProfileError(`upscale scale ${name} factor must be between 0 and ${MAX_FACTOR}`);
+    const declared = s["factor"];
+    if (declared !== undefined && (typeof declared !== "number" || Math.abs(declared - factor) > FACTOR_EPSILON)) {
+      throw new ProfileError(`upscale scale ${name} factor must equal model_factor x value (${factor})`);
     }
     return { name, value, factor };
   });
   if (new Set(scales.map((s) => s.name)).size !== scales.length) throw new ProfileError("upscale scale names must be unique");
-  const spec: UpscaleSpec = { workflow, model, modelLoader: ref(m["model_loader"], "upscale model_loader"), image: ref(m["image"], "upscale image"), scale: ref(m["scale"], "upscale scale input"), scales };
+  const spec: UpscaleSpec = { workflow, model, modelFactor, modelLoader: ref(m["model_loader"], "upscale model_loader"), image: ref(m["image"], "upscale image"), scale: ref(m["scale"], "upscale scale input"), scales };
   if (!m["enabled"]) return null;
   if (!modelFiles.some((f) => f.split("/").pop() === model)) throw new ProfileError(`upscale model ${model} is not listed in models`);
   return spec;

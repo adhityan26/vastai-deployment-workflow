@@ -24,7 +24,8 @@ function section(mutate?: (s: Doc) => void): Doc {
   mutate?.(s);
   return s;
 }
-const spec = () => parseUpscale(section(), [MODEL])!;
+const MODELS = [MODEL];
+const spec = () => parseUpscale(section(), MODELS)!;
 
 function png(width: number, height: number): Buffer {
   const ihdr = Buffer.alloc(25);
@@ -51,6 +52,12 @@ describe("parseUpscale", () => {
     expect(() => parseUpscale(section(), ["other.pth"])).toThrow(ProfileError);
   });
 
+  it("derives the final factor from the model factor when a scale leaves it out", () => {
+    const s = parseUpscale(section((x) => { x.scales = [{ name: "2x", value: 0.5 }]; }), MODELS)!;
+    expect(s.modelFactor).toBe(4);
+    expect(s.scales[0]!.factor).toBe(2);
+  });
+
   it.each<[string, (s: Doc) => void]>([
     ["unknown key", (s) => (s.extra = 1)],
     ["enabled not boolean", (s) => (s.enabled = "yes")],
@@ -61,10 +68,14 @@ describe("parseUpscale", () => {
     ["duplicate scale", (s) => (s.scales[1].name = "2x")],
     ["zero value", (s) => (s.scales[0].value = 0)],
     ["huge factor", (s) => (s.scales[0].factor = 1000)],
+    ["factor that is not model_factor times value", (s) => (s.scales[0].factor = 3)],
+    ["no model_factor", (s) => delete s.model_factor],
+    ["zero model_factor", (s) => (s.model_factor = 0)],
+    ["fractional model_factor", (s) => (s.model_factor = 2.5)],
     ["no model_loader", (s) => delete s.model_loader],
   ])("refuses a section with %s (also when disabled)", (_n, mutate) => {
-    expect(() => parseUpscale(section((s) => { mutate(s); }), [MODEL])).toThrow(ProfileError);
-    if (_n !== "enabled not boolean") expect(() => parseUpscale(section((s) => { s.enabled = false; mutate(s); }), [MODEL])).toThrow(ProfileError);
+    expect(() => parseUpscale(section((s) => { mutate(s); }), MODELS)).toThrow(ProfileError);
+    if (_n !== "enabled not boolean") expect(() => parseUpscale(section((s) => { s.enabled = false; mutate(s); }), MODELS)).toThrow(ProfileError);
   });
 });
 
@@ -98,7 +109,7 @@ describe("upscale", () => {
     res.end(JSON.stringify(body));
   };
 
-  async function fake(over: Record<string, unknown> = {}, enabled = true) {
+  async function fake(over: Record<string, number> = {}, enabled = true, cfgOver: Record<string, unknown> = {}) {
     const seen: { url: string; body: Buffer }[] = [];
     server = createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -116,16 +127,17 @@ describe("upscale", () => {
     const cfg = {
       comfyPort: port, httpTimeoutSApps: 5, webJsonMaxBytes: 65536, webImageMaxBytes: 65536, webImageTimeoutS: 5,
       editMaxReferences: 3, editReferenceMaxBytes: 4096, editReferenceMaxPixels: 1_000_000, editReferenceMaxSide: 8192, editReferenceTypes: ["png", "jpeg", "webp"],
-      upscaleMaxOutputPixels: 4_000_000, secretNames: [], ...over,
+      secretNames: [], ...cfgOver,
     } as unknown as AppsConfig;
     const profile = { upscale: enabled ? spec() : null } as unknown as Profile;
-    const deps: UpscaleDeps = { comfy: new ComfyClient("127.0.0.1", cfg), profile, template, cfg, newName: () => "tok" };
+    const limits = { maxOutputPixels: 4_000_000, maxIntermediatePixels: 64_000_000, ...over };
+    const deps: UpscaleDeps = { comfy: new ComfyClient("127.0.0.1", cfg), profile, template, cfg, limits, newName: () => "tok" };
     return { deps, seen };
   }
 
   it("uploads the image under a server-chosen name, then submits the filled workflow", async () => {
     const { deps, seen } = await fake();
-    expect(await upscale(deps, { image: png(100, 100).toString("base64"), scale: "4x" })).toEqual({ promptId: "p-up" });
+    expect(await upscale(deps, { image: png(100, 50).toString("base64"), scale: "4x" })).toEqual({ promptId: "p-up", width: 100, height: 50 });
     expect(seen.map((s) => s.url)).toEqual(["/upload/image", "/prompt"]);
     expect(seen[0]!.body.toString("latin1")).toContain('filename="upscale-tok.png"');
     const prompt = JSON.parse(seen[1]!.body.toString()).prompt;
@@ -149,9 +161,17 @@ describe("upscale", () => {
   });
 
   it("allows a result exactly at the limit and refuses one pixel more", async () => {
-    const { deps } = await fake({ upscaleMaxOutputPixels: 100 * 100 * 4 });
+    const { deps } = await fake({ maxOutputPixels: 100 * 100 * 4 });
     await expect(upscale(deps, { image: png(100, 100).toString("base64"), scale: "2x" })).resolves.toBeDefined();
     await expect(upscale(deps, { image: png(101, 100).toString("base64"), scale: "2x" })).rejects.toMatchObject({ code: "upscale_too_large" });
+  });
+
+  it("also bounds the model's native-factor image that comes before the trim", async () => {
+    // 8 MP in at 2x: the result (32 MP) is inside the final bound, but the model first makes 4x (128 MP).
+    const { deps, seen } = await fake({ maxOutputPixels: 33_554_432, maxIntermediatePixels: 33_554_432 }, true, { editReferenceMaxPixels: 16_777_216 });
+    await expect(upscale(deps, { image: png(4096, 2048).toString("base64"), scale: "2x" })).rejects.toMatchObject({ code: "upscale_too_large", message: expect.stringContaining("intermediate") });
+    expect(seen).toHaveLength(0);
+    await expect(upscale(deps, { image: png(1448, 1448).toString("base64"), scale: "2x" })).resolves.toBeDefined(); // 4x of it is 33.5 MP
   });
 
   it("is unavailable without an upscale section", async () => {

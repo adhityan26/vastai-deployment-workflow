@@ -154,7 +154,16 @@ export interface UpscaleDeps {
   /** The upscale workflow template JSON from the profile (never from the request). */
   template: unknown;
   cfg: AppsConfig;
+  /** Pixel bounds read once at startup (UPSCALE_MAX_OUTPUT_PIXELS, UPSCALE_MAX_INTERMEDIATE_PIXELS). */
+  limits: UpscaleLimits;
   newName?: () => string;
+}
+
+export interface UpscaleLimits {
+  /** Largest width x height of the result. */
+  readonly maxOutputPixels: number;
+  /** Largest width x height of the model's own output, before the scale trims it. */
+  readonly maxIntermediatePixels: number;
 }
 
 export interface UpscaleRequest {
@@ -165,27 +174,33 @@ export interface UpscaleRequest {
 }
 
 /**
- * Validate an upscale request (the image like a reference, the scale against the profile, the output
- * size against UPSCALE_MAX_OUTPUT_PIXELS), upload the image and submit the filled workflow. Nothing
- * leaves for the instance before every check has passed.
+ * Validate an upscale request (the image like a reference, the scale against the profile, the model's
+ * intermediate image and the result against their pixel bounds), upload the image and submit the
+ * filled workflow. Nothing leaves for the instance before every check has passed. Returns the input
+ * size too, so the job can say what was upscaled.
  */
-export async function upscale(deps: UpscaleDeps, input: UpscaleRequest): Promise<{ promptId: string }> {
+export async function upscale(deps: UpscaleDeps, input: UpscaleRequest): Promise<{ promptId: string; width: number; height: number }> {
   const spec = deps.profile.upscale;
   if (spec === null) throw new GenerateInputError("upscale_unavailable", "this profile has no upscale section");
   if (typeof input.scale !== "string") throw new GenerateInputError("unknown_scale", "scale is not offered by the profile");
   const option = spec.scales.find((s) => s.name === input.scale);
   if (!option) throw new GenerateInputError("unknown_scale", "scale is not offered by the profile");
   const [image] = decodeReferences(typeof input.image === "string" ? [input.image] : null, referenceLimits(deps.cfg));
-  const maxOut = deps.cfg["upscaleMaxOutputPixels"];
-  if (typeof maxOut !== "number" || !Number.isInteger(maxOut) || maxOut < 1) throw new Error("UPSCALE_MAX_OUTPUT_PIXELS must be a positive integer");
-  if (image!.width * image!.height * option.factor * option.factor > maxOut) {
-    throw new GenerateInputError("upscale_too_large", `the result would have more than ${maxOut} pixels`);
+  const pixels = image!.width * image!.height;
+  // ImageUpscaleWithModel always enlarges by the model's own factor first; ImageScaleBy trims after.
+  const { maxOutputPixels, maxIntermediatePixels } = deps.limits;
+  if (pixels * spec.modelFactor * spec.modelFactor > maxIntermediatePixels) {
+    throw new GenerateInputError("upscale_too_large", `the model's intermediate image (${spec.modelFactor}x) would have more than ${maxIntermediatePixels} pixels`);
+  }
+  if (pixels * option.factor * option.factor > maxOutputPixels) {
+    throw new GenerateInputError("upscale_too_large", `the result would have more than ${maxOutputPixels} pixels`);
   }
   buildUpscalePrompt(spec, deps.template, "check-0.png", option.name); // template mismatch surfaces before the upload
   const kind = FILE_TYPES[image!.type];
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
   const stored = await deps.comfy.uploadImage(`upscale-${token()}.${kind.ext}`, image!.bytes, kind.contentType);
-  return deps.comfy.submit(buildUpscalePrompt(spec, deps.template, stored.name, option.name));
+  const { promptId } = await deps.comfy.submit(buildUpscalePrompt(spec, deps.template, stored.name, option.name));
+  return { promptId, width: image!.width, height: image!.height };
 }
 
 function clipMessage(text: string): string {

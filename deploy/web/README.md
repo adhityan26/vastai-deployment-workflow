@@ -318,8 +318,11 @@ A third mode, "Upscale": one image in, a bigger one out (`ImageUpscaleWithModel`
    to `models:`.
 3. Set `upscale.model` to that file name and `enabled: true`. Deploy; the model downloads at boot like the others.
 
-The result size is bounded before anything is sent: input width x height x factor squared must be at most
-`UPSCALE_MAX_OUTPUT_PIXELS` (default 32 MP). The image is validated like an edit reference (magic bytes, size,
+Two sizes are bounded before anything is sent. `ImageUpscaleWithModel` always makes the model's own factor
+(`upscale.model_factor`, 4 for an x4 model) before `ImageScaleBy` trims it, so input width x height x model_factor
+squared must be at most `UPSCALE_MAX_INTERMEDIATE_PIXELS`, and input x factor squared (the result) at most
+`UPSCALE_MAX_OUTPUT_PIXELS` (both default 32 MP, read at startup). With the defaults an x4 model takes inputs up to
+about 2 MP (1448x1448) at any scale. Each scale's `factor` must equal model_factor x value, or the profile is refused. The image is validated like an edit reference (magic bytes, size,
 pixels). Every result also gets an "Upscale" button next to "Use as reference". UNVERIFIED on a real instance: the
 workflow `instance/workflows/image-upscale.json` has never run, and VRAM use of a large upscale is unknown.
 

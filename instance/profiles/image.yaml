@@ -75,12 +75,15 @@ styles:
 # (1) CHECK THE LICENSE of the upscale model you pick (not done yet; Real-ESRGAN and 4x-UltraSharp differ),
 # (2) on a machine with internet run scripts/pin_model.py <repo> <file> models/upscale_models/ and add the line it
 # prints to `models:` above, (3) set `model:` to that file's name and `enabled: true`.
-# The model upscales by a fixed factor (usually 4); `scales` trims it with ImageScaleBy: value 0.5 gives 2x,
-# 1.0 gives 4x. `factor` is the final enlargement and only bounds the result size (UPSCALE_MAX_OUTPUT_PIXELS).
+# The model upscales by its own fixed factor (`model_factor`, 4 for x4 models) and `scales` trims that with
+# ImageScaleBy: value 0.5 gives 2x, 1.0 gives 4x. `factor` is the final enlargement; it must equal
+# model_factor x value (the loader refuses the profile otherwise). The web app bounds both the model's
+# intermediate image (UPSCALE_MAX_INTERMEDIATE_PIXELS) and the result (UPSCALE_MAX_OUTPUT_PIXELS).
 upscale:
   enabled: false
   workflow: image-upscale.json
   model: REPLACE_WITH_PINNED_UPSCALE_MODEL.pth
+  model_factor: 4
   model_loader: {node: "2", input: model_name}
   image: {node: "1", input: image}
   scale: {node: "4", input: scale_by}
