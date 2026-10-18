@@ -478,3 +478,180 @@ export function screenForMe(status: number, json: unknown): { screen: Screen; me
   if (role !== "admin" && role !== "member") return { screen: "noaccess", me: null };
   return { screen: "app", me: { name, username, role } };
 }
+
+// ---- boot console (admin only) ----
+
+export const CONSOLE_POLL_MS = 3_000;
+export const CONSOLE_POLL_MAX_MS = 30_000; // ceiling when the console endpoint keeps failing
+export const CONSOLE_VIEW_MAX_LINES = 2_000; // the page keeps at most this many lines (the newest)
+const CONSOLE_BOTTOM_SLACK_PX = 24; // closer than this to the end counts as "at the bottom"
+export const CONSOLE_PATH = "/api/console";
+
+export type PhaseStatus = "pending" | "running" | "done" | "failed";
+export interface ConsolePhase { id: string; name: string; status: PhaseStatus }
+export interface ConsoleLine { seq: number; t: number; source: string; text: string }
+export interface ConsolePayload {
+  generation: number;
+  instance: { state: string; ended: boolean; ended_reason: string | null };
+  phases: ConsolePhase[];
+  lines: ConsoleLine[];
+  last_seq: number;
+  truncated: boolean;
+  source_error: string | null;
+}
+
+const PHASE_STATUSES = new Set<string>(["pending", "running", "done", "failed"]);
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+/** Check GET /api/console; null when the payload is unusable. Bad lines or phases are dropped. */
+export function parseConsole(json: unknown): ConsolePayload | null {
+  if (!isObj(json) || !isObj(json["instance"])) return null;
+  const inst = json["instance"];
+  if (typeof inst["state"] !== "string" || typeof inst["ended"] !== "boolean") return null;
+  if (!isCount(json["generation"]) || !isCount(json["last_seq"]) || !Array.isArray(json["lines"]) || !Array.isArray(json["phases"])) return null;
+  return {
+    generation: json["generation"],
+    instance: { state: inst["state"], ended: inst["ended"], ended_reason: typeof inst["ended_reason"] === "string" ? inst["ended_reason"] : null },
+    phases: json["phases"].flatMap((p: unknown) =>
+      isObj(p) && typeof p["id"] === "string" && typeof p["name"] === "string" && typeof p["status"] === "string" && PHASE_STATUSES.has(p["status"])
+        ? [{ id: p["id"], name: p["name"], status: p["status"] as PhaseStatus }]
+        : [],
+    ),
+    lines: json["lines"].flatMap((l: unknown) =>
+      isObj(l) && isCount(l["seq"]) && typeof l["text"] === "string"
+        ? [{ seq: l["seq"], t: num(l["t"]) ?? 0, source: typeof l["source"] === "string" ? l["source"] : "", text: l["text"] }]
+        : [],
+    ),
+    last_seq: json["last_seq"],
+    truncated: json["truncated"] === true,
+    source_error: typeof json["source_error"] === "string" ? json["source_error"] : null,
+  };
+}
+
+export interface ConsoleView {
+  generation: number | null;
+  lines: ConsoleLine[];
+  /** Highest sequence number received: the `after` of the next request. */
+  lastSeq: number;
+  /** Lines with seq <= this were hidden by "Clear view". */
+  clearedUpTo: number;
+}
+
+export const EMPTY_CONSOLE_VIEW: ConsoleView = { generation: null, lines: [], lastSeq: 0, clearedUpTo: 0 };
+
+/**
+ * Merge an answer into the view: only lines newer than what is held are added (no duplicates,
+ * no going back), a new generation (a new Start) replaces everything, and the newest lines are
+ * kept when the cap is exceeded.
+ */
+export function mergeConsole(view: ConsoleView, payload: ConsolePayload, cap = CONSOLE_VIEW_MAX_LINES): ConsoleView {
+  const fresh = view.generation !== null && view.generation !== payload.generation;
+  const base: ConsoleView = fresh ? { ...EMPTY_CONSOLE_VIEW, generation: payload.generation } : { ...view, generation: payload.generation };
+  let top = base.lines.length > 0 ? base.lines[base.lines.length - 1]!.seq : 0;
+  const added: ConsoleLine[] = [];
+  for (const l of payload.lines) {
+    if (l.seq > top) {
+      added.push(l);
+      top = l.seq;
+    }
+  }
+  const lines = base.lines.concat(added);
+  return {
+    generation: base.generation,
+    lines: lines.length > cap ? lines.slice(lines.length - cap) : lines,
+    lastSeq: Math.max(base.lastSeq, payload.last_seq, top),
+    clearedUpTo: base.clearedUpTo,
+  };
+}
+
+/** "Clear view": hide what is shown now; later lines still appear. */
+export function clearConsoleView(view: ConsoleView): ConsoleView {
+  return { ...view, clearedUpTo: view.lastSeq };
+}
+
+export function visibleLines(view: ConsoleView): ConsoleLine[] {
+  return view.lines.filter((l) => l.seq > view.clearedUpTo);
+}
+
+/** True when the scroll position is at (or within a few pixels of) the end of the log. */
+export function isNearBottom(scrollTop: number, clientHeight: number, scrollHeight: number): boolean {
+  return scrollHeight - scrollTop - clientHeight <= CONSOLE_BOTTOM_SLACK_PX;
+}
+
+/** Short UTC time of a line, HH:MM:SS. */
+export function lineTime(t: number): string {
+  if (!Number.isFinite(t) || t <= 0) return "--:--:--";
+  return new Date(t * 1000).toISOString().slice(11, 19);
+}
+
+/** One line as plain text, as shown (time, source tag, text). */
+export function lineText(l: ConsoleLine): string {
+  return `${lineTime(l.t)} [${l.source}] ${l.text}`;
+}
+
+/** The text copied or downloaded: exactly the visible lines. */
+export function consoleExport(lines: readonly ConsoleLine[]): string {
+  return lines.map(lineText).join("\n") + (lines.length > 0 ? "\n" : "");
+}
+
+/** Delay before the next console poll; null while it must not poll (tab hidden). */
+export function consoleDelayMs(hidden: boolean, failures: number): number | null {
+  if (hidden) return null;
+  return Math.min(CONSOLE_POLL_MAX_MS, CONSOLE_POLL_MS * 2 ** Math.min(failures, 6));
+}
+
+/** Whether to keep polling after an answer: not once there is no instance any more. */
+export function consoleKeepsPolling(stateName: string | null): boolean {
+  return stateName !== null && stateName !== "none";
+}
+
+/** The card shows while an instance exists, and for the last ended one until a new Start. */
+export function consoleCardVisible(role: Role | null, payload: ConsolePayload | null): boolean {
+  if (role !== "admin" || payload === null) return false;
+  return payload.instance.state !== "none" || payload.instance.ended;
+}
+
+const END_REASON_TEXT: Record<string, string> = {
+  destroyed: "destroyed from the page",
+  start_failed: "the start failed",
+  hard_cap: "reached the hard cap",
+  boot_timeout: "the boot took too long",
+  unreachable: "the agent stayed unreachable",
+  destroy_retry: "destroyed after a retry",
+  destroy_requested: "destroy requested",
+  vanished: "it vanished from Vast",
+  never_created: "it was never created on Vast",
+  gone: "it is gone",
+};
+
+export function endedText(reason: string | null): string {
+  const why = reason === null ? undefined : END_REASON_TEXT[reason];
+  return why === undefined ? "Instance ended." : `Instance ended: ${why}.`;
+}
+
+export const PHASE_MARKS: Record<PhaseStatus, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
+
+// Plain sentences per phase id (ids are BOOT_STEPS in apps/core/src/console.ts, plus image_pull).
+const PHASE_SENTENCES: Record<string, string> = {
+  image_pull: "Pulling the container image, usually 1-3 minutes",
+  install_tools: "Installing tools, usually under a minute",
+  failsafe: "Starting the failsafe timer, a few seconds",
+  tailscale: "Installing tools and joining Tailscale, usually 2-4 minutes",
+  agent: "Starting the agent, usually under a minute",
+  nodes: "Installing ComfyUI nodes, usually 1-3 minutes",
+  models: "Downloading models, this can take several minutes",
+  comfyui: "Starting ComfyUI, usually 1-2 minutes",
+};
+
+/**
+ * A plain sentence for the phase that is running now, or null when boot is not in progress
+ * (no instance, ended, ready, failed, or no phase is running).
+ */
+export function bootSentence(payload: ConsolePayload | null): string | null {
+  if (payload === null || payload.instance.ended || payload.instance.state === "none") return null;
+  if (payload.phases.some((p) => p.status === "failed")) return null;
+  const running = payload.phases.find((p) => p.status === "running");
+  if (running === undefined || running.id === "ready") return null;
+  const sentence = PHASE_SENTENCES[running.id];
+  return sentence === undefined ? `${running.name}, in progress` : sentence;
+}

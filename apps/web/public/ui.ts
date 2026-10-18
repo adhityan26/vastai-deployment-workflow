@@ -7,6 +7,23 @@ import {
   screenForMe,
   withoutLoginError,
   CLOCK_TICK_MS,
+  CONSOLE_PATH,
+  EMPTY_CONSOLE_VIEW,
+  PHASE_MARKS,
+  bootSentence,
+  clearConsoleView,
+  consoleCardVisible,
+  consoleDelayMs,
+  consoleExport,
+  consoleKeepsPolling,
+  endedText,
+  isNearBottom,
+  lineTime,
+  mergeConsole,
+  parseConsole,
+  visibleLines,
+  type ConsolePayload,
+  type ConsoleView,
   DEFAULT_EXTEND_MINUTES,
   GPU_STORAGE_KEY,
   JOB_POLL_MAX_ERRORS,
@@ -59,11 +76,13 @@ export interface App {
   ready: Promise<void>;
   /** Fetch the state once and redraw. */
   refresh(): Promise<void>;
+  /** Fetch the boot console once (admins only) and redraw it. */
+  pollConsole(): Promise<void>;
   stop(): void;
 }
 
 class ApiError extends Error {
-  constructor(message: string, readonly reason: string | null = null) {
+  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null) {
     super(message);
   }
 }
@@ -108,6 +127,18 @@ export function mountApp(doc: Document, env: Env): App {
   let unknownKey = "";
   let restoreFocus: HTMLElement | null = null;
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
+  let consoleView: ConsoleView = EMPTY_CONSOLE_VIEW;
+  let consolePayload: ConsolePayload | null = null;
+  let consoleHandle: unknown = null;
+  let consoleFailures = 0;
+  let consoleBusy = false;
+  let consoleStopped = false; // the endpoint refused us (401/403): never ask again
+  let consolePaused = false; // the user's Pause button
+  let consoleLoaded = false; // at least one answer arrived
+  let consoleFollow = true; // auto-scroll: off while the user is scrolled up
+  let consoleStepsKey = "";
+  let consoleRenderKey = "";
+  let consoleRenderedSeq = 0;
   const history: HistoryEntry[] = [];
 
   // ---- requests ----
@@ -134,7 +165,7 @@ export function mountApp(doc: Document, env: Env): App {
       throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
     }
     if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
-    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json));
+    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status);
     return json;
   }
 
@@ -174,8 +205,10 @@ export function mountApp(doc: Document, env: Env): App {
     active = false;
     if (pollHandle !== null) env.clearTimeout(pollHandle);
     if (tickHandle !== null) env.clearTimeout(tickHandle);
+    if (consoleHandle !== null) env.clearTimeout(consoleHandle);
     pollHandle = null;
     tickHandle = null;
+    consoleHandle = null;
   }
 
   function setText(id: string, text: string): void {
@@ -192,6 +225,7 @@ export function mountApp(doc: Document, env: Env): App {
     state = null;
     samples = [];
     jobPending = false;
+    resetConsole();
     setText("login-message", kind === "login" ? message : "");
     setText("noaccess-error", "");
     setText("logout-error", "");
@@ -662,6 +696,16 @@ export function mountApp(doc: Document, env: Env): App {
     $("f-hardcap").textContent = c.hardCap;
   }
 
+  // While the boot console says a phase is running, a plain sentence replaces the "agent cannot
+  // be reached" warning (it is expected during boot). Members have no console: they keep the warning.
+  function renderAgentNotice(s: ApiState): void {
+    const sentence = s.agent_unreachable && s.role === "admin" ? bootSentence(consolePayload) : null;
+    const box = $("boot-sentence");
+    box.textContent = sentence ?? "";
+    box.hidden = sentence === null;
+    $("alert-agent").hidden = !s.agent_unreachable || sentence !== null;
+  }
+
   function renderStatus(s: ApiState): void {
     const pct = s.download ? downloadPercent(s.download) : progressPercent(s.progress);
     const info = stateInfo(s.state, pct);
@@ -680,7 +724,7 @@ export function mountApp(doc: Document, env: Env): App {
       text.hidden = s.download === null;
       $("progress-file").textContent = s.progress?.file ?? s.download?.current_file ?? "";
     }
-    $("alert-agent").hidden = !s.agent_unreachable;
+    renderAgentNotice(s);
     const failed = $("alert-failed");
     failed.hidden = !(s.state === "failed" || s.failed !== null);
     $("failed-reason").textContent = s.failed?.reason ?? "";
@@ -867,6 +911,210 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  // ---- boot console (admin only) ----
+
+  const consoleCard = $("console-card");
+  const consoleLog = $("console-log");
+  const consoleSteps = $("console-steps");
+  const consolePauseBtn = $<HTMLButtonElement>("console-pause");
+  // The download link is made here: a real link (keyboard and touch friendly) whose href is a Blob
+  // URL created on click, so the static page has no link to a file.
+  const consoleDownload = make("a", "Download .txt", "button");
+  consoleDownload.id = "console-download";
+  consoleDownload.href = "#";
+  consoleDownload.setAttribute("download", "boot-console.txt");
+  $("console-actions").append(consoleDownload);
+
+  function resetConsole(): void {
+    if (consoleHandle !== null) env.clearTimeout(consoleHandle);
+    consoleHandle = null;
+    consoleView = EMPTY_CONSOLE_VIEW;
+    consolePayload = null;
+    consoleFailures = 0;
+    consoleStopped = false;
+    consolePaused = false;
+    consoleLoaded = false;
+    consoleFollow = true;
+    consoleStepsKey = "";
+    consoleRenderKey = "";
+    consoleRenderedSeq = 0;
+    consoleLog.replaceChildren();
+    consoleSteps.replaceChildren();
+    consolePauseBtn.textContent = "Pause";
+    consolePauseBtn.setAttribute("aria-pressed", "false");
+    consoleCard.hidden = true;
+  }
+
+  function setConsoleStatus(text: string): void {
+    $("console-status").textContent = text;
+  }
+
+  function renderSteps(p: ConsolePayload): void {
+    const key = JSON.stringify(p.phases);
+    if (key === consoleStepsKey) return;
+    consoleStepsKey = key;
+    consoleSteps.replaceChildren(
+      ...p.phases.map((ph) => {
+        const li = make("li");
+        li.dataset["status"] = ph.status;
+        const mark = make("span", PHASE_MARKS[ph.status], "mark");
+        mark.setAttribute("aria-hidden", "true");
+        li.append(mark, make("span", ph.name), make("span", ` (${ph.status})`, "sr"));
+        return li;
+      }),
+    );
+  }
+
+  function lineNode(l: ConsoleView["lines"][number]): HTMLElement {
+    const row = make("div", undefined, "cl");
+    row.append(make("span", lineTime(l.t), "ct"), doc.createTextNode(" "), make("span", `[${l.source}]`, "cs"), doc.createTextNode(" "), make("span", l.text, "cx"));
+    return row;
+  }
+
+  function renderConsoleLines(): void {
+    const shown = visibleLines(consoleView);
+    const key = `${consoleView.generation}:${consoleView.clearedUpTo}`;
+    if (key !== consoleRenderKey) {
+      consoleRenderKey = key;
+      consoleRenderedSeq = 0;
+      consoleLog.replaceChildren();
+    }
+    const fresh = shown.filter((l) => l.seq > consoleRenderedSeq);
+    if (fresh.length > 0) {
+      consoleLog.append(...fresh.map(lineNode));
+      consoleRenderedSeq = fresh[fresh.length - 1]!.seq;
+    }
+    while (consoleLog.childElementCount > shown.length) consoleLog.firstElementChild?.remove();
+    if (consoleFollow) consoleLog.scrollTop = consoleLog.scrollHeight;
+  }
+
+  function renderConsole(): void {
+    const p = consolePayload;
+    const show = consoleCardVisible(state?.role ?? null, p);
+    consoleCard.hidden = !show;
+    if (state) renderAgentNotice(state);
+    if (!show || p === null) return;
+    renderSteps(p);
+    const ended = $("console-ended");
+    ended.textContent = p.instance.ended ? endedText(p.instance.ended_reason) : "";
+    ended.hidden = !p.instance.ended;
+    const note = $("console-note");
+    note.textContent = p.truncated ? "Earlier lines were dropped to keep the console short." : "";
+    note.hidden = !p.truncated;
+    const err = $("console-error");
+    const text =
+      consoleFailures > 0
+        ? "The console could not be updated. Trying again."
+        : p.source_error !== null
+          ? "Some logs are unavailable right now."
+          : "";
+    err.textContent = text;
+    err.hidden = text === "";
+    renderConsoleLines();
+  }
+
+  function canPollConsole(): boolean {
+    return !stopped && active && !consoleStopped && state?.role === "admin";
+  }
+
+  function scheduleConsole(): void {
+    if (!canPollConsole() || consolePaused || consoleHandle !== null) return;
+    if (consoleLoaded && !consoleKeepsPolling(state?.state ?? null)) return;
+    const delay = consoleDelayMs(doc.hidden, consoleFailures);
+    if (delay === null) return;
+    consoleHandle = env.setTimeout(() => {
+      consoleHandle = null;
+      void pollConsole();
+    }, delay);
+  }
+
+  async function pollConsole(): Promise<void> {
+    if (!canPollConsole() || consolePaused || consoleBusy || doc.hidden) return;
+    if (consoleHandle !== null) env.clearTimeout(consoleHandle); // a manual poll replaces the timer
+    consoleHandle = null;
+    consoleBusy = true;
+    try {
+      const parsed = parseConsole(await call("GET", `${CONSOLE_PATH}?after=${consoleView.lastSeq}`));
+      if (parsed === null) throw new ApiError("The server sent a console this page cannot read.");
+      consoleView = mergeConsole(consoleView, parsed);
+      consolePayload = parsed;
+      consoleLoaded = true;
+      consoleFailures = 0;
+    } catch (err) {
+      if (err instanceof AuthLostError || !active) return;
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        consoleStopped = true;
+        consolePayload = null;
+        renderConsole();
+        return;
+      }
+      consoleFailures += 1;
+    } finally {
+      consoleBusy = false;
+    }
+    renderConsole();
+    scheduleConsole();
+  }
+
+  // Start (or restart) polling when nothing is scheduled: after a state refresh, a tab that became
+  // visible again, or a Resume. The first answer is fetched even without an instance, so the last
+  // ended one can still be shown.
+  function kickConsole(): void {
+    if (!canPollConsole() || consolePaused || consoleHandle !== null || consoleBusy) return;
+    if (consoleLoaded && !consoleKeepsPolling(state?.state ?? null)) return;
+    void pollConsole();
+  }
+
+  consoleLog.addEventListener("scroll", () => {
+    consoleFollow = isNearBottom(consoleLog.scrollTop, consoleLog.clientHeight, consoleLog.scrollHeight);
+  });
+  consolePauseBtn.addEventListener("click", () => {
+    consolePaused = !consolePaused;
+    consolePauseBtn.textContent = consolePaused ? "Resume" : "Pause";
+    consolePauseBtn.setAttribute("aria-pressed", String(consolePaused));
+    if (consolePaused) {
+      if (consoleHandle !== null) env.clearTimeout(consoleHandle);
+      consoleHandle = null;
+      setConsoleStatus("Paused. New lines are not loaded.");
+    } else {
+      setConsoleStatus("");
+      void pollConsole();
+    }
+  });
+  $("console-clear").addEventListener("click", () => {
+    consoleView = clearConsoleView(consoleView);
+    renderConsole();
+    setConsoleStatus("View cleared.");
+  });
+  $("console-copy").addEventListener("click", () => {
+    void (async () => {
+      try {
+        const clip = doc.defaultView?.navigator.clipboard;
+        if (!clip) throw new Error("no clipboard");
+        await clip.writeText(consoleExport(visibleLines(consoleView)));
+        setConsoleStatus("Copied.");
+      } catch {
+        setConsoleStatus("Could not copy. Select the text and copy it by hand.");
+      }
+    })();
+  });
+  consoleDownload.addEventListener("click", (e) => {
+    e.preventDefault();
+    try {
+      const win = doc.defaultView;
+      if (!win) throw new Error("no window");
+      const url = win.URL.createObjectURL(new win.Blob([consoleExport(visibleLines(consoleView))], { type: "text/plain;charset=utf-8" }));
+      const a = make("a");
+      a.href = url;
+      a.download = consoleDownload.getAttribute("download") ?? "boot-console.txt";
+      a.click();
+      env.setTimeout(() => win.URL.revokeObjectURL(url), 0);
+      setConsoleStatus("Downloaded.");
+    } catch {
+      setConsoleStatus("Could not create the download.");
+    }
+  });
+
   // ---- render + polling loop ----
 
   function render(): void {
@@ -910,6 +1158,7 @@ export function mountApp(doc: Document, env: Env): App {
     }
     render();
     schedulePoll();
+    kickConsole();
   }
 
   function schedulePoll(): void {
@@ -926,8 +1175,12 @@ export function mountApp(doc: Document, env: Env): App {
 
   const onVisibility = (): void => {
     if (!active) return;
-    if (!doc.hidden) void refresh();
-    else schedulePoll();
+    if (!doc.hidden) {
+      void refresh();
+      if (consoleHandle !== null) env.clearTimeout(consoleHandle);
+      consoleHandle = null;
+      kickConsole();
+    } else schedulePoll();
   };
   doc.addEventListener("visibilitychange", onVisibility);
 
@@ -935,10 +1188,12 @@ export function mountApp(doc: Document, env: Env): App {
   return {
     ready,
     refresh,
+    pollConsole,
     stop() {
       stopped = true;
       if (pollHandle !== null) env.clearTimeout(pollHandle);
       if (tickHandle !== null) env.clearTimeout(tickHandle);
+      if (consoleHandle !== null) env.clearTimeout(consoleHandle);
       doc.removeEventListener("visibilitychange", onVisibility);
     },
   };

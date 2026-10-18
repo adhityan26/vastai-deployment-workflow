@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONSOLE_POLL_MAX_MS,
+  CONSOLE_POLL_MS,
+  EMPTY_CONSOLE_VIEW,
+  bootSentence,
+  clearConsoleView,
+  consoleCardVisible,
+  consoleDelayMs,
+  consoleExport,
+  consoleKeepsPolling,
+  endedText,
+  isNearBottom,
+  lineTime,
+  mergeConsole,
+  parseConsole,
+  visibleLines,
   STATE_POLL_HIDDEN_MS,
   STATE_POLL_MAX_MS,
   STATE_POLL_MS,
@@ -291,5 +306,113 @@ describe("download progress", () => {
     expect(downloadText(d({ bytes_total: 0 }), 1e6)).toBe("2.1 GB - file 1 of 3 - 1.0 MB/s");
     expect(downloadText(d({ bytes_done: 5e6, bytes_total: 50e6 }), null)).toBe("5.0 / 50.0 MB (10%) - file 1 of 3");
     expect(downloadText(d({ bytes_done: 9e17, bytes_total: 1e18 }), 1e9)).not.toMatch(/NaN|Infinity/);
+  });
+});
+
+describe("boot console model", () => {
+  const line = (seq: number, text = `l${seq}`, source = "agent") => ({ seq, t: 1_700_000_000 + seq, source, text });
+  const payload = (over: Record<string, unknown> = {}) => ({
+    generation: 1,
+    instance: { state: "booting", ended: false, ended_reason: null },
+    phases: [
+      { id: "tailscale", name: "Join Tailscale", status: "running" },
+      { id: "agent", name: "Start agent", status: "pending" },
+    ],
+    lines: [line(1), line(2)],
+    last_seq: 2,
+    truncated: false,
+    ...over,
+  });
+
+  it("parseConsole accepts the API shape and drops bad lines and phases", () => {
+    const p = parseConsole(payload({ lines: [line(1), { seq: -1, text: "x" }, { seq: 2 }, "no"], phases: [{ id: "a", name: "A", status: "weird" }, { id: "b", name: "B", status: "done" }] }));
+    expect(p!.lines.map((l) => l.seq)).toEqual([1]);
+    expect(p!.phases.map((x) => x.id)).toEqual(["b"]);
+    expect(p!.source_error).toBeNull();
+    expect(parseConsole(payload({ source_error: "vast_logs_unavailable" }))!.source_error).toBe("vast_logs_unavailable");
+    expect(parseConsole(null)).toBeNull();
+    expect(parseConsole({ ...payload(), instance: null })).toBeNull();
+    expect(parseConsole({ ...payload(), last_seq: "2" })).toBeNull();
+  });
+
+  it("mergeConsole appends by seq without duplicates", () => {
+    let v = mergeConsole(EMPTY_CONSOLE_VIEW, parseConsole(payload())!);
+    expect(v.lines.map((l) => l.seq)).toEqual([1, 2]);
+    v = mergeConsole(v, parseConsole(payload({ lines: [line(2), line(3), line(1)], last_seq: 3 }))!);
+    expect(v.lines.map((l) => l.seq)).toEqual([1, 2, 3]);
+    expect(v.lastSeq).toBe(3);
+  });
+
+  it("mergeConsole replaces everything on a new generation and keeps the newest lines under the cap", () => {
+    let v = mergeConsole(EMPTY_CONSOLE_VIEW, parseConsole(payload())!);
+    v = mergeConsole(v, parseConsole(payload({ generation: 2, lines: [line(10)], last_seq: 10 }))!);
+    expect(v.lines.map((l) => l.seq)).toEqual([10]);
+    const many = Array.from({ length: 10 }, (_, i) => line(i + 1));
+    const capped = mergeConsole(EMPTY_CONSOLE_VIEW, parseConsole(payload({ lines: many, last_seq: 10 }))!, 4);
+    expect(capped.lines.map((l) => l.seq)).toEqual([7, 8, 9, 10]);
+  });
+
+  it("clear view hides what is held and later lines still show; export is the visible lines", () => {
+    let v = mergeConsole(EMPTY_CONSOLE_VIEW, parseConsole(payload())!);
+    v = clearConsoleView(v);
+    expect(visibleLines(v)).toEqual([]);
+    expect(consoleExport(visibleLines(v))).toBe("");
+    v = mergeConsole(v, parseConsole(payload({ lines: [line(3, "after clear")], last_seq: 3 }))!);
+    expect(visibleLines(v).map((l) => l.seq)).toEqual([3]);
+    expect(consoleExport(visibleLines(v))).toBe(`${lineTime(1_700_000_003)} [agent] after clear\n`);
+  });
+
+  it("auto-scroll pauses when scrolled up and resumes at the bottom", () => {
+    expect(isNearBottom(900, 100, 1000)).toBe(true);
+    expect(isNearBottom(890, 100, 1000)).toBe(true); // within the slack
+    expect(isNearBottom(500, 100, 1000)).toBe(false);
+    expect(isNearBottom(0, 0, 0)).toBe(true);
+  });
+
+  it("lineTime is UTC HH:MM:SS and tolerates junk", () => {
+    expect(lineTime(0)).toBe("--:--:--");
+    expect(lineTime(3661)).toBe("01:01:01");
+  });
+
+  it("polling delay backs off, is capped and is null while the tab is hidden", () => {
+    expect(consoleDelayMs(false, 0)).toBe(CONSOLE_POLL_MS);
+    expect(consoleDelayMs(false, 2)).toBe(CONSOLE_POLL_MS * 4);
+    expect(consoleDelayMs(false, 50)).toBe(CONSOLE_POLL_MAX_MS);
+    expect(consoleDelayMs(true, 0)).toBeNull();
+    expect(consoleKeepsPolling("booting")).toBe(true);
+    expect(consoleKeepsPolling("none")).toBe(false);
+    expect(consoleKeepsPolling(null)).toBe(false);
+  });
+
+  it("card is visible for admins while an instance exists or ended, never for members", () => {
+    const live = parseConsole(payload())!;
+    const ended = parseConsole(payload({ instance: { state: "none", ended: true, ended_reason: "destroyed" } }))!;
+    const none = parseConsole(payload({ instance: { state: "none", ended: false, ended_reason: null } }))!;
+    expect(consoleCardVisible("admin", live)).toBe(true);
+    expect(consoleCardVisible("admin", ended)).toBe(true);
+    expect(consoleCardVisible("admin", none)).toBe(false);
+    expect(consoleCardVisible("admin", null)).toBe(false);
+    expect(consoleCardVisible("member", live)).toBe(false);
+    expect(consoleCardVisible(null, live)).toBe(false);
+  });
+
+  it("endedText names the reason from a fixed map", () => {
+    expect(endedText("destroyed")).toContain("destroyed");
+    expect(endedText("<b>x</b>")).toBe("Instance ended.");
+    expect(endedText(null)).toBe("Instance ended.");
+  });
+
+  it("bootSentence follows the running phase and is null otherwise", () => {
+    expect(bootSentence(parseConsole(payload())!)).toBe("Installing tools and joining Tailscale, usually 2-4 minutes");
+    const run = (id: string) => parseConsole(payload({ phases: [{ id, name: "N", status: "running" }] }))!;
+    for (const id of ["image_pull", "install_tools", "failsafe", "agent", "nodes", "models", "comfyui"]) {
+      expect(bootSentence(run(id))).toMatch(/\S/);
+    }
+    expect(bootSentence(run("something_new"))).toBe("N, in progress");
+    expect(bootSentence(run("ready"))).toBeNull();
+    expect(bootSentence(parseConsole(payload({ phases: [{ id: "tailscale", name: "J", status: "failed" }] }))!)).toBeNull();
+    expect(bootSentence(parseConsole(payload({ phases: [{ id: "agent", name: "A", status: "pending" }] }))!)).toBeNull();
+    expect(bootSentence(parseConsole(payload({ instance: { state: "none", ended: true, ended_reason: "gone" } }))!)).toBeNull();
+    expect(bootSentence(null)).toBeNull();
   });
 });
