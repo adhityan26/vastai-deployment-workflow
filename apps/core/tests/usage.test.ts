@@ -332,6 +332,33 @@ describe("UsageHistory persistence", () => {
     expect(again.list(T0 + 20)).toHaveLength(1);
   });
 
+  it("a deadline change that swaps the order of the deadlines is saved: the restart names the true earliest", () => {
+    const path = join(dir(), "order.json");
+    const H = T0 + 3600;
+    const h = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    h.begin("vast-a", T0, null);
+    h.observe("vast-a", status("ready", { idle_destroy_at: H - 60, failsafe_at: H + 999, hard_cap_at: H }), T0);
+    // Moved later by exactly the slack (not more), but now after the hard cap.
+    h.observe("vast-a", status("ready", { idle_destroy_at: H + 60, failsafe_at: H + 999, hard_cap_at: H }), T0 + 10);
+    const again = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    again.end("vast-a", H + 30);
+    expect(again.list(H + 30)[0]).toMatchObject({ reason: "hard_cap", ended_at: H });
+  });
+
+  it("the last sighting is saved about once per slack window, so a restart dates a gone end close to it", () => {
+    const path = join(dir(), "seen.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    h.begin("vast-a", T0, null);
+    const last = T0 + 1000;
+    for (let t = T0; t <= last; t += 10) h.observe("vast-a", status("ready", { idle_destroy_at: T0 + 9000 }), t);
+    const again = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    again.end("vast-a", T0 + 5000);
+    const [e] = again.list(T0 + 5000);
+    expect(e!.reason).toBe("gone");
+    expect(e!.ended_at!).toBeLessThanOrEqual(last);
+    expect(last - e!.ended_at!).toBeLessThanOrEqual(SLACK);
+  });
+
   it("a tampered file cannot smuggle odd characters into the names: those values are dropped", () => {
     const path = join(dir(), "tampered.json");
     const h = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));

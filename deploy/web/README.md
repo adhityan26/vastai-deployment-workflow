@@ -256,9 +256,12 @@ when the cause is unknown (e.g. Vast removed it).
 - The instance prints `[watchdog] destroying instance: reason=<reason>` before each self-destroy
   (agent log under supervisor, `failsafe.log` for the standalone failsafe).
 - Times: a stop by the web is dated when it completed; a self-stop at the passed deadline, or else at
-  the last time the web saw the agent. Agent sightings are written to the file only when something
-  meaningful changes (a deadline moving by less than the slack is not), so after a web restart a
-  saved deadline counts only once it lies before the moment the web noticed the end.
+  the last time the web saw the agent. Agent sightings are written to the file when something the
+  reason depends on changes (state, reason, the order of the deadlines, a deadline moving earlier or
+  later by more than the slack) and otherwise about once per `USAGE_REASON_SLACK_S`. After a web
+  restart, until the agent is seen again, the saved copy is used: its deadlines may be up to the slack
+  early, so they are compared without the slack (a deadline then counts only when it lies before the
+  moment the web noticed the end), and its last sighting may be up to about the slack old.
 - `USAGE_LOG_MAX_ENTRIES` (at least 2) sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
   next to the registry); a corrupt file is ignored. The web log gets one `usage: start ...` and one
   `usage: stop ...` line per session (GPU, price, reason, duration and user names only).

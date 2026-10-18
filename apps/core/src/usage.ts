@@ -264,6 +264,18 @@ function cleanNames(e: UsageEntry): UsageEntry {
   return e;
 }
 
+// In the tie order of inferStop: hard cap, then the failsafe, then idle.
+const DEADLINE_KEYS = ["hard_cap_at", "failsafe_at", "idle_destroy_at"] as const;
+
+/** The non-null deadlines from earliest to latest (ties in DEADLINE_KEYS order), as a key. */
+function deadlineOrder(o: AgentObservation): string {
+  return DEADLINE_KEYS.filter((k) => o[k] !== null)
+    .map((k, i) => ({ k, i, at: o[k] as number }))
+    .sort((a, b) => a.at - b.at || a.i - b.i)
+    .map((x) => x.k)
+    .join(",");
+}
+
 type Log = (level: "info" | "warn" | "error", message: string) => void;
 
 export class UsageHistory {
@@ -404,9 +416,12 @@ export class UsageHistory {
 
   /**
    * The last agent status. Kept exactly in memory; written to the file only when the state, the
-   * reason or the failsafe flag changes, a deadline appears, disappears or moves earlier, or it moves
-   * later by more than the slack. So the saved copy of a deadline is at most `slackS` earlier than
-   * the true one (a busy queue moves the idle deadline on every poll without rewriting the file).
+   * reason or the failsafe flag changes, a deadline appears, disappears or moves earlier, it moves
+   * later by more than the slack, the order of the deadlines changes, or the sighting is more than
+   * the slack newer than the saved one. So a saved deadline is at most `slackS` earlier than the
+   * true one, the saved earliest deadline is the true earliest, and the saved last sighting is at
+   * most about `slackS` old (a busy queue moving the idle deadline on every poll costs about one
+   * write per slack window, not one per poll).
    */
   observe(hostname: string, status: AgentStatus, at: number): void {
     const next = observationOf(status, at);
@@ -422,14 +437,17 @@ export class UsageHistory {
   private worthSaving(saved: AgentObservation | null, next: AgentObservation): boolean {
     if (saved === null) return true;
     if (saved.state !== next.state || saved.reason !== next.reason || saved.destroy_pending !== next.destroy_pending) return true;
-    for (const key of ["idle_destroy_at", "failsafe_at", "hard_cap_at"] as const) {
+    for (const key of DEADLINE_KEYS) {
       const a = saved[key];
       const b = next[key];
       if (a === null || b === null) {
         if (a !== b) return true;
       } else if (b < a || b - a > this.limits.slackS) return true;
     }
-    return false;
+    // The saved copy must name the same earliest deadline as the true one.
+    if (deadlineOrder(saved) !== deadlineOrder(next)) return true;
+    // About one write per slack window keeps the saved last sighting at most that stale.
+    return next.seen_at - saved.seen_at > this.limits.slackS;
   }
 
   /** The web service is about to stop the instance for `reason`; the first request wins. */
