@@ -13,6 +13,9 @@ from .state import REASONS, InvalidTransition, State, StateRecord, StateStore
 
 log = logging.getLogger(__name__)
 
+# What instance/failsafe.sh writes as "reason" in destroy_failsafe.json.
+FAILSAFE_REASONS = frozenset({"failsafe_deadline", "hard_cap"})
+
 
 class Runner:
     """Periodic work of the agent: mirror the failsafe's destroy, advance idle, destroy on idle timeout,
@@ -29,14 +32,19 @@ class Runner:
         self._retry_s = destroy_failed_retry_s
         self._last_retry: int | None = None  # in memory: start of the current wait in destroy_failed
 
-    def _failsafe_destroying(self) -> bool:
+    def _failsafe_destroying(self) -> str | None:
+        """The failsafe's destroy reason while it is destroying (failsafe_deadline or hard_cap), else None."""
         record = read_json(self._paths.destroy_failsafe, {}) or {}
-        return bool(record.get("pending"))
+        if not isinstance(record, dict) or not record.get("pending"):
+            return None
+        reason = record.get("reason")
+        return reason if reason in FAILSAFE_REASONS else "failsafe_deadline"
 
     def tick(self) -> None:
-        if self._failsafe_destroying():
+        failsafe_reason = self._failsafe_destroying()
+        if failsafe_reason is not None:
             try:
-                self._states.set(State.STOPPING, "failsafe_deadline")
+                self._states.set(State.STOPPING, failsafe_reason)
             except InvalidTransition:
                 pass
             return

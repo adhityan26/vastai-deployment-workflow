@@ -237,6 +237,35 @@ values, long hex/base64 strings, URL credentials); the instance hostname shows a
 - The phases come only from the instance's marker lines `[boot] step <n>/<m>: <id>` and
   `[boot] FAILED: <code>` (the fixed step list is defined once in `apps/core/src/console.ts`).
 
+## Usage history
+
+Admins see a "History" card (`GET /api/history`; members get 403): one line per instance session with
+the start time, duration, GPU, an estimated cost (duration x price per hour; disk and traffic are
+billed separately) and why it stopped: the Destroy button (with who pressed it), the idle timeout,
+the failsafe deadline, the hard cap, a failed boot or Start, an unreachable agent, or "disappeared"
+when the cause is unknown (e.g. Vast removed it).
+
+- When the web service stops the instance itself it records why before it acts. When the instance
+  stops itself, the reason comes from the last agent `/status` the web saw: the agent's own destroy
+  state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by
+  the time the web noticed (plus `USAGE_REASON_SLACK_S` for clock skew), else "disappeared".
+  The first recorded reason wins, so in two rare cases the label can be wrong: Destroy pressed while
+  the create was still uncertain followed by a web restart (the boot timeout then destroys it, the
+  history says Destroy button), and a Start whose registry write and cleanup destroy both failed (a
+  later stop still shows "Boot failed").
+- The instance prints `[watchdog] destroying instance: reason=<reason>` before each self-destroy
+  (agent log under supervisor, `failsafe.log` for the standalone failsafe).
+- Times: a stop by the web is dated when it completed; a self-stop at the passed deadline, or else at
+  the last time the web saw the agent. Agent sightings are written to the file when something the
+  reason depends on changes (state, reason, the order of the deadlines, a deadline moving earlier or
+  later by more than the slack) and otherwise about once per `USAGE_REASON_SLACK_S`. After a web
+  restart, until the agent is seen again, the saved copy is used: its deadlines may be up to the slack
+  early, so they are compared without the slack (a deadline then counts only when it lies before the
+  moment the web noticed the end), and its last sighting may be up to about the slack old.
+- `USAGE_LOG_MAX_ENTRIES` (at least 2) sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
+  next to the registry); a corrupt file is ignored. The web log gets one `usage: start ...` and one
+  `usage: stop ...` line per session (GPU, price, reason, duration and user names only).
+
 ## Image edit with reference images
 
 Members can switch the Generate card to "Edit images", attach up to `EDIT_MAX_REFERENCES` PNG/JPEG/WebP

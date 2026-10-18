@@ -19,6 +19,7 @@ import {
   labelHostname,
   pollResult,
   referenceLimits,
+  userLabel,
   type AppsConfig,
   type CostEstimate,
   type EditDeps,
@@ -28,6 +29,7 @@ import {
   type ReferenceLimits,
   type StartFailReason,
   type StatusView,
+  type UsageItem,
 } from "@vast-comfy/core";
 import { CreditCache, JobStore, RateLimiter, type Job, type JobKind } from "./store.js";
 import { sendError } from "./reply.js";
@@ -105,6 +107,24 @@ function hostnamesOf(view: StatusView): string[] {
     if (h !== null) out.push(h);
   }
   return out;
+}
+
+/** One usage history entry as the browser may see it: an explicit allowlist (no hostname). */
+function publicUsage(e: UsageItem) {
+  return {
+    vast_instance_id: e.instance_id,
+    gpu_name: e.gpu_name,
+    dph: e.dph,
+    started_at: e.started_at,
+    ready_at: e.ready_at,
+    ended_at: e.ended_at,
+    duration_s: e.duration_s,
+    estimated_cost: e.estimated_cost,
+    started_by: e.started_by,
+    reason: e.reason,
+    stop_by: e.stop_by,
+    active: e.active,
+  };
 }
 
 /** The status view as the browser may see it: an explicit allowlist of fields. */
@@ -410,9 +430,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
     if (!startLimiter.take("start")) return sendError(reply, 429, "rate_limited", "too many start requests this hour");
     const { gpu } = req.body as { gpu?: string };
-    log("info", `start requested by ${req.identity?.username ?? "?"}`);
+    log("info", `start requested by ${userLabel(req.identity?.username) ?? "?"}`);
     try {
-      const { record, estimate } = await deps.lifecycle.start(gpu);
+      const { record, estimate } = await deps.lifecycle.start(gpu, req.identity?.username ?? null);
       return { status: record.status, vast_instance_id: record.vast_instance_id, estimate: publicEstimate(estimate) };
     } catch (err) {
       if (err instanceof AlreadyActiveError) return sendError(reply, 409, "already_active", "an instance is already active");
@@ -433,9 +453,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   });
 
   app.post("/api/destroy", { ...admin, schema: { body: EMPTY_BODY } }, async (req, reply) => {
-    log("info", `destroy requested by ${req.identity?.username ?? "?"}`);
+    log("info", `destroy requested by ${userLabel(req.identity?.username) ?? "?"}`);
     try {
-      const result = await deps.lifecycle.destroy();
+      const result = await deps.lifecycle.destroy(req.identity?.username ?? null);
       return { outcome: result.outcome, agent_reached: result.agent_error === null };
     } catch (err) {
       log("warn", `destroy failed: ${(err as Error).name}`);
@@ -495,7 +515,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     },
     async (req, reply) => {
       const { vast_id } = req.body as { vast_id: number };
-      log("info", `destroy-unknown ${vast_id} requested by ${req.identity?.username ?? "?"}`);
+      log("info", `destroy-unknown ${vast_id} requested by ${userLabel(req.identity?.username) ?? "?"}`);
       try {
         return { outcome: await deps.lifecycle.destroyUnknown(vast_id) };
       } catch (err) {
@@ -521,6 +541,16 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       log("warn", `console failed: ${errorName(err)}`);
       return sendError(reply, 500, "console_unavailable", "the boot console is unavailable");
+    }
+  });
+
+  // Usage history (admin only: it names users and shows the spend). Newest first.
+  app.get("/api/history", admin, async (_req, reply) => {
+    try {
+      return { entries: (await deps.lifecycle.history()).map(publicUsage) };
+    } catch (err) {
+      log("warn", `history failed: ${errorName(err)}`);
+      return sendError(reply, 500, "history_unavailable", "the usage history is unavailable");
     }
   });
 

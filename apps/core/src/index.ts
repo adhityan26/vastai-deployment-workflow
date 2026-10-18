@@ -10,4 +10,5 @@ export * from "./profile.js";
 export * from "./references.js";
 export * from "./registry.js";
 export * from "./tailscale.js";
+export * from "./usage.js";
 export * from "./vast.js";

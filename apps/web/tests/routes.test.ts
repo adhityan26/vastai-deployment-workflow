@@ -13,7 +13,9 @@ import {
   ComfyClient,
   Lifecycle,
   Registry,
+  STOP_REASONS,
   TailscaleError,
+  UsageHistory,
   loadProfile,
   type AppsConfig,
   type CreateRequest,
@@ -309,6 +311,7 @@ async function harness(
   const registry = new Registry(join(dir, "registry.json"), REGISTRY_SCHEMA);
   const vast = new FakeVast();
   const clock = { ms: NOW_S * 1000 };
+  const logs: string[] = [];
   let n = 0;
   const lifecycle = new Lifecycle({
     cfg,
@@ -321,13 +324,13 @@ async function harness(
     newToken: () => TOKEN,
     newHostname: () => `vast-new${n++}`,
     sleep: async () => undefined,
+    usage: new UsageHistory({ maxEntries: 50, slackS: 120 }, null, (level, message) => void logs.push(`${level} ${message}`)),
   });
   if (opts.ready !== false) {
     await registry.begin({ created_at: NOW_S, profile: "image", agent_token: TOKEN, tailnet_hostname: HOST });
     await registry.update(HOST, { status: "ready", vast_instance_id: VAST_ID, vast_start_date: NOW_S });
     vast.instances.push({ id: VAST_ID, label: `vastcomfy:${HOST}`, actual_status: "running", start_date: NOW_S, dph_total: 0.3 });
   }
-  const logs: string[] = [];
   const creditReads = { n: 0 };
   const credit = opts.credit === undefined ? async () => (creditReads.n++, 4.5377) : (opts.credit ?? undefined);
   const { auth, oidc, sessions } = createAuthStack(cfg, { onMisconfigured: (m) => logs.push(`error ${m}`), now: () => clock.ms });
@@ -1728,6 +1731,51 @@ describe("boot console route", () => {
     expect(Object.keys(schema.properties.instance.properties).sort()).toEqual(Object.keys(body.instance).sort());
     expect(doc.components.schemas.ConsolePhase.properties.id.enum).toEqual(body.phases.map((p: { id: string }) => p.id));
     expect(doc.paths["/api/console"].get.parameters[0].name).toBe("after");
+  });
+});
+
+describe("usage history route", () => {
+  it("401 without a session, 403 for a member, 200 no-store for an admin", async () => {
+    expect((await call("GET", "/api/history")).statusCode).toBe(401);
+    const forbidden = await call("GET", "/api/history", await member());
+    expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json().error.code).toBe("forbidden");
+    const res = await call("GET", "/api/history", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(Object.keys(res.json())).toEqual(["entries"]);
+    // The harness's running instance predates the history: adopted, who started it is unknown.
+    expect(res.json().entries).toEqual([expect.objectContaining({ active: true, started_by: null, vast_instance_id: VAST_ID })]);
+  });
+
+  it("records who started and who destroyed, newest first, with no hostname, token or email", async () => {
+    h = await harness({ ready: false });
+    const boss = await as("boss@example.com", [ADMIN_GROUP]);
+    expect((await post("/api/start", boss, { confirm: true })).statusCode).toBe(200);
+    h.clock.ms += 3_600_000;
+    expect((await post("/api/destroy", await admin())).statusCode).toBe(200);
+    const res = await call("GET", "/api/history", boss);
+    const [e] = res.json().entries;
+    expect(e).toMatchObject({
+      vast_instance_id: 1000, gpu_name: "RTX A5000", dph: 0.3, started_at: NOW_S, ended_at: NOW_S + 3600,
+      duration_s: 3600, started_by: "boss", reason: "destroy_button", stop_by: "root", active: false,
+    });
+    expect(e.estimated_cost).toBeCloseTo(0.3);
+    for (const bad of ["vast-new", "example.com", TOKEN, AUTH_KEY, VAST_KEY]) expect(res.body).not.toContain(bad);
+    expect(h.logs).toContain("info usage: start gpu=RTX A5000 dph=0.300 by=boss");
+    expect(h.logs).toContain("info usage: stop reason=destroy_button duration_s=3600 by=root");
+    for (const l of h.logs) expect(l).not.toMatch(/vast-new|example\.com/);
+  });
+
+  it("matches the documented History schema and the stop reason enum", async () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const body = (await call("GET", "/api/history", await admin())).json();
+    const entry = doc.components.schemas.HistoryEntry;
+    expect(entry.additionalProperties).toBe(false);
+    expect(Object.keys(body.entries[0]).sort()).toEqual([...entry.required].sort());
+    expect(Object.keys(entry.properties).sort()).toEqual([...entry.required].sort());
+    expect(doc.components.schemas.UsageStopReason.enum).toEqual([...STOP_REASONS]);
+    expect(doc.paths["/api/history"].get.responses["200"].content["application/json"].schema.required).toEqual(["entries"]);
   });
 });
 

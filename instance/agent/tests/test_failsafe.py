@@ -67,10 +67,10 @@ def setup(tmp_path, *, deadline=None, hard_cap=None, hard_cap_hours=6, fail_time
     return env, state, log, sctl_log
 
 
-def start(env, procs, extra_env=None):
+def start(env, procs, extra_env=None, stdout=None):
     environ = {**os.environ, **(extra_env or {})}
     proc = subprocess.Popen(["bash", str(SCRIPT), "--env-file", str(env)], stderr=subprocess.PIPE, text=True,
-                            env=environ)
+                            env=environ, stdout=stdout)
     procs.append(proc)
     return proc
 
@@ -94,8 +94,36 @@ def test_destroys_when_the_deadline_passes_and_exits(tmp_path, procs):
     assert wait_until(lambda: proc.poll() is not None)
     assert proc.returncode == 0
     assert log.read_text().strip() == f"destroy instance 42 -y --api-key {KEY}"
-    assert record(state) == {"attempts": 1, "last_error": None, "pending": False}
+    assert record(state) == {"attempts": 1, "last_error": None, "pending": False, "reason": "failsafe_deadline"}
     assert "stop comfy" in sctl.read_text()
+
+
+def test_prints_one_watchdog_line_naming_the_deadline_without_secrets(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline=-100, hard_cap=1000, fail_times=2)
+    proc = start(env, procs, stdout=subprocess.PIPE)
+    assert wait_until(lambda: proc.poll() is not None)
+    out = proc.stdout.read()
+    proc.stdout.close()
+    assert out == "[watchdog] destroying instance: reason=failsafe_deadline\n"
+    assert KEY not in out
+
+
+@pytest.mark.parametrize("extra", [{}, {"SECONDS": "3600"}])
+def test_the_hard_cap_is_named_as_the_reason(tmp_path, procs, extra):
+    # Either the hard cap file passed (the deadline is later) or the elapsed-time guard fired.
+    env, state, _, _ = setup(tmp_path, deadline=10**6 if extra else 1000, hard_cap=10**6 if extra else -5, hard_cap_hours=1)
+    proc = start(env, procs, extra_env=extra, stdout=subprocess.PIPE)
+    assert wait_until(lambda: proc.poll() is not None)
+    assert proc.stdout.read() == "[watchdog] destroying instance: reason=hard_cap\n"
+    proc.stdout.close()
+    assert record(state)["reason"] == "hard_cap"
+
+
+def test_a_deadline_equal_to_the_hard_cap_is_the_hard_cap(tmp_path, procs):
+    env, state, _, _ = setup(tmp_path, deadline="0", hard_cap="0")
+    proc = start(env, procs)
+    assert wait_until(lambda: proc.poll() is not None)
+    assert record(state)["reason"] == "hard_cap"
 
 
 def test_does_not_destroy_before_the_deadline_and_writes_its_pid(tmp_path, procs):
@@ -412,7 +440,7 @@ def test_the_stock_cli_preamble_before_the_success_line_is_a_success(tmp_path, p
     proc = start(env, procs)
     assert wait_until(lambda: proc.poll() is not None) and proc.returncode == 0
     assert len(log.read_text().strip().splitlines()) == 1
-    assert record(state) == {"attempts": 1, "last_error": None, "pending": False}
+    assert record(state) == {"attempts": 1, "last_error": None, "pending": False, "reason": "failsafe_deadline"}
 
 
 def test_the_stock_cli_preamble_before_a_failure_is_a_failure(tmp_path, procs):
