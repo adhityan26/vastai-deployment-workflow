@@ -27,21 +27,27 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
    collapsible "History" card, `GET /api/history`, and `[watchdog] destroying instance: reason=...` from the agent (it
    reaches the supervisor log and `failsafe.log`, not yet the Vast container log: see item 3). Brief and runbook:
    `docs/superpowers/plans/2026-10-18-usage-history-brief.md`, `deploy/web/README.md` "Usage history". Not verified live.
-2. **Styles with sub-menus, Anything to Real LoRA, chaining ("use this result as a reference") and later Upscale and
-   Camera angle.** Agreed design: `docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md` (read it fully).
-   The live test of the LoRA on the GGUF base needs a real instance, which only the owner's laptop session can start.
-   STATUS: the framework, the page (style sub-menu, parameter panels, "Use as reference" on results) and the first style
-   are built on branch `feat/styles-and-chaining` (plan: `docs/superpowers/plans/2026-10-18-styles-and-chaining.md`).
-   The style ships `enabled: false` until the owner pins the LoRA (`scripts/pin_model.py`, steps in
-   `deploy/web/README.md`, "Styles") and live-tests it. Upscale mode is also built (same branch, disabled until a licensed model is pinned; README "Upscale"). Not built:
-   chaining from the gallery (the gallery is in PR #4, not on master; add a "Use as reference" button there after it
-   merges, reusing `chainResult` in `apps/web/public/ui.ts`) and Camera angle (AnyAngle): its mechanism is not
-   documented in this repo (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the
-   Anything to Real live test comes first, so guessing a workflow would be fiction.
+2. ~~Styles, chaining and Upscale~~ Built and merged with the master line on branch `feat/styles` (PR #5 merged into
+   master eb8759d plus review fixes; local commits, not pushed or deployed yet). Design:
+   `docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md`, plan `docs/superpowers/plans/2026-10-18-styles-and-chaining.md`,
+   runbook `deploy/web/README.md` "Styles and Use as reference" and "Upscale". Done: the style framework (sub-menu per
+   mode, parameter panels from the API), "Use as reference" and "Upscale" on results (redrawn when the server's offer
+   changes), Upscale mode with both the model's intermediate image and the result bounded
+   (`UPSCALE_MAX_INTERMEDIATE_PIXELS`, `UPSCALE_MAX_OUTPUT_PIXELS`), job labels with the style title, and saved upscale
+   images (gallery kind `upscale`). ENABLED for one live test: Anything to Real (LoRA pinned, Apache-2.0, edit only,
+   strength 0.4-1.0, default 0.7) and Upscale with Real-ESRGAN x4plus (safetensors from Comfy-Org, BSD-3-Clause, 2x/4x);
+   they add about 0.39 GB to the boot download (about 15.0 GB in total).
+   Still open: (a) the live test on a real instance: an anime/comic edit with and without the style at 0.6/0.7/0.8 (the
+   LoRA placement relative to `QwenImage21Cache` on the GGUF base is UNVERIFIED; change `lora.model_from`/`model_to` if
+   wrong), one upscale at 2x and 4x (the workflow has never run; VRAM use of a large upscale is unknown), and a Save of
+   each result; (b) "Use as reference" from the gallery (the gallery is now on this line: add the button there, reusing
+   `chainResult` in `apps/web/public/ui.ts`); (c) Camera angle (AnyAngle): its mechanism is not documented in this repo
+   (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the Anything to Real live test comes
+   first, so guessing a workflow would be fiction.
 3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
    `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
    a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).
-4. ~~Save + Gallery~~ Done (PR #4, merged on `feat/gallery`): Save per result, auto-save (this device), a gallery card
+4. ~~Save + Gallery~~ Done and on `master` (PR #4): Save per result, auto-save (this device), a gallery card
    (own images; admins can list everyone's), delete, quotas, MinIO via `GALLERY_S3_*` (empty endpoint = off). Plan:
    `docs/superpowers/plans/2026-10-18-gallery-minio.md`, runbook: `deploy/web/README.md` "Gallery in MinIO". Not
    verified live: a real MinIO. Left for later: thumbnails, a Discord `save` mode.
