@@ -22,11 +22,11 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
 
 ## Next work, in order
 
-1. **Usage history** (in progress locally on branch `feat/usage-history`; check origin for that branch first, if it is
-   there continue from it, otherwise implement from the brief): a persistent log of when an instance started and stopped
-   and why (Destroy button with who, idle timeout, failsafe deadline, hard cap, boot failed, gone), shown in an
-   admin-only collapsible "History" card, plus `[watchdog] destroying instance: reason=...` from the agent.
-   Brief: `docs/superpowers/plans/2026-10-18-usage-history-brief.md`.
+1. ~~Usage history~~ Done and on `master`: persistent log of instance sessions with start, stop and the stop reason
+   (Destroy button with who, idle timeout, failsafe deadline, hard cap, boot failed, agent unreachable, gone), an admin-only
+   collapsible "History" card, `GET /api/history`, and `[watchdog] destroying instance: reason=...` from the agent (it
+   reaches the supervisor log and `failsafe.log`, not yet the Vast container log: see item 3). Brief and runbook:
+   `docs/superpowers/plans/2026-10-18-usage-history-brief.md`, `deploy/web/README.md` "Usage history". Not verified live.
 2. **Styles with sub-menus, Anything to Real LoRA, chaining ("use this result as a reference") and later Upscale and
    Camera angle.** Agreed design: `docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md` (read it fully).
    The live test of the LoRA on the GGUF base needs a real instance, which only the owner's laptop session can start.
