@@ -6,9 +6,13 @@
 
 Paste the printed line into instance/profiles/image.yaml. Every string in it is JSON-quoted (valid YAML), so a
 file name with YAML syntax in it stays one value. The dest defaults by extension (.gguf, .safetensors as a LoRA,
-.pth as an upscale model); pass it for anything else, e.g. an upscale model in .safetensors. Needs network access to huggingface.co (the
-cloud sessions of this project do not have it: run this on the laptop). Only the standard library.
+.pth as an upscale model); pass it for anything else, e.g. an upscale model in .safetensors. Needs network
+access to huggingface.co (the cloud sessions of this project do not have it: run this on the laptop). Only the
+standard library; runs on Python 3.9+ (macOS /usr/bin/python3 has working certificates, a python.org build may
+need its "Install Certificates" step).
 """
+from __future__ import annotations
+
 import json
 import re
 import sys
