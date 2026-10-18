@@ -67,6 +67,8 @@ export interface RequestOptions {
   maxBytes: number;
   /** Redacted from every error message. */
   secret?: string;
+  /** Fetch implementation (tests inject one); defaults to the global fetch. */
+  fetch?: typeof fetch;
 }
 
 /** Read at most `maxBytes` of the body; cancels the stream as soon as the running total passes it. */
@@ -94,7 +96,10 @@ async function readCapped(res: Response, maxBytes: number, path: string, abort: 
   return Buffer.concat(chunks, total);
 }
 
-/** One request, no retry. Network failures and timeouts become Unreachable; oversized bodies ResponseTooLarge. */
+/**
+ * One request, no retry. Network failures and timeouts become Unreachable; oversized bodies ResponseTooLarge.
+ * A URLSearchParams body is sent form-encoded; any other defined body as JSON.
+ */
 export async function request(
   method: string,
   url: string,
@@ -111,13 +116,16 @@ export async function request(
     signal: AbortSignal.any([AbortSignal.timeout(ms), abort.signal]),
     redirect: "error",
   };
-  if (body !== undefined) {
+  if (body instanceof URLSearchParams) {
+    init.body = body.toString();
+    (init.headers as Record<string, string>)["Content-Type"] = "application/x-www-form-urlencoded";
+  } else if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)["Content-Type"] = "application/json";
   }
   const path = new URL(url).pathname;
   try {
-    const res = await fetch(url, init);
+    const res = await (opts.fetch ?? fetch)(url, init);
     const bytes = await readCapped(res, opts.maxBytes, path, abort);
     return { status: res.status, body: bytes, contentType: res.headers.get("content-type") ?? "" };
   } catch (e) {

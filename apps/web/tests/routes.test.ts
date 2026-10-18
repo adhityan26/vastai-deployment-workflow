@@ -12,6 +12,7 @@ import {
   ComfyClient,
   Lifecycle,
   Registry,
+  TailscaleError,
   loadProfile,
   type AppsConfig,
   type CreateRequest,
@@ -1327,6 +1328,26 @@ describe("GPU choice", () => {
       }
       expect(h.vast.searches).toHaveLength(0);
     }
+  });
+
+  it("a failed OAuth key mint is start_failed with reason ts_key_mint_failed and a fixed English message", async () => {
+    h = await harness({ ready: false, authKey: async () => Promise.reject(new TailscaleError("oauth_failed")) });
+    const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({
+      error: {
+        code: "start_failed",
+        reason: "ts_key_mint_failed",
+        message: "a Tailscale auth key could not be created through the OAuth client; nothing was rented",
+      },
+    });
+    expect(h.logs).toContain("warn start failed: StartError (internal: ts_key_mint_failed)");
+    for (const text of [res.body, h.logs.join("\n")]) {
+      for (const secret of [AUTH_KEY, VAST_KEY, TOKEN]) expect(text).not.toContain(secret);
+    }
+    expect(h.vast.searches).toHaveLength(0);
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8")) as { components: { schemas: Record<string, { enum?: string[] }> } };
+    expect(doc.components.schemas["StartFailReason"]?.enum).toContain("ts_key_mint_failed");
   });
 });
 

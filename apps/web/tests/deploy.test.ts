@@ -84,6 +84,26 @@ describe("deploy files", () => {
       expect(env).not.toHaveProperty(k);
   });
 
+  it("the Tailscale OAuth keys exist in the schema and in .env.example (secrets empty, tunables commented)", () => {
+    const keys = schema.keys as { name: string; secret?: boolean; components?: string[] }[];
+    const byName = new Map(keys.map((k) => [k.name, k]));
+    for (const n of ["TS_OAUTH_CLIENT_ID", "TS_OAUTH_CLIENT_SECRET", "TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_API_URL"]) {
+      expect(byName.get(n)?.components, n).toContain("apps");
+    }
+    expect(byName.get("TS_OAUTH_CLIENT_SECRET")?.secret).toBe(true);
+    expect(byName.get("TS_OAUTH_CLIENT_ID")?.secret).toBe(true);
+    const example = read(".env.example");
+    expect(example).toMatch(/^TS_OAUTH_CLIENT_ID=$/m);
+    expect(example).toMatch(/^TS_OAUTH_CLIENT_SECRET=$/m);
+    for (const n of ["TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_API_URL"]) expect(example).toMatch(new RegExp(`^# ${n}=`, "m"));
+    const env = (svc["environment"] ?? {}) as Record<string, string>;
+    for (const n of ["TS_OAUTH_CLIENT_ID", "TS_OAUTH_CLIENT_SECRET"]) expect(env).not.toHaveProperty(n);
+    const readme = read("deploy/web/README.md");
+    expect(readme).toContain("## Tailscale OAuth client");
+    expect(readme).toContain("`TS_OAUTH_CLIENT_ID`");
+    expect(readme).toContain("`TS_OAUTH_CLIENT_SECRET`");
+  });
+
   it("compose and .env.example carry no literal secrets", () => {
     const secretLike = /\b[0-9a-f]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9])/;
     for (const text of [composeText, read(".env.example")]) {

@@ -10,6 +10,7 @@ import {
   Registry,
   VastClient,
   camelCase,
+  createTsAuthKeyProvider,
   loadConfigFromProcess,
   loadProfile,
   type AppsConfig,
@@ -85,13 +86,15 @@ async function main(): Promise<void> {
     return client;
   };
 
-  const tsAuthKey = async (): Promise<string> => {
-    const file = str(cfg, "tsAuthkeyFile");
-    if (file === "") throw new Error("TS_AUTHKEY_FILE is not configured");
-    const key = (await readFile(file, "utf8")).trim();
-    if (key !== "") seenSecrets.add(key);
-    return key;
-  };
+  // Auth key source, chosen once and logged in one line: the OAuth client when both of its keys are
+  // set (a fresh key per Start, no fallback to the file), else TS_AUTHKEY_FILE. Exactly one OAuth key
+  // set is logged as an error and every Start fails with ts_key_mint_failed. Every access token and
+  // minted key joins seenSecrets before it is used (the lifecycle scrubs the key itself as well).
+  const { tsAuthKey } = createTsAuthKeyProvider(cfg, {
+    log,
+    onSecret: (value) => seenSecrets.add(value),
+    readKeyFile: (path) => readFile(path, "utf8"),
+  });
 
   const lifecycle = new Lifecycle({
     cfg,

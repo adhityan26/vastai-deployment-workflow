@@ -2,6 +2,7 @@ import { camelCase, type AppsConfig } from "./config.js";
 import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
+import { TailscaleError } from "./tailscale.js";
 import {
   CreateRejected,
   DestroyError,
@@ -71,13 +72,15 @@ export class NoActiveInstanceError extends Error {
 
 /**
  * Why a start failed, as a fixed identifier (safe to log and to show; never provider text).
- * ts_key_missing: the Tailscale key file is unreadable or empty; vast_unavailable: the offer
+ * ts_key_missing: the Tailscale key file is unreadable or empty; ts_key_mint_failed: the Tailscale
+ * OAuth client could not mint a key (or OAuth is half-configured); vast_unavailable: the offer
  * search failed; config_invalid: a start setting is missing; vast_rejected: Vast definitely
  * refused the create; create_uncertain: the create may or may not have happened;
  * registry_failed: the instance was created but could not be recorded.
  */
 export type StartFailReason =
   | "ts_key_missing"
+  | "ts_key_mint_failed"
   | "vast_unavailable"
   | "config_invalid"
   | "vast_rejected"
@@ -133,6 +136,7 @@ export interface LifecycleDeps {
   agentFor(record: InstanceRecord): AgentLike;
   /** Epoch UTC seconds. */
   clock(): number;
+  /** The auth key for the new instance; may reject with TailscaleError when minted through OAuth. */
   tsAuthKey(): Promise<string>;
   newToken(): string;
   newHostname(): string;
@@ -510,8 +514,12 @@ export class Lifecycle {
     let authKey = "";
     try {
       authKey = await this.deps.tsAuthKey();
-    } catch {
+    } catch (err) {
       // Fixed text: a read error may name the file or, from a broken reader, echo its content.
+      // A TailscaleError carries only a fixed code. Never a fallback to another key source.
+      if (err instanceof TailscaleError) {
+        return failBeforeCreate(new Error(`the Tailscale auth key could not be minted (${err.code})`), "ts_key_mint_failed");
+      }
       return failBeforeCreate(new Error("the Tailscale auth key could not be read"), "ts_key_missing");
     }
     this.secrets.add(authKey);

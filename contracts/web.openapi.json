@@ -106,6 +106,7 @@
       "StartFailReason": {
         "enum": [
           "ts_key_missing",
+          "ts_key_mint_failed",
           "vast_unavailable",
           "config_invalid",
           "vast_rejected",

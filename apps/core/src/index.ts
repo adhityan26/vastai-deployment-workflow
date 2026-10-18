@@ -7,4 +7,5 @@ export * from "./generate.js";
 export * from "./lifecycle.js";
 export * from "./profile.js";
 export * from "./registry.js";
+export * from "./tailscale.js";
 export * from "./vast.js";

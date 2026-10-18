@@ -52,6 +52,7 @@ const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 // Short English text per fixed start-failure reason (the page shows it as is).
 const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
   ts_key_missing: "the Tailscale auth key is missing or empty on the server",
+  ts_key_mint_failed: "a Tailscale auth key could not be created through the OAuth client; nothing was rented",
   vast_unavailable: "Vast could not be asked for offers; nothing was rented",
   config_invalid: "the server start configuration is incomplete; nothing was rented",
   vast_rejected: "Vast refused to create the instance; nothing was rented",

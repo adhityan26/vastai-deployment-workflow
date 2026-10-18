@@ -23,7 +23,9 @@ Compose file: `docker-compose.yml` at the repository root. Env template: `.env.e
   (every `/api/*` is 401, `/auth/login` is 503). `/healthz`, `/auth/*` and the static page are public.
 - The browser never talks to the instance; only to `/api/*` of this service.
 - The registry (one active instance record) is a JSON file on the named volume `vast-comfy-registry`.
-- A new instance joins the tailnet with a single-use auth key read from `TS_AUTHKEY_FILE`.
+- A new instance joins the tailnet with a single-use auth key: minted per Start through the
+  Tailscale OAuth client (`TS_OAUTH_CLIENT_ID` + `TS_OAUTH_CLIENT_SECRET`, preferred), or, only
+  when neither OAuth key is set, read from `TS_AUTHKEY_FILE`.
 
 ## Deploying (from the laptop)
 
@@ -59,11 +61,46 @@ The image runs the compiled JavaScript as the non-root `node` user.
       `openssl rand -hex 32`. `AUTHENTIK_ISSUER` must be copied EXACTLY, including the trailing slash.
       Keep `WEB_OIDC_SKEW_S=5` from the template: Authentik may run on another clock, and with a skew
       of 0 an ID token whose `iat` is even 1 s in the future (by our clock) is rejected.
-- [ ] Tailscale auth key into the `vast-comfy-keys` volume (below), BEFORE the first `up`.
+- [ ] Tailscale OAuth client (below) into `.env`; or, without it, the Tailscale auth key into the
+      `vast-comfy-keys` volume (below). The volume must exist BEFORE the first `up` either way.
 - [ ] Cloudflare tunnel public hostname (below).
 - [ ] `DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build`, then the smoke checks.
 
-## Tailscale auth key
+## Tailscale OAuth client
+
+Preferred over the key file: the service mints a fresh key for every Start, so there is no key to
+renew or to run out of.
+
+1. Tailscale admin console -> Settings -> OAuth clients -> Generate OAuth client.
+2. Scopes: **Keys -> Auth Keys: Write** and nothing else. Tags: `tag:gpu` (the tag must exist in
+   the tailnet policy `tagOwners`; it must match `TS_OAUTH_TAG`, default `tag:gpu`).
+3. Copy the client id and the client secret (shown once) straight into `.env` on the laptop as
+   `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_CLIENT_SECRET`. Never paste them into a chat, an issue or
+   a commit. Set both or neither: with exactly one set the service logs
+   `tailscale auth key source: misconfigured` at startup and refuses every Start with reason
+   `ts_key_mint_failed` (it never falls back to the key file).
+4. Recreate the container (`DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d`). The
+   startup log says `tailscale auth key source: oauth`.
+
+Each minted key is single-use, ephemeral, pre-approved, carries only `TS_OAUTH_TAG` and expires
+after `TS_KEY_TTL_S` seconds (default 3600; if Tailscale refuses that value the service retries
+once with 86400 and logs `tailscale key ttl fallback`). The secret, the access token and the
+minted keys stay in memory only; none is written to the registry, a log line or a response.
+
+Verify: with no file in the key volume (or `TS_AUTHKEY_FILE` pointing nowhere), Start works and the
+new node shows up in the admin console as ephemeral with tag `tag:gpu`. A failure shows as
+`start failed: StartError (internal: ts_key_mint_failed)` in the log, and the cause as
+`tailscale token request failed: ...` or `tailscale key request failed: ...` (a fixed code plus
+the HTTP status, never the provider's text).
+
+Revoking the OAuth client in the admin console stops all key minting at once (Start then fails
+with `ts_key_mint_failed`); keys already handed to running instances are single-use and expire on
+their own.
+
+## Tailscale auth key (fallback without OAuth)
+
+Used only when `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_CLIENT_SECRET` are both empty (startup log:
+`tailscale auth key source: file`).
 
 Tailscale admin console -> Settings -> Keys -> Generate auth key: **Reusable off (single-use)**,
 **Ephemeral on**, **Pre-approved on**, tag `tag:gpu`, expiry **1 day**. Save it as the only
@@ -178,7 +215,8 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
   need to retry.
 - The callback refuses users without a role group.
 - Env keys: see `.env.example`. `COMFY_PORT` and `AGENT_PORT` are fixed (not sent to the
-  instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_BOT_TOKEN`.
+  instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL` (superseded by the two
+  `TS_OAUTH_CLIENT_*` keys), `DISCORD_BOT_TOKEN`.
 
 ## Already verified
 
@@ -186,6 +224,8 @@ The Vast create/destroy request shapes and the instance label were verified in t
 
 ## NOT verified yet
 
+- Tailscale OAuth key minting against the real API: the token and key request shapes follow
+  the public API docs; the smallest accepted `TS_KEY_TTL_S` and the scope/tag acceptance are unmeasured.
 - The `groups` claim in a real Authentik ID token (and RS256 signing).
 - The Cloudflare tunnel hostname `gen.` -> `192.168.88.113:3400`.
 - Container-to-tailnet reachability from the homelab host, and bare MagicDNS names resolving
