@@ -237,6 +237,24 @@ values, long hex/base64 strings, URL credentials); the instance hostname shows a
 - The phases come only from the instance's marker lines `[boot] step <n>/<m>: <id>` and
   `[boot] FAILED: <code>` (the fixed step list is defined once in `apps/core/src/console.ts`).
 
+## Usage history
+
+Admins see a "History" card (`GET /api/history`; members get 403): one line per instance session with
+the start time, duration, GPU, an estimated cost (duration x price per hour; disk and traffic are
+billed separately) and why it stopped: the Destroy button (with who pressed it), the idle timeout,
+the failsafe deadline, the hard cap, a failed boot or Start, an unreachable agent, or "disappeared"
+when the cause is unknown (e.g. Vast removed it).
+
+- When the web service stops the instance itself it records why before it acts. When the instance
+  stops itself, the reason comes from the last agent `/status` the web saw: the agent's own destroy
+  state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by
+  the time the web noticed (plus `USAGE_REASON_SLACK_S` for clock skew), else "disappeared".
+- The instance prints `[watchdog] destroying instance: reason=<reason>` before each self-destroy
+  (agent log under supervisor, `failsafe.log` for the standalone failsafe).
+- `USAGE_LOG_MAX_ENTRIES` sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
+  next to the registry); a corrupt file is ignored. The web log gets one `usage: start ...` and one
+  `usage: stop ...` line per session (GPU, price, reason, duration and user names only).
+
 ## Image edit with reference images
 
 Members can switch the Generate card to "Edit images", attach up to `EDIT_MAX_REFERENCES` PNG/JPEG/WebP

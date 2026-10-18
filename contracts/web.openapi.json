@@ -749,6 +749,123 @@
             "description": "The last Vast read for the console failed; the kept lines are still returned"
           }
         }
+      },
+      "UsageStopReason": {
+        "type": "string",
+        "enum": [
+          "destroy_button",
+          "idle_timeout",
+          "failsafe_deadline",
+          "hard_cap",
+          "boot_failed",
+          "agent_unreachable",
+          "gone"
+        ],
+        "description": "Why a session ended. destroy_button: the Destroy button in the web (stop_by names who; also when it was pressed while the create was still uncertain). idle_timeout: the instance agent destroyed it after the idle time. failsafe_deadline: the failsafe deadline passed (standalone failsafe or agent). hard_cap: the hard cap passed (web or instance side). boot_failed: Start failed, the create never appeared, the boot timed out (BOOT_TIMEOUT_MIN) or the instance destroyed itself because its boot failed. agent_unreachable: the web destroyed it because the agent stayed unreachable for UNREACHABLE_DESTROY_MIN. gone: the instance disappeared and the cause is unknown (e.g. Vast removed it). When the web itself stops the instance it records the reason before acting; when the instance disappears by itself the reason comes from the last agent status the web saw: the agent's own destroy state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by the moment the web noticed (plus USAGE_REASON_SLACK_S), else gone. Extending a deadline is never a stop reason."
+      },
+      "HistoryEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vast_instance_id",
+          "gpu_name",
+          "dph",
+          "started_at",
+          "ready_at",
+          "ended_at",
+          "duration_s",
+          "estimated_cost",
+          "started_by",
+          "reason",
+          "stop_by",
+          "active"
+        ],
+        "properties": {
+          "vast_instance_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Vast instance id; null when no instance was created (a Start that failed before the create)"
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "GPU model of the chosen offer (plain characters only)"
+          },
+          "dph": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "USD per hour: the offer's price, replaced by Vast's own price for the instance once listed"
+          },
+          "started_at": {
+            "type": "integer",
+            "description": "Epoch seconds when the Start was accepted"
+          },
+          "ready_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch seconds when the web first saw the instance ready; null if it never was"
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch seconds of the end: when the web stopped it or noticed it gone; for a passed deadline the deadline itself (never before the last sighting). Null while active"
+          },
+          "duration_s": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "ended_at (or now while active) minus started_at"
+          },
+          "estimated_cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "duration_s x dph in USD: an ESTIMATE (disk and traffic are billed separately, and Vast bills by its own clock). Null without an instance or a price"
+          },
+          "started_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "User name of the admin who pressed Start (never an email address); null when unknown (a session from before the history existed)"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UsageStopReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why it stopped; null while active"
+          },
+          "stop_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "User name of the admin who pressed Destroy (reason destroy_button only)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "True for the running session (ended_at and reason are null)"
+          }
+        }
       }
     }
   },
@@ -1933,6 +2050,72 @@
           },
           "500": {
             "description": "The console could not be built, e.g. BOOT_LOG_* invalid (code console_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/history": {
+      "get": {
+        "operationId": "history",
+        "summary": "Usage history (admin): one entry per instance session, newest first, at most USAGE_LOG_MAX_ENTRIES, kept across web restarts in USAGE_LOG_PATH. Shows when each instance started, became ready and stopped, why it stopped, who started it and who pressed Destroy, and an estimated cost. Open sessions whose registry record is gone are closed (with an inferred reason) before the list is returned.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "entries"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/HistoryEntry"
+                      },
+                      "description": "Newest first; at most one entry is active"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The history could not be built (code history_unavailable)",
             "content": {
               "application/json": {
                 "schema": {

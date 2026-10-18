@@ -9,12 +9,16 @@ import {
   ConsoleStore,
   Lifecycle,
   Registry,
+  UsageHistory,
+  UsageStore,
   VastClient,
   camelCase,
   consoleFileCap,
   createTsAuthKeyProvider,
   loadConfigFromProcess,
   loadProfile,
+  usageFileCap,
+  usageLimits,
   type AppsConfig,
   type InstanceRecord,
 } from "@vast-comfy/core";
@@ -113,6 +117,10 @@ async function main(): Promise<void> {
     }),
   );
 
+  // When each instance started and stopped, and why: on the data volume too (USAGE_LOG_PATH).
+  const limits = usageLimits(cfg);
+  const usage = new UsageHistory(limits, new UsageStore(str(cfg, "usageLogPath"), usageFileCap(limits.maxEntries)), log);
+
   const lifecycle = new Lifecycle({
     cfg,
     vast,
@@ -122,6 +130,7 @@ async function main(): Promise<void> {
     tsAuthKey,
     profileModels: profile.models,
     consoleStore,
+    usage,
     newToken: () => randomBytes(TOKEN_BYTES).toString("hex"),
     newHostname: () => `${HOSTNAME_PREFIX}${randomBytes(HOSTNAME_ID_BYTES).toString("hex")}`,
   });
