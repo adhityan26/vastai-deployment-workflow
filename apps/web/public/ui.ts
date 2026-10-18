@@ -175,6 +175,7 @@ export function mountApp(doc: Document, env: Env): App {
   let usageSeenState: string | null = null; // the state at the last history read decision (null: never read)
   let usageEpoch = 0; // bumped by resetUsage; an answer from an older epoch is discarded
   let usageBusy = false;
+  let usageDirty = false; // a refresh was due while a read was in flight: read once more after it
 
   // ---- requests ----
 
@@ -1374,6 +1375,7 @@ export function mountApp(doc: Document, env: Env): App {
     usageEpoch++;
     usageSeenState = null;
     usageBusy = false;
+    usageDirty = false;
     usageList.replaceChildren();
     $("usage-empty").hidden = false;
     setText("usage-error", "");
@@ -1392,8 +1394,12 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   async function loadUsage(): Promise<void> {
-    if (usageBusy) return;
+    if (usageBusy) {
+      usageDirty = true;
+      return;
+    }
     usageBusy = true;
+    usageDirty = false;
     const epoch = usageEpoch;
     try {
       const entries = parseHistory(await call("GET", API.history));
@@ -1409,6 +1415,7 @@ export function mountApp(doc: Document, env: Env): App {
     } finally {
       if (epoch === usageEpoch) usageBusy = false;
     }
+    if (epoch === usageEpoch && usageDirty) void loadUsage();
   }
 
   /** Admins only: read the history on the first state and when the state turns none or ready. */

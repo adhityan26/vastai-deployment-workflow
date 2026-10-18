@@ -35,6 +35,7 @@ let fetched: string[] = [];
 let stateBody: Record<string, unknown> = {};
 let historyBody: unknown = { entries: [] };
 let historyStatus = 200;
+let historyGate: Promise<void> | null = null;
 
 async function mount(over: { state?: Record<string, unknown>; history?: unknown; status?: number } = {}): Promise<App> {
   stateBody = apiState(over.state);
@@ -47,7 +48,11 @@ async function mount(over: { state?: Record<string, unknown>; history?: unknown;
       const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
       if (path === "/api/me") return json(200, { name: "T", username: "t", role: stateBody["role"] });
       if (path === "/api/state") return json(200, stateBody);
-      if (path === "/api/history") return json(historyStatus, historyBody);
+      if (path === "/api/history") {
+        const body = historyBody; // the answer as it was when the request arrived
+        if (historyGate) await historyGate;
+        return json(historyStatus, body);
+      }
       return json(404, { error: { code: "not_found", message: "no" } });
     }) as typeof fetch,
     now: () => 1_000_000,
@@ -67,6 +72,7 @@ const rows = () => [...document.querySelectorAll("#usage-list li")].map((n) => n
 beforeEach(() => {
   document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
   fetched = [];
+  historyGate = null;
   try { localStorage.clear(); } catch { /* none */ }
 });
 afterEach(() => {
@@ -165,6 +171,26 @@ describe("history card", () => {
     await a.refresh();
     await flush();
     expect(historyCalls()).toBe(3);
+  });
+
+  it("a change to none or ready during a read in flight reads once more afterwards", async () => {
+    let release!: () => void;
+    historyGate = new Promise<void>((r) => (release = r));
+    const a = await mount({ state: { state: "booting" }, history: { entries: [entry({ active: true, ended_at: null, reason: null })] } });
+    expect(historyCalls()).toBe(1); // still in flight
+    historyBody = { entries: [entry()] };
+    stateBody = apiState({ state: "none" });
+    await a.refresh();
+    await flush();
+    expect(historyCalls()).toBe(1); // no second request while one is running
+    historyGate = null;
+    release();
+    await flush();
+    expect(historyCalls()).toBe(2);
+    expect(rows()[0]).toContain("Destroy button (by ayu)");
+    await a.refresh();
+    await flush();
+    expect(historyCalls()).toBe(2);
   });
 
   it("a failed read shows a short note and keeps the last list", async () => {
