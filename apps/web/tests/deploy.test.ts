@@ -193,3 +193,26 @@ describe("deploy files", () => {
     expect(Number(grace![1])).toBeGreaterThan(budget);
   });
 });
+
+describe("dependency supply chain", () => {
+  const lock = JSON.parse(read("package-lock.json")) as { packages: Record<string, { resolved?: string; integrity?: string; hasInstallScript?: boolean; link?: boolean }> };
+
+  it("the S3 client is pinned to an exact, settled release", () => {
+    const core = JSON.parse(read("apps/core/package.json")) as { dependencies: Record<string, string> };
+    expect(core.dependencies["@aws-sdk/client-s3"]).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(core.dependencies["@aws-sdk/client-s3"]).toBe("3.1146.0");
+    expect((lock.packages["node_modules/@aws-sdk/client-s3"] as { version?: string } | undefined)?.version).toBe("3.1146.0");
+  });
+
+  // The packages with an install script (the page bundler and its macOS watcher, dev only); a new one needs a review.
+  const INSTALL_SCRIPTS = new Set(["node_modules/esbuild", "node_modules/fsevents"]);
+
+  it("every locked package comes from the npm registry with a sha512 integrity and no new one runs install scripts", () => {
+    for (const [path, pkg] of Object.entries(lock.packages)) {
+      if (path === "" || pkg.link === true || !path.includes("node_modules/")) continue;
+      expect(pkg.resolved, path).toMatch(/^https:\/\/registry\.npmjs\.org\//); // config-lint: ok (registry URL check)
+      expect(pkg.integrity, path).toMatch(/^sha512-/);
+      if (!INSTALL_SCRIPTS.has(path)) expect(pkg.hasInstallScript ?? false, path).toBe(false);
+    }
+  });
+});
