@@ -201,7 +201,7 @@ const GENERATE_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "size"],
-  properties: { prompt: {}, preset: {}, size: {}, seed: {} },
+  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {} },
 } as const;
 
 // Edit: the references travel as base64 text in the JSON body (so every gate for JSON bodies applies
@@ -210,7 +210,7 @@ const EDIT_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "resolution", "images"],
-  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" } },
+  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {} },
 } as const;
 // JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
 const EDIT_JSON_OVERHEAD = 8;
@@ -276,6 +276,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     cfg,
   });
 
+  /** ", <style title>" for the label of a job that ran with a style (it was validated before submit). */
+  const styleSuffix = (style: unknown): string => {
+    const id = typeof style === "object" && style !== null ? (style as { id?: unknown }).id : undefined;
+    const found = deps.profile.styles.find((st) => st.id === id);
+    return found ? `, ${found.title}` : "";
+  };
+
   /** The reply for a job that could not be submitted (shared by generate and edit). */
   const submitFailure = (reply: FastifyReply, err: unknown, what: string): FastifyReply => {
     if (err instanceof GenerateInputError) {
@@ -321,6 +328,23 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       role: req.role,
       presets: deps.profile.generate.qualityPresets.map((p) => ({ name: p.name, steps: p.steps })),
       sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
+      // The enabled styles with the limits the page needs to draw their panels. Never the LoRA file
+      // name, the workflow nodes or where a value goes.
+      styles: deps.profile.styles.map((st) => ({
+        id: st.id,
+        title: st.title,
+        modes: [...st.modes],
+        params: st.params.map((p) => ({
+          id: p.id,
+          title: p.title,
+          type: p.type,
+          ...(p.min === undefined ? {} : { min: p.min }),
+          ...(p.max === undefined ? {} : { max: p.max }),
+          ...(p.step === undefined ? {} : { step: p.step }),
+          ...(p.choices === undefined ? {} : { choices: [...p.choices] }),
+          default: p.default,
+        })),
+      })),
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null

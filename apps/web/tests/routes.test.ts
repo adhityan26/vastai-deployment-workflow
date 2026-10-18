@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeJwt } from "jose";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import {
   AgentClient,
@@ -1796,3 +1797,88 @@ function newFilesWith(before: Map<string, number>, roots: string[], marker: Buff
   }
   return hits;
 }
+
+// ---- styles ----
+
+describe("styles", () => {
+  const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+
+  /** The shipped profile with the Anything to Real style switched on (its LoRA among the models). */
+  function styledProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
+    doc.styles[0].enabled = true;
+    mutate?.(doc);
+    const dir = mkdtempSync(join(tmpdir(), "styled-profile-"));
+    tempDirs.push(dir);
+    const path = join(dir, "image.yaml");
+    writeFileSync(path, stringifyYaml(doc));
+    return loadProfile(path);
+  }
+
+  const asked = { style: { id: "anything2real", params: { strength: 0.85 } } };
+
+  it("lists the enabled styles in /api/state with their limits, and nothing about the LoRA file or the workflow nodes", async () => {
+    h = await harness({ profile: styledProfile() });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.styles).toEqual([
+      {
+        id: "anything2real",
+        title: "Anything to Real",
+        modes: ["edit"],
+        params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 }],
+      },
+    ]);
+    const text = JSON.stringify(body.styles);
+    for (const secret of [LORA, "model_from", "model_to", "lora", "target", "\"4\""]) expect(text).not.toContain(secret);
+  });
+
+  it("the shipped profile has the style off, so state.styles is empty and the style is refused as unknown", async () => {
+    const m = await member();
+    expect((await call("GET", "/api/state", m)).json().styles).toEqual([]);
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", m, { ...okEdit, style: { id: "anything2real" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("unknown_style");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("an edit with a style submits the workflow with the LoRA loader at the asked strength", async () => {
+    h = await harness({ profile: styledProfile() });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, ...asked });
+    expect(res.statusCode).toBe(202);
+    const sent = JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+    expect(sent["style_lora"].inputs).toEqual({ model: ["1", 0], lora_name: LORA, strength_model: 0.85 });
+    expect(sent["4"].inputs.model).toEqual(["style_lora", 0]);
+  });
+
+  const bad: [string, "edit" | "generate", unknown, string][] = [
+    ["an unknown style", "edit", { id: "nope" }, "unknown_style"],
+    ["an edit-only style in generate", "generate", { id: "anything2real" }, "style_not_for_mode"],
+    ["a strength out of range", "edit", { id: "anything2real", params: { strength: 3 } }, "invalid_style_param"],
+    ["a strength off its step", "edit", { id: "anything2real", params: { strength: 0.72 } }, "invalid_style_param"],
+    ["a text strength", "edit", { id: "anything2real", params: { strength: "0.7" } }, "invalid_style_param"],
+    ["a param the style does not have", "edit", { id: "anything2real", params: { node: "4" } }, "unknown_style_param"],
+    ["a style that is not an object", "edit", "anything2real", "invalid_style"],
+    ["extra keys in the style", "edit", { id: "anything2real", lora: "x.safetensors" }, "invalid_style"],
+  ];
+  it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_name, mode, style, code) => {
+    h = await harness({ profile: styledProfile() });
+    h.setComfy(comfyEdit());
+    const m = await member();
+    const res = mode === "edit" ? await post("/api/edit", m, { ...okEdit, style }) : await post("/api/generate", m, { ...okGen, style });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("500 profile_mismatch when the workflow does not have the nodes the style names", async () => {
+    h = await harness({ profile: styledProfile((d) => (d.styles[0].lora.model_to.node = "99")) });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, ...asked });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("profile_mismatch");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+});

@@ -201,7 +201,8 @@
           "role",
           "presets",
           "sizes",
-          "edit"
+          "edit",
+          "styles"
         ],
         "properties": {
           "state": {
@@ -537,6 +538,96 @@
                     },
                     "value": {
                       "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "styles": {
+            "type": "array",
+            "description": "Enabled styles (LoRA variations with their own parameters) the page may offer under the modes they list",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "title",
+                "modes",
+                "params"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "modes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "generate",
+                      "edit"
+                    ]
+                  }
+                },
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "title",
+                      "type",
+                      "default"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "float",
+                          "int",
+                          "choice",
+                          "bool"
+                        ]
+                      },
+                      "min": {
+                        "type": "number"
+                      },
+                      "max": {
+                        "type": "number"
+                      },
+                      "step": {
+                        "type": "number"
+                      },
+                      "choices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "default": {
+                        "oneOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "boolean"
+                          }
+                        ]
+                      }
                     }
                   }
                 }
@@ -1985,6 +2076,35 @@
                     ],
                     "minimum": 0,
                     "maximum": 9007199254740991
+                  },
+                  "style": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id"
+                    ],
+                    "description": "Optional style from /api/state (styles). Params not sent take their default; unknown params, wrong types, values out of range or off the step are refused. One style per job.",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "params": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2031,7 +2151,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2153,6 +2273,35 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "style": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id"
+                    ],
+                    "description": "Optional style from /api/state (styles). Params not sent take their default; unknown params, wrong types, values out of range or off the step are refused. One style per job.",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "params": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2199,7 +2348,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
             "content": {
               "application/json": {
                 "schema": {

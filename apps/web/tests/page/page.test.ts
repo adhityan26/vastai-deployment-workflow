@@ -6,7 +6,7 @@ import { mountApp, type App } from "../../public/ui.js";
 
 const INDEX = readFileSync(join(import.meta.dirname, "../../public/index.html"), "utf8");
 
-interface Reply { status?: number; body: unknown; gate?: Promise<void> }
+interface Reply { status?: number; body: unknown; gate?: Promise<void>; /** Sent as raw bytes with this content type instead of JSON. */ raw?: string; type?: string }
 type Handler = Reply | ((body: unknown) => Reply);
 interface Call { method: string; path: string; body: unknown }
 
@@ -53,6 +53,7 @@ async function mount(state: Record<string, unknown> = {}, extra: Record<string, 
       if (h === undefined) return new Response(JSON.stringify({ error: { code: "not_found", message: "not found" } }), { status: 404 });
       const r = typeof h === "function" ? h(body) : h;
       if (r.gate) await r.gate;
+      if (r.raw !== undefined) return new Response(r.raw, { status: r.status ?? 200, headers: { "Content-Type": r.type ?? "image/png" } });
       return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
     }) as typeof fetch,
     now: () => nowMs,
@@ -961,5 +962,174 @@ describe("Vast credit", () => {
     routes["GET /api/state"] = { body: apiState({ role: "member" }) };
     await app!.refresh();
     expect(q("#f-credit-box")!.hidden).toBe(true);
+  });
+});
+
+describe("styles and chaining", () => {
+  const editInfo = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }] };
+  const strength = { id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 };
+  const a2r = { id: "anything2real", title: "Anything to Real", modes: ["edit"], params: [strength] };
+  const mixed = {
+    id: "mixed",
+    title: "Mixed",
+    modes: ["generate", "edit"],
+    params: [
+      { id: "kind", title: "Kind", type: "choice", choices: ["soft", "hard"], default: "soft" },
+      { id: "sharp", title: "Sharp", type: "bool", default: false },
+    ],
+  };
+  const chooseEdit = () => q<HTMLButtonElement>("#mode-edit")!.click();
+  const styleButtons = () => [...document.querySelectorAll("#styles button")].map((b) => b.textContent);
+  const pressed = () => [...document.querySelectorAll("#styles button")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent);
+  const click = (title: string) => [...document.querySelectorAll<HTMLButtonElement>("#styles button")].find((b) => b.textContent === title)!.click();
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("hides the style box when no style is listed for the mode, and lists Standard first otherwise", async () => {
+    await mount({ edit: editInfo, styles: [a2r] });
+    expect(q("#style-box")!.hidden).toBe(true); // generate: the style is edit-only
+    chooseEdit();
+    expect(q("#style-box")!.hidden).toBe(false);
+    expect(styleButtons()).toEqual(["Standard", "Anything to Real"]);
+    expect(pressed()).toEqual(["Standard"]);
+    expect(q("#style-params")!.children).toHaveLength(0);
+  });
+
+  it("draws the panel of the chosen style from the api and keeps a slider across polls", async () => {
+    await mount({ edit: editInfo, styles: [a2r, mixed] });
+    chooseEdit();
+    click("Anything to Real");
+    const range = q<HTMLInputElement>("#style-params input[type=range]")!;
+    expect([range.min, range.max, range.step, range.value]).toEqual(["0.4", "1", "0.05", "0.7"]);
+    range.value = "0.85";
+    range.dispatchEvent(new Event("input"));
+    expect(q(".style-value")!.textContent).toBe("0.85");
+    await app!.refresh();
+    expect(q<HTMLInputElement>("#style-params input[type=range]")!.value).toBe("0.85");
+    click("Mixed");
+    expect([...document.querySelectorAll("#style-params label")].map((l) => l.textContent)).toEqual(["Kind", "Sharp"]);
+    expect(q("#style-params select")!.tagName).toBe("SELECT");
+    expect(q<HTMLInputElement>("#style-params input[type=checkbox]")!.checked).toBe(false);
+    click("Anything to Real"); // the earlier value is remembered
+    expect(q<HTMLInputElement>("#style-params input[type=range]")!.value).toBe("0.85");
+  });
+
+  it("sends the chosen style and its values with an edit, and adds its title to the label", async () => {
+    await mount({ edit: editInfo, styles: [a2r] }, { "POST /api/edit": { status: 202, body: { id: "edit-9" } }, "GET /api/generate/edit-9": { body: { status: "pending" } } });
+    chooseEdit();
+    click("Anything to Real");
+    const range = q<HTMLInputElement>("#style-params input[type=range]")!;
+    range.value = "0.62";
+    range.dispatchEvent(new Event("input"));
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["PNGDATA"], "a.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+    q<HTMLTextAreaElement>("#prompt")!.value = "make it real";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/edit")[0]!.body).toMatchObject({ style: { id: "anything2real", params: { strength: 0.6 } } });
+    expect(q(".job .muted")!.textContent).toMatch(/, Anything to Real$/);
+  });
+
+  it("sends no style member when Standard is chosen, and the chosen generate style with its values", async () => {
+    await mount({ edit: editInfo, styles: [a2r, mixed] }, { "POST /api/generate": { status: 202, body: { id: "g-1" } }, "GET /api/generate/g-1": { body: { status: "failed", message: "x" } } });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/generate")[0]!.body).not.toHaveProperty("style");
+
+    expect(styleButtons()).toEqual(["Standard", "Mixed"]); // a2r is edit-only
+    click("Mixed");
+    const sel = q<HTMLSelectElement>("#style-params select")!;
+    sel.value = "hard";
+    sel.dispatchEvent(new Event("change"));
+    const box = q<HTMLInputElement>("#style-params input[type=checkbox]")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/generate")[1]!.body).toMatchObject({ style: { id: "mixed", params: { kind: "hard", sharp: true } } });
+  });
+
+  it("falls back to Standard when the chosen style disappears from the state", async () => {
+    await mount({ edit: editInfo, styles: [a2r] });
+    chooseEdit();
+    click("Anything to Real");
+    routes["GET /api/state"] = { body: apiState({ edit: editInfo, styles: [] }) };
+    await app!.refresh();
+    expect(q("#style-box")!.hidden).toBe(true);
+  });
+
+  it("renders a hostile style title and parameter title as text only", async () => {
+    const evil = { ...a2r, title: '<img src=x onerror="alert(1)">', params: [{ ...strength, title: "<b>bold</b>" }] };
+    await mount({ edit: editInfo, styles: [evil] });
+    chooseEdit();
+    click('<img src=x onerror="alert(1)">');
+    expect(q("#style-box img")).toBeNull();
+    expect(q("#style-params b")).toBeNull();
+    expect(q("#style-params label")!.textContent).toBe("<b>bold</b>");
+  });
+
+  describe("use as reference", () => {
+    const done = (id: string): Record<string, Handler> => ({ ["GET /api/generate/" + id]: { body: { status: "done", images: [{ index: 0, url: `/api/image/${id}/0` }] } } });
+
+    async function withResult(over: Record<string, unknown> = {}, extra: Record<string, Handler> = {}) {
+      await mount({ edit: editInfo, styles: [a2r], ...over }, {
+        "POST /api/generate": { status: 202, body: { id: "g-1" } },
+        "GET /api/image/g-1/0": { body: null, raw: "RESULTBYTES", type: "image/png" },
+        ...done("g-1"),
+        ...extra,
+      });
+      q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+      q<HTMLFormElement>("#gen-form")!.requestSubmit();
+      await flush();
+      await flush();
+    }
+    const chainBtns = () => [...document.querySelectorAll<HTMLButtonElement>(".chain button")].map((b) => b.textContent);
+
+    it("is offered on a result only when the server offers edit", async () => {
+      await withResult({ edit: null });
+      expect(q(".chain")).toBeNull();
+    });
+
+    it("lists a plain button and one per edit style", async () => {
+      await withResult();
+      expect(chainBtns()).toEqual(["Use as reference", "Use as reference: Anything to Real"]);
+    });
+
+    it("switches to Edit, attaches the fetched result as the first reference and keeps Standard", async () => {
+      await withResult();
+      q<HTMLButtonElement>(".chain button")!.click();
+      await flush();
+      expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+      expect([...document.querySelectorAll("#ref-list .ref-tag")].map((n) => n.textContent)).toEqual(["<image1>"]);
+      expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
+      expect(pressed()).toEqual(["Standard"]);
+      expect(calls.filter((c) => c.path === "/api/image/g-1/0")).toHaveLength(1);
+    });
+
+    it("switches to the chosen edit style", async () => {
+      await withResult();
+      document.querySelectorAll<HTMLButtonElement>(".chain button")[1]!.click();
+      await flush();
+      expect(pressed()).toEqual(["Anything to Real"]);
+      expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    });
+
+    it("says why when the result cannot be loaded or is not an accepted image, and attaches nothing", async () => {
+      await withResult({}, { "GET /api/image/g-1/0": { status: 404, body: null, raw: "gone" } });
+      q<HTMLButtonElement>(".chain button")!.click();
+      await flush();
+      expect(q("#ref-error")!.hidden).toBe(false);
+      expect(document.querySelectorAll("#ref-list li")).toHaveLength(0);
+      routes["GET /api/image/g-1/0"] = { body: null, raw: "<svg/>", type: "image/svg+xml" };
+      q<HTMLButtonElement>(".chain button")!.click();
+      await flush();
+      expect(q("#ref-error")!.textContent).toContain("only PNG, JPEG");
+      expect(document.querySelectorAll("#ref-list li")).toHaveLength(0);
+    });
   });
 });

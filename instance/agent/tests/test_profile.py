@@ -397,3 +397,32 @@ def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
     assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
     assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json")
+
+
+def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_another_model(tmp_path):
+    """The agent ignores `styles:`; a style's LoRA is downloaded because it is listed in `models`."""
+    import yaml
+    from pathlib import Path
+
+    shipped = Path(__file__).resolve().parents[2] / "profiles" / "image.yaml"
+    raw = yaml.safe_load(shipped.read_text())
+    assert raw["styles"][0]["enabled"] is False  # off until the LoRA is pinned
+    before = load_profile(shipped)
+    assert all(m.dest != "models/loras/" for m in before.models)  # nothing to download for a disabled style
+
+    raw["models"].append(
+        {
+            "file": raw["styles"][0]["lora"]["file"],
+            "repo": "org/loras",
+            "revision": "a" * 40,
+            "dest": "models/loras/",
+            "size_bytes": 1234,
+        }
+    )
+    raw["styles"][0]["enabled"] = True
+    path = tmp_path / "image.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    after = load_profile(path)
+    assert [m.file for m in after.models][-1] == "Qwen2.1_Anything2RealCharacters.safetensors"
+    assert after.models[-1].dest == "models/loras/"
+    assert len(after.models) == len(before.models) + 1

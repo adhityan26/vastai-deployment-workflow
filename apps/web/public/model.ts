@@ -59,6 +59,20 @@ export interface Download { files_total: number; files_done: number; bytes_done:
 export interface Resolution { name: string; value: number }
 /** What the server offers for edit with reference images (null in the state when edit is off). */
 export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[] }
+export type Mode = "generate" | "edit";
+export type StyleValue = number | string | boolean;
+/** One parameter of a style, as the server lists it (limits only; where it goes stays on the server). */
+export interface StyleParam {
+  id: string;
+  title: string;
+  type: "float" | "int" | "choice" | "bool";
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+  default: StyleValue;
+}
+export interface StyleInfo { id: string; title: string; modes: Mode[]; params: StyleParam[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -79,6 +93,7 @@ export interface ApiState {
   presets: Preset[];
   sizes: Size[];
   edit: EditInfo | null;
+  styles: StyleInfo[];
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
@@ -103,6 +118,42 @@ function parseEdit(v: unknown): EditInfo | null {
     resolutions.push({ name: r["name"], value: r["value"] });
   }
   return { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels, types: types as string[], resolutions };
+}
+
+function parseStyleParam(v: unknown): StyleParam | null {
+  if (!isObj(v) || typeof v["id"] !== "string" || v["id"] === "" || typeof v["title"] !== "string") return null;
+  const type = v["type"];
+  const id = v["id"];
+  const title = v["title"];
+  const d = v["default"];
+  if (type === "bool") return typeof d === "boolean" ? { id, title, type, default: d } : null;
+  if (type === "choice") {
+    const ch = v["choices"];
+    if (!Array.isArray(ch) || ch.length === 0 || !ch.every((c) => typeof c === "string")) return null;
+    return typeof d === "string" && ch.includes(d) ? { id, title, type, choices: ch as string[], default: d } : null;
+  }
+  if (type === "float" || type === "int") {
+    const min = num(v["min"]);
+    const max = num(v["max"]);
+    const step = num(v["step"]);
+    const dn = num(d);
+    if (min === null || max === null || step === null || dn === null || step <= 0 || min > max || dn < min || dn > max) return null;
+    return { id, title, type, min, max, step, default: dn };
+  }
+  return null;
+}
+
+function parseStyles(v: unknown): StyleInfo[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((st) => {
+    if (!isObj(st) || typeof st["id"] !== "string" || st["id"] === "" || typeof st["title"] !== "string" || !Array.isArray(st["modes"])) return [];
+    const modes = st["modes"].filter((m): m is Mode => m === "generate" || m === "edit");
+    const rawParams = Array.isArray(st["params"]) ? st["params"] : [];
+    const params = rawParams.map(parseStyleParam);
+    // A style whose panel cannot be drawn faithfully is left out rather than drawn wrong.
+    if (modes.length === 0 || params.some((p) => p === null)) return [];
+    return [{ id: st["id"], title: st["title"], modes, params: params as StyleParam[] }];
+  });
 }
 
 function parseDownload(v: unknown): Download | null {
@@ -176,6 +227,7 @@ export function parseState(json: unknown): ApiState | null {
         : [],
     ),
     edit: parseEdit(json["edit"]),
+    styles: parseStyles(json["styles"]),
   };
 }
 
@@ -536,6 +588,43 @@ export function base64FromDataUrl(url: string): string | null {
 
 export function editLabel(presetLabelText: string, resolution: string, references: number): string {
   return `Edit: ${presetLabelText}, ${resolution}, ${references} reference${references === 1 ? "" : "s"}`;
+}
+
+// ---- styles ----
+
+/** The styles the server allows in a mode, in the order it lists them. */
+export function stylesForMode(styles: readonly StyleInfo[], mode: Mode): StyleInfo[] {
+  return styles.filter((st) => st.modes.includes(mode));
+}
+
+/** The parameter values a style panel starts with. */
+export function styleDefaults(style: StyleInfo): Record<string, StyleValue> {
+  return Object.fromEntries(style.params.map((p) => [p.id, p.default]));
+}
+
+/** A slider value kept inside the limits and on the step grid (the server refuses anything else). */
+export function snapToStep(p: StyleParam, value: number): number {
+  if (p.min === undefined || p.max === undefined || p.step === undefined || !Number.isFinite(value)) return typeof p.default === "number" ? p.default : 0;
+  const clamped = Math.min(p.max, Math.max(p.min, value));
+  const snapped = p.min + Math.round((clamped - p.min) / p.step) * p.step;
+  // Rounding away float noise such as 0.7000000000000001.
+  return Math.min(p.max, Number(snapped.toFixed(6)));
+}
+
+/** The `style` member of a generate or edit body; undefined when no style is chosen. */
+export function styleRequest(style: StyleInfo | null, values: Record<string, StyleValue>): { id: string; params: Record<string, StyleValue> } | undefined {
+  if (style === null) return undefined;
+  const params: Record<string, StyleValue> = {};
+  for (const p of style.params) {
+    const v = values[p.id];
+    params[p.id] = (p.type === "float" || p.type === "int") && typeof v === "number" ? snapToStep(p, v) : v ?? p.default;
+  }
+  return { id: style.id, params };
+}
+
+/** A result may be chained only when it is one of our own same-origin result paths. */
+export function isChainableUrl(url: string): boolean {
+  return /^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url);
 }
 
 export function characterCount(text: string): string {

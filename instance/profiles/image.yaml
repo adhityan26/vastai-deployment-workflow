@@ -49,3 +49,23 @@ edit:
     encoder: {node: "6", input_prefix: "images.image_"}
   resolutions:
     - {name: "1024", value: 1024}
+
+# Styles: a LoRA with its own parameters, offered as a sub-menu of a mode (design:
+# docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md). A style is OFF until `enabled: true`.
+# To turn "Anything to Real" on: (1) on a machine with internet run
+#   python3 scripts/pin_model.py WarmBloodAban/Qwen-Image-2.1-LoRAs Qwen2.1_Anything2RealCharacters.safetensors
+# (2) add the `models:` line it prints (dest models/loras/) to the models list above, (3) set enabled: true.
+# The agent then downloads the LoRA at boot with the other models. `lora.model_from` is the node whose MODEL
+# output the loader takes and `model_to` the input that is rewired to the loader; where it sits relative to
+# QwenImage21Cache is UNVERIFIED (live test): change these two lines if the test shows another placement.
+styles:
+  - id: anything2real
+    title: Anything to Real
+    modes: [edit]
+    enabled: false
+    lora:
+      file: Qwen2.1_Anything2RealCharacters.safetensors
+      model_from: "1"
+      model_to: {node: "4", input: model}
+    params:
+      - {id: strength, title: LoRA strength, type: float, min: 0.4, max: 1.0, step: 0.05, default: 0.7, target: lora_strength}

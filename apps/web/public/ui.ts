@@ -53,6 +53,15 @@ import {
   gpuOptionLabel,
   imageUrl,
   isJobId,
+  isChainableUrl,
+  snapToStep,
+  styleDefaults,
+  styleRequest,
+  stylesForMode,
+  type Mode,
+  type StyleInfo,
+  type StyleParam,
+  type StyleValue,
   parseEstimate,
   parseGpus,
   parseSeed,
@@ -147,7 +156,9 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
-  let mode: "generate" | "edit" = "generate";
+  let mode: Mode = "generate";
+  const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
+  const styleValues: Record<string, Record<string, StyleValue>> = {};
   let refSeq = 0;
   const references: Reference[] = [];
   let consoleView: ConsoleView = EMPTY_CONSOLE_VIEW;
@@ -792,7 +803,7 @@ export function mountApp(doc: Document, env: Env): App {
     // Edit can disappear (server config) while it is selected: fall back to plain generate.
     if (s.edit === null) mode = "generate";
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
-    const key = JSON.stringify([s.presets, s.sizes, s.edit]);
+    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles]);
     if (key !== formKey) {
       formKey = key;
       if (!s.presets.some((p) => p.name === selectedPreset)) selectedPreset = s.presets[0]?.name ?? "";
@@ -832,6 +843,7 @@ export function mountApp(doc: Document, env: Env): App {
         $("ref-hint").textContent = referenceHint(s.edit);
       }
     }
+    renderStyles(s);
     const editing = mode === "edit";
     modeBox.hidden = s.edit === null;
     modeGenerate.setAttribute("aria-pressed", String(!editing));
@@ -852,7 +864,93 @@ export function mountApp(doc: Document, env: Env): App {
           : "Generating is available when the instance is ready.";
   }
 
-  function setMode(next: "generate" | "edit"): void {
+  // ---- styles (a sub-menu per mode, with the panel of the chosen style) ----
+
+  const styleBox = $("style-box");
+  const stylesSeg = $("styles");
+  const styleParamsBox = $("style-params");
+  let styleKey = "";
+
+  /** The style chosen for the current mode, only if the server still lists it for that mode. */
+  function currentStyle(s: ApiState | null): StyleInfo | null {
+    const id = chosenStyle[mode];
+    return id === null || s === null ? null : stylesForMode(s.styles, mode).find((st) => st.id === id) ?? null;
+  }
+
+  function paramControl(style: StyleInfo, p: StyleParam): HTMLElement {
+    const values = (styleValues[style.id] ??= styleDefaults(style));
+    const wrap = make("div");
+    const inputId = `style-${style.id}-${p.id}`;
+    const label = make("label", p.title);
+    label.htmlFor = inputId;
+    if (p.type === "bool") {
+      const box = make("input");
+      box.type = "checkbox";
+      box.id = inputId;
+      box.checked = values[p.id] === true;
+      box.addEventListener("change", () => { values[p.id] = box.checked; });
+      wrap.append(box, label);
+    } else if (p.type === "choice") {
+      const sel = make("select");
+      sel.id = inputId;
+      for (const c of p.choices ?? []) {
+        const o = make("option", c);
+        o.value = c;
+        sel.append(o);
+      }
+      sel.value = String(values[p.id]);
+      sel.addEventListener("change", () => { values[p.id] = sel.value; });
+      wrap.append(label, sel);
+    } else {
+      const range = make("input");
+      range.type = "range";
+      range.id = inputId;
+      range.min = String(p.min);
+      range.max = String(p.max);
+      range.step = String(p.step);
+      const shown = make("span", "", "style-value");
+      const current = typeof values[p.id] === "number" ? (values[p.id] as number) : (p.default as number);
+      range.value = String(current);
+      shown.textContent = String(current);
+      range.addEventListener("input", () => {
+        const v = snapToStep(p, Number(range.value));
+        values[p.id] = v;
+        shown.textContent = String(v);
+      });
+      wrap.append(label, make("span", " "), shown, range);
+    }
+    return wrap;
+  }
+
+  function renderStyles(s: ApiState): void {
+    const list = stylesForMode(s.styles, mode);
+    styleBox.hidden = list.length === 0;
+    if (list.length === 0) return;
+    if (chosenStyle[mode] !== null && !list.some((st) => st.id === chosenStyle[mode])) chosenStyle[mode] = null;
+    const chosen = chosenStyle[mode];
+    // Rebuild only when the list or the choice changes, so a poll never resets a slider.
+    const key = JSON.stringify([mode, chosen, list.map((st) => st.id), s.styles]);
+    if (key === styleKey) return;
+    styleKey = key;
+    const buttons = [{ id: null as string | null, title: "Standard" }, ...list].map((st) => {
+      const b = make("button", st.title);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(st.id === chosen));
+      b.addEventListener("click", () => selectStyle(st.id));
+      return b;
+    });
+    stylesSeg.replaceChildren(...buttons);
+    const style = currentStyle(s);
+    styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
+  }
+
+  function selectStyle(id: string | null): void {
+    chosenStyle[mode] = id;
+    styleKey = "";
+    if (state) renderForm(state);
+  }
+
+  function setMode(next: Mode): void {
     if (next === "edit" && state?.edit == null) return;
     mode = next;
     formError.hidden = true;
@@ -958,6 +1056,9 @@ export function mountApp(doc: Document, env: Env): App {
     if (selectedPreset === "" || sizeSelect.value === "") return formFail("Choose a quality and a size.");
     const body: Record<string, unknown> = { prompt, preset: selectedPreset, size: sizeSelect.value };
     if (seed.value !== undefined) body["seed"] = seed.value;
+    const style = currentStyle(state);
+    const styleBody = styleRequest(style, style ? (styleValues[style.id] ??= styleDefaults(style)) : {});
+    if (styleBody) body["style"] = styleBody;
     jobPending = true;
     if (state) renderForm(state);
     try {
@@ -965,7 +1066,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}`);
+      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${style ? `, ${style.title}` : ""}`);
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -984,6 +1085,8 @@ export function mountApp(doc: Document, env: Env): App {
     if (!seed.ok) return formFail(seed.message);
     if (selectedPreset === "" || resolutionSelect.value === "") return formFail("Choose a quality and a resolution.");
     const files = references.map((r) => r.file);
+    const style = currentStyle(state);
+    const styleBody = styleRequest(style, style ? (styleValues[style.id] ??= styleDefaults(style)) : {});
     jobPending = true; // also blocks a second submit while the files are being read and sent
     if (state) renderForm(state);
     try {
@@ -991,11 +1094,12 @@ export function mountApp(doc: Document, env: Env): App {
       for (const file of files) images.push(await readBase64(file));
       const body: Record<string, unknown> = { prompt, preset: selectedPreset, resolution: resolutionSelect.value, images };
       if (seed.value !== undefined) body["seed"] = seed.value;
+      if (styleBody) body["style"] = styleBody;
       const res = await call("POST", API.edit, body);
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length));
+      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1014,6 +1118,53 @@ export function mountApp(doc: Document, env: Env): App {
     $("hist-empty").hidden = true;
     renderEntry(entry);
     return entry;
+  }
+
+  // ---- chaining: a result becomes the reference image of the next edit ----
+
+  /** One button per way to continue from a result; null when edit is not offered or the url is not ours. */
+  function chainButtons(src: string, jobId: string, index: number): HTMLElement | null {
+    const s = state;
+    if (s === null || s.edit === null || !isChainableUrl(src)) return null;
+    const row = make("div", undefined, "chain");
+    const targets: { id: string | null; title: string }[] = [
+      { id: null, title: "Use as reference" },
+      ...stylesForMode(s.styles, "edit").map((st) => ({ id: st.id, title: `Use as reference: ${st.title}` })),
+    ];
+    for (const t of targets) {
+      const b = make("button", t.title);
+      b.type = "button";
+      b.addEventListener("click", () => void chainResult(src, `result-${jobId}-${index}`, t.id));
+      row.append(b);
+    }
+    return row;
+  }
+
+  async function chainResult(src: string, name: string, styleId: string | null): Promise<void> {
+    const edit = state?.edit ?? null;
+    if (edit === null) return;
+    mode = "edit";
+    chosenStyle.edit = styleId;
+    styleKey = "";
+    formError.hidden = true;
+    try {
+      const res = await env.fetch(src, { credentials: "same-origin" });
+      if (!res.ok) throw new ApiError("The result could not be loaded.");
+      const blob = await res.blob();
+      const result = pickReferences(references.length, [{ name, type: blob.type, size: blob.size }], edit);
+      if (result.accepted.length > 0) {
+        const FileCtor = doc.defaultView?.File;
+        if (FileCtor === undefined) throw new ApiError("This browser cannot attach the result.");
+        const file = new FileCtor([blob], `${name}.${blob.type.slice("image/".length)}`, { type: blob.type });
+        references.push({ id: ++refSeq, file, url: previewUrl(file) });
+        renderReferences();
+      }
+      showRefErrors(result.errors);
+    } catch (err) {
+      showRefErrors([err instanceof Error ? err.message : "The result could not be loaded."]);
+    }
+    if (state) renderForm(state);
+    refList.scrollIntoView?.({ block: "nearest" });
   }
 
   function renderEntry(e: HistoryEntry): void {
@@ -1037,6 +1188,8 @@ export function mountApp(doc: Document, env: Env): App {
         dl.href = src;
         dl.setAttribute("download", `image-${e.id}-${i}`);
         fig.append(img, dl);
+        const chain = chainButtons(src, e.id, i);
+        if (chain !== null) fig.append(chain);
         grid.append(fig);
       });
       kids.push(grid);

@@ -5,12 +5,14 @@ import { readFileSync } from "node:fs";
 import type { AppsConfig } from "../src/config.js";
 import { ComfyClient, Unreachable } from "../src/comfy.js";
 import { GenerateInputError, type Profile } from "../src/profile.js";
+import { parseStyles } from "../src/styles.js";
 import { awaitResult, generate, GenerateFailed, GenerateTimeout, pollResult, type GenerateDeps } from "../src/generate.js";
 
 const template = JSON.parse(readFileSync(new URL("../../../instance/workflows/qwen-image-t2i.json", import.meta.url), "utf8"));
 const profile: Profile = {
   name: "t",
   edit: null,
+  styles: [],
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",
@@ -97,6 +99,24 @@ describe("generate", () => {
     expect(JSON.parse(seen[1]!.body).prompt["8"].inputs.seed).toBe(7);
     await generate({ ...deps, random: () => 0.9999999999999999 }, ok);
     expect(Number.isSafeInteger(JSON.parse(seen[2]!.body).prompt["8"].inputs.seed)).toBe(true);
+  });
+
+  it("applies a style to the generate workflow, and refuses a style that is unknown or edit-only", async () => {
+    const styles = parseStyles(
+      [
+        { id: "both", title: "Both", modes: ["generate", "edit"], enabled: true, lora: { file: "both.safetensors", model_from: "1", model_to: { node: "4", input: "model" } }, params: [{ id: "strength", title: "S", type: "float", min: 0, max: 1, step: 0.1, default: 0.5, target: "lora_strength" }] },
+        { id: "editonly", title: "Edit only", modes: ["edit"], enabled: true, lora: { file: "e.safetensors", model_from: "1", model_to: { node: "4", input: "model" } } },
+      ],
+      ["both.safetensors", "e.safetensors"],
+    );
+    const { deps, seen } = await fake((_s, res) => json(res, 200, { prompt_id: "p1" }), { profile: { ...profile, styles } });
+    await generate(deps, { ...ok, style: { id: "both", params: { strength: 0.3 } } });
+    const sent = JSON.parse(seen[0]!.body).prompt;
+    expect(sent["style_lora"].inputs).toEqual({ model: ["1", 0], lora_name: "both.safetensors", strength_model: 0.3 });
+    expect(sent["4"].inputs.model).toEqual(["style_lora", 0]);
+    await expect(generate(deps, { ...ok, style: { id: "editonly" } })).rejects.toMatchObject({ code: "style_not_for_mode" });
+    await expect(generate(deps, { ...ok, style: { id: "nope" } })).rejects.toMatchObject({ code: "unknown_style" });
+    expect(seen).toHaveLength(1);
   });
 
   it("propagates Unreachable unchanged", async () => {
