@@ -24,6 +24,8 @@ export const API = {
   edit: "/api/edit",
   credit: "/api/credit",
   history: "/api/history",
+  gallery: "/api/gallery",
+  galleryDelete: "/api/gallery/delete",
   me: "/api/me",
 } as const;
 
@@ -81,6 +83,8 @@ export interface ApiState {
   presets: Preset[];
   sizes: Size[];
   edit: EditInfo | null;
+  /** Save and the gallery are available (the server has an object store). */
+  gallery: boolean;
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
@@ -178,6 +182,7 @@ export function parseState(json: unknown): ApiState | null {
         : [],
     ),
     edit: parseEdit(json["edit"]),
+    gallery: json["gallery"] === true,
   };
 }
 
@@ -842,4 +847,76 @@ export function historyTime(t: number): string {
   const d = new Date(t * 1000);
   const two = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+// ---- gallery (saved images) ----
+
+// Where the "save automatically" choice is remembered in this browser (a preference, no secret).
+export const AUTOSAVE_STORAGE_KEY = "vast-comfy.autosave"; // config-lint: ok (browser storage key, not configuration)
+const GALLERY_ID = /^[0-9a-f]{32}\.[0-9]{13}\.[A-Za-z0-9_-]{1,128}\.[0-9]{1,3}$/;
+const KB = 1024;
+const MB = 1024 * 1024;
+
+export interface GalleryEntry {
+  id: string;
+  url: string;
+  createdAt: number;
+  kind: "generate" | "edit";
+  prompt: string;
+  label: string;
+  ownerName: string;
+  mine: boolean;
+  size: number;
+}
+
+export function isGalleryId(v: unknown): v is string {
+  return typeof v === "string" && GALLERY_ID.test(v);
+}
+
+/** The image URL for a gallery id; null for anything that is not exactly an id. */
+export function galleryImageUrl(id: string): string | null {
+  return isGalleryId(id) ? `${API.gallery}/${id}/image` : null;
+}
+
+/** GET /api/gallery path for a page; an unusable cursor is left out rather than sent. */
+export function galleryPath(cursor: string | null, everyone: boolean): string {
+  const query: string[] = [];
+  if (everyone) query.push("scope=all");
+  if (cursor !== null && isGalleryId(cursor)) query.push(`cursor=${cursor}`);
+  return query.length === 0 ? API.gallery : `${API.gallery}?${query.join("&")}`;
+}
+
+/** Check GET /api/gallery; entries that fail validation are dropped, the URL is rebuilt from the id. */
+export function parseGalleryPage(json: unknown): { items: GalleryEntry[]; next: string | null } | null {
+  if (!isObj(json) || !Array.isArray(json["items"])) return null;
+  const items: GalleryEntry[] = [];
+  for (const raw of json["items"]) {
+    if (!isObj(raw) || !isGalleryId(raw["id"])) continue;
+    const createdAt = num(raw["created_at"]);
+    const size = num(raw["size"]);
+    if (createdAt === null || size === null) continue;
+    items.push({
+      id: raw["id"],
+      url: `${API.gallery}/${raw["id"]}/image`,
+      createdAt,
+      kind: raw["kind"] === "edit" ? "edit" : "generate",
+      prompt: typeof raw["prompt"] === "string" ? raw["prompt"] : "",
+      label: typeof raw["label"] === "string" ? raw["label"] : "",
+      ownerName: typeof raw["owner_name"] === "string" ? raw["owner_name"] : "",
+      mine: raw["mine"] === true,
+      size,
+    });
+  }
+  return { items, next: isGalleryId(json["next"]) ? json["next"] : null };
+}
+
+/** "2026-10-18 04:20 UTC": the same text on every device. */
+export function formatSavedAt(epochSeconds: number): string {
+  return `${new Date(epochSeconds * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes >= MB) return `${(bytes / MB).toFixed(1)} MB`;
+  if (bytes >= KB) return `${(bytes / KB).toFixed(1)} KB`;
+  return `${Math.max(0, Math.floor(bytes))} B`;
 }

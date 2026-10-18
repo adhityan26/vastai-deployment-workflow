@@ -963,3 +963,209 @@ describe("Vast credit", () => {
     expect(q("#f-credit-box")!.hidden).toBe(true);
   });
 });
+
+describe("gallery: save, auto-save and the gallery card", () => {
+  const GID = (n: number, job = "job-1") => `${"b".repeat(31)}${n % 10}.8199999999${String(100 + n).padStart(3, "0")}.${job}.0`;
+  const item = (n: number, over: Record<string, unknown> = {}) => ({
+    id: GID(n), url: `/api/gallery/${GID(n)}/image`, created_at: 1_800_000_000 + n, kind: "generate", prompt: `prompt ${n}`, label: "preview, 1:1", owner_name: "Ayu", mine: true, size: 2_000_000, ...over,
+  });
+  const gallerySaves = () => posts("/api/gallery");
+
+  /** Submit a generate job and let it finish with the given server image indexes. */
+  async function finishJob(indexes: number[] = [0], extra: Record<string, Handler> = {}, state: Record<string, unknown> = {}) {
+    await mount({ gallery: true, ...state }, {
+      "POST /api/generate": { status: 202, body: { id: "job-1" } },
+      "GET /api/generate/job-1": { body: { status: "done", images: indexes.map((index) => ({ index, url: `/api/image/job-1/${index}` })) } },
+      ...extra,
+    });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a red fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+  }
+  const saveButtons = () => [...document.querySelectorAll<HTMLButtonElement>("#history button.save")];
+
+  it("offers nothing when the server has no gallery", async () => {
+    await mount({ gallery: false }, { "POST /api/generate": { status: 202, body: { id: "job-1" } }, "GET /api/generate/job-1": { body: { status: "done", images: [{ index: 0, url: "/x" }] } } });
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#gallery-card")!.hidden).toBe(true);
+    expect(q("#autosave-box")!.hidden).toBe(true);
+    expect(saveButtons()).toHaveLength(0);
+  });
+
+  it("shows the gallery card and the auto-save box when it is on", async () => {
+    await mount({ gallery: true });
+    expect(q("#gallery-card")!.hidden).toBe(false);
+    expect(q("#autosave-box")!.hidden).toBe(false);
+  });
+
+  it("a Save button per result posts the job id and the server's image index, then shows Saved", async () => {
+    await finishJob([2, 5], { "POST /api/gallery": { status: 201, body: { id: GID(1), created: true } } });
+    expect(saveButtons().map((b) => b.textContent)).toEqual(["Save to gallery", "Save to gallery"]);
+    saveButtons()[1]!.click();
+    await flush();
+    expect(gallerySaves()).toHaveLength(1);
+    expect(gallerySaves()[0]!.body).toEqual({ job: "job-1", index: 5 });
+    expect(saveButtons().map((b) => [b.textContent, b.disabled])).toEqual([["Save to gallery", false], ["Saved ✓", true]]);
+    saveButtons()[1]!.click();
+    await flush();
+    expect(gallerySaves()).toHaveLength(1);
+  });
+
+  it("a failed save says why on the image and can be retried", async () => {
+    let fail = true;
+    await finishJob([0], { "POST /api/gallery": () => (fail ? { status: 409, body: { error: { code: "gallery_quota", message: "the gallery is full (300 images)" } } } : { status: 201, body: { id: GID(1), created: true } }) });
+    saveButtons()[0]!.click();
+    await flush();
+    expect(q("#history .alert.bad")!.textContent).toBe("Not saved: the gallery is full (300 images)");
+    expect(saveButtons()[0]!.disabled).toBe(false);
+    fail = false;
+    saveButtons()[0]!.click();
+    await flush();
+    expect(saveButtons()[0]!.textContent).toBe("Saved ✓");
+    expect(q("#history .alert.bad")).toBeNull();
+  });
+
+  it("auto-save saves every image of a finished job, remembers the choice, and is off by default", async () => {
+    expect(window.localStorage.getItem("vast-comfy.autosave")).toBeNull();
+    await mount({ gallery: true });
+    expect(q<HTMLInputElement>("#autosave")!.checked).toBe(false);
+    q<HTMLInputElement>("#autosave")!.click();
+    expect(window.localStorage.getItem("vast-comfy.autosave")).toBe("1");
+    app!.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    calls = [];
+    await finishJob([0, 1], { "POST /api/gallery": { status: 201, body: { id: GID(1), created: true } } });
+    expect(q<HTMLInputElement>("#autosave")!.checked).toBe(true);
+    await flush();
+    expect(gallerySaves().map((c) => c.body)).toEqual([{ job: "job-1", index: 0 }, { job: "job-1", index: 1 }]);
+    expect(saveButtons().map((b) => b.textContent)).toEqual(["Saved ✓", "Saved ✓"]);
+  });
+
+  it("without auto-save nothing is saved by itself", async () => {
+    await finishJob([0]);
+    await flush();
+    expect(gallerySaves()).toHaveLength(0);
+  });
+
+  it("works when localStorage throws", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    await mount({ gallery: true });
+    expect(q<HTMLInputElement>("#autosave")!.checked).toBe(false);
+    q<HTMLInputElement>("#autosave")!.click();
+    expect(q<HTMLInputElement>("#autosave")!.checked).toBe(true);
+  });
+
+  describe("the gallery card", () => {
+    it("loads nothing until it is opened, then lists the images with urls rebuilt from the ids", async () => {
+      await mount({ gallery: true }, { "GET /api/gallery": { body: { items: [item(1, { url: "https://evil.example/x.png" }), item(2)], next: null } } });
+      expect(calls.filter((c) => c.path.startsWith("/api/gallery"))).toHaveLength(0);
+      q("#gal-open")!.click();
+      await flush();
+      const imgs = [...document.querySelectorAll<HTMLImageElement>("#gal-list img")];
+      expect(imgs.map((i) => i.getAttribute("src"))).toEqual([`/api/gallery/${GID(1)}/image`, `/api/gallery/${GID(2)}/image`]);
+      expect(q("#gal-list")!.hidden).toBe(false);
+      expect(q("#gal-empty")!.hidden).toBe(true);
+      expect(q("#gal-more")!.hidden).toBe(true);
+      expect(q(".gal-caption")!.textContent).toBe("preview, 1:1 · 2027-01-15 08:00 UTC · 1.9 MB");
+    });
+
+    it("shows the empty state, and an error when the list cannot be read", async () => {
+      await mount({ gallery: true }, { "GET /api/gallery": { body: { items: [], next: null } } });
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-empty")!.hidden).toBe(false);
+      routes["GET /api/gallery"] = { status: 502, body: { error: { code: "gallery_error", message: "the gallery storage could not be reached" } } };
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-error")!.hidden).toBe(false);
+      expect(q("#gal-error")!.textContent).toBe("the gallery storage could not be reached");
+    });
+
+    it("Load more asks for the next page with the cursor and appends", async () => {
+      await mount({ gallery: true }, {
+        "GET /api/gallery": { body: { items: [item(1), item(2)], next: GID(2) } },
+        [`GET /api/gallery?cursor=${GID(2)}`]: { body: { items: [item(3)], next: null } },
+      });
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-more")!.hidden).toBe(false);
+      q("#gal-more")!.click();
+      await flush();
+      expect(document.querySelectorAll("#gal-list figure")).toHaveLength(3);
+      expect(q("#gal-more")!.hidden).toBe(true);
+    });
+
+    it("renders prompts and names as text", async () => {
+      await mount({ gallery: true }, { "GET /api/gallery": { body: { items: [item(1, { prompt: '<img src=x onerror="alert(1)">', label: "<b>x</b>" })], next: null } } });
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-list img[onerror]")).toBeNull();
+      expect(q(".gal-prompt")!.textContent).toBe('<img src=x onerror="alert(1)">');
+      expect(q("#gal-list b")).toBeNull();
+    });
+
+    it("only an admin gets 'everyone', which reloads with scope=all and shows other owners", async () => {
+      await mount({ gallery: true, role: "member" }, { "GET /api/gallery": { body: { items: [item(1)], next: null } } });
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-all-box")!.hidden).toBe(true);
+      app!.stop();
+      document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+      calls = [];
+      await mount({ gallery: true, role: "admin" }, {
+        "GET /api/gallery": { body: { items: [item(1)], next: null } },
+        "GET /api/gallery?scope=all": { body: { items: [item(2, { mine: false, owner_name: "Budi" }), item(1)], next: null } },
+      });
+      expect(q("#gal-all-box")!.hidden).toBe(true); // only once the gallery is open
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-all-box")!.hidden).toBe(false);
+      q<HTMLInputElement>("#gal-all")!.click();
+      await flush();
+      expect(calls.some((c) => c.path === "/api/gallery?scope=all")).toBe(true);
+      const captions = [...document.querySelectorAll(".gal-caption")].map((c) => c.textContent);
+      expect(captions[0]).toContain("Budi");
+      expect(captions[1]).not.toContain("Budi");
+    });
+
+    it("delete asks first, then removes the image, and 'cancel' keeps it", async () => {
+      await mount({ gallery: true }, {
+        "GET /api/gallery": { body: { items: [item(1), item(2)], next: null } },
+        "POST /api/gallery/delete": { body: { deleted: true } },
+      });
+      q("#gal-open")!.click();
+      await flush();
+      const del = () => [...document.querySelectorAll<HTMLButtonElement>("#gal-list button")].filter((b) => b.textContent === "Delete");
+      del()[0]!.click();
+      await flush();
+      expect(q("#modal")!.hidden).toBe(false);
+      expect(posts("/api/gallery/delete")).toHaveLength(0);
+      q("#modal-cancel")!.click();
+      await flush();
+      expect(document.querySelectorAll("#gal-list figure")).toHaveLength(2);
+      del()[0]!.click();
+      await flush();
+      q("#modal-ok")!.click();
+      await flush();
+      expect(posts("/api/gallery/delete")[0]!.body).toEqual({ id: GID(1) });
+      expect(document.querySelectorAll("#gal-list figure")).toHaveLength(1);
+    });
+
+    it("a successful save while the gallery is open refreshes it", async () => {
+      let n = 0;
+      await finishJob([0], {
+        "POST /api/gallery": { status: 201, body: { id: GID(1), created: true } },
+        "GET /api/gallery": () => ({ body: { items: n++ === 0 ? [] : [item(1)], next: null } }),
+      });
+      q("#gal-open")!.click();
+      await flush();
+      expect(document.querySelectorAll("#gal-list figure")).toHaveLength(0);
+      saveButtons()[0]!.click();
+      await flush();
+      expect(document.querySelectorAll("#gal-list figure")).toHaveLength(1);
+    });
+  });
+});

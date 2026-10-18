@@ -33,10 +33,10 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
 3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
    `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
    a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).
-4. Save + Gallery: optional Save per result (and auto-save option), cross-device gallery tab backed by an S3-compatible
-   bucket (MinIO on the homelab, bucket `vast-gallery`, config keys `GALLERY_S3_*`). The bucket stays private, images are
-   served through the web service; owners see their own images, admins see all; quotas from config. Local per-device
-   history stays. Reuse later for a Discord `save` mode.
+4. ~~Save + Gallery~~ Done (PR #4, merged on `feat/gallery`): Save per result, auto-save (this device), a gallery card
+   (own images; admins can list everyone's), delete, quotas, MinIO via `GALLERY_S3_*` (empty endpoint = off). Plan:
+   `docs/superpowers/plans/2026-10-18-gallery-minio.md`, runbook: `deploy/web/README.md` "Gallery in MinIO". Not
+   verified live: a real MinIO. Left for later: thumbnails, a Discord `save` mode.
 5. Tailscale OAuth: the owner creates an OAuth client (scope Auth Keys: Write only, tag `tag:gpu`) and sets
    `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` in `.env`; then deploy and verify the minimum `expirySeconds` against
    the real API. The current reusable Tailscale key expires around 2026-10-19. Deferred minors: `TS_KEY_TTL_S` minimum

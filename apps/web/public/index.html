@@ -155,6 +155,8 @@
       <label for="seed">Seed (optional)</label>
       <input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="random">
 
+      <label id="autosave-box" class="check" hidden><input id="autosave" type="checkbox"> Save results to the gallery automatically</label>
+
       <p id="form-error" class="alert bad" role="alert" hidden></p>
       <button id="btn-generate" type="submit" class="primary" disabled>Generate</button>
     </form>
@@ -164,6 +166,17 @@
     <h2 id="hist-title">Results</h2>
     <p id="hist-empty" class="muted">Nothing yet. Results stay here until you reload the page.</p>
     <div id="history"></div>
+  </section>
+
+  <section id="gallery-card" class="card" aria-labelledby="gal-title" hidden>
+    <h2 id="gal-title">Gallery</h2>
+    <p class="muted">Images you saved, available on every device.</p>
+    <label id="gal-all-box" class="check" hidden><input id="gal-all" type="checkbox"> Show everyone&rsquo;s images</label>
+    <p id="gal-error" class="alert bad" role="alert" hidden></p>
+    <button id="gal-open" type="button">Open gallery</button>
+    <p id="gal-empty" class="muted" role="status" hidden>No saved images yet.</p>
+    <div id="gal-list" class="grid" hidden></div>
+    <button id="gal-more" type="button" hidden>Load more</button>
   </section>
 </main>
 

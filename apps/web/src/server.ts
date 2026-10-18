@@ -5,6 +5,7 @@ import { extname, resolve, sep } from "node:path";
 import type {
   AppsConfig,
   ComfyClient,
+  Gallery,
   InstanceRecord,
   Lifecycle,
   Profile,
@@ -49,6 +50,8 @@ export interface ServerDeps {
   editTemplate?: unknown;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
+  /** Saved images (MinIO); absent means saving and the gallery are off (the routes answer 503). */
+  gallery?: Gallery;
   /** Directory of the static page (apps/web/public); may be empty or missing. */
   publicDir: string;
   /** Login routes; absent (or not configured) means /auth/login and /auth/callback answer 503. */

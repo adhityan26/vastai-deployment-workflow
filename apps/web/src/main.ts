@@ -6,15 +6,18 @@ import { fileURLToPath } from "node:url";
 import {
   AgentClient,
   ComfyClient,
+  Gallery,
   ConsoleStore,
   Lifecycle,
   Registry,
   UsageHistory,
   UsageStore,
+  S3ObjectStore,
   VastClient,
   camelCase,
   consoleFileCap,
   createTsAuthKeyProvider,
+  galleryLimits,
   loadConfigFromProcess,
   loadProfile,
   usageFileCap,
@@ -69,6 +72,11 @@ async function main(): Promise<void> {
   const editTemplate: unknown = profile.edit
     ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.edit.workflow), "utf8"))
     : null;
+
+  // Saved images live in an S3-compatible bucket (MinIO). An empty endpoint switches the gallery off.
+  const gallery =
+    str(cfg, "galleryS3Endpoint") === "" ? undefined : new Gallery(new S3ObjectStore(cfg), galleryLimits(cfg));
+  if (gallery === undefined) log("info", "GALLERY_S3_ENDPOINT is empty: Save and the gallery are off");
 
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
@@ -149,6 +157,7 @@ async function main(): Promise<void> {
     template,
     editTemplate,
     credit: () => vast.accountCredit(),
+    gallery,
     login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,
     secrets: () => [...seenSecrets],
@@ -217,7 +226,7 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   // These errors name keys or paths, never values; any other error is reduced to its name.
-  const safe = new Set(["ConfigError", "ProfileError", "VastError"]);
+  const safe = new Set(["ConfigError", "ProfileError", "VastError", "ObjectStoreError"]);
   const text = err instanceof Error ? (safe.has(err.name) ? err.message : err.name) : "error";
   log("error", `startup failed: ${text}`);
   process.exit(1);

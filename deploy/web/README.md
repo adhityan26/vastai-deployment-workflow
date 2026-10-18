@@ -298,11 +298,52 @@ API key (the same `VAST_API_KEY`); only the `credit` number is passed on, never 
 (which holds the email and ssh keys). Members never see or request it. "unavailable" means Vast could not
 be read; it does not affect anything else on the page.
 
+## Gallery in MinIO (Save and the gallery)
+
+Members can save a result image (a **Save to gallery** button per image, or the "save automatically" box on
+this device) and open a gallery of what they saved, from any device. Admins can also list everyone's images.
+The bucket is private: the browser only talks to this service, which fetches the image from the instance,
+checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2026-10-18-gallery-minio.md`.
+
+1. **Bucket, no public access.** With the MinIO client (`mc`, alias `local`):
+   `mc mb local/vast-gallery` and `mc anonymous set none local/vast-gallery`.
+2. **A user that can only use that bucket.** Save this as `vast-gallery-rw.json` (change the bucket name if you
+   changed `GALLERY_S3_BUCKET`):
+   ```json
+   {"Version":"2012-10-17","Statement":[
+     {"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::vast-gallery"]},
+     {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::vast-gallery/*"]}]}
+   ```
+   then `mc admin policy create local vast-gallery-rw vast-gallery-rw.json`,
+   `mc admin user add local <ACCESS_KEY> <SECRET_KEY>` and
+   `mc admin policy attach local vast-gallery-rw --user <ACCESS_KEY>` (older `mc` spells these `policy add`
+   and `policy set`). Do not reuse the MinIO root credentials.
+3. **`.env`:** `GALLERY_S3_ENDPOINT` (the MinIO API URL as the container reaches it, for example the LAN
+   address and port 9000; plain http is fine on the LAN, never publish MinIO through the tunnel for this),
+   `GALLERY_S3_ACCESS_KEY` and `GALLERY_S3_SECRET_KEY` (both are secrets: they are redacted from every
+   response). An empty endpoint switches the feature off and the page shows no Save button or gallery card.
+4. **Redeploy, then check:** save one image, then `mc ls --recursive local/vast-gallery` shows
+   `u/<32 hex>/<time>-<job>-<index>`. The 32 hex characters are a hash of the member's login subject.
+
+- **Limits per member** (the server refuses a Save above them with `gallery_quota`):
+  `GALLERY_MAX_IMAGES_PER_USER` (300) and `GALLERY_MAX_BYTES_PER_USER` (2 GiB). The same job image saved
+  twice is one object. `GALLERY_PAGE_SIZE` images per page; an admin's "everyone" view reads at most
+  `GALLERY_ADMIN_SCAN_MAX` keys.
+- **What is stored:** the image with its own content type, plus prompt, settings label, owner name and kind
+  as (URL-encoded, trimmed) object metadata. There is no database; deleting in the page deletes the object.
+- **Memory:** a Save holds the image (up to `WEB_IMAGE_MAX_BYTES`) twice at the same time; compose limits the
+  container to 256M. If the container is ever killed while saving large images, raise `memory` in
+  `docker-compose.yml` (and the matching assertion in `apps/web/tests/deploy.test.ts`).
+- **No thumbnails yet:** the gallery loads the stored images themselves, lazily and a page at a time.
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- Saving to and listing from a real MinIO: only a fake S3 server and an in-memory store were used. The
+  first real Save is the check (path-style addressing, the checksum settings and the bucket-only policy).
 
 - `GET /api/v0/users/current` against the live API: the path and the `credit` field come from the vastai
   1.8.3 SDK source and from the T13 spike, which watched `credit` fall by the cost of a boot.

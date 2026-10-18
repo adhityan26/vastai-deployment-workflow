@@ -117,6 +117,12 @@ ul { padding: 0; margin: 0; list-style: none; }
 .refs .ref-tag { font-size: 0.8rem; font-weight: 600; }
 .refs button { width: 100%; min-height: 44px; padding: 4px 8px; }
 #mode-box { margin-bottom: 8px; }
+.check { display: flex; align-items: center; gap: 10px; font-weight: 400; margin: 12px 0 4px; }
+.check input { width: auto; min-width: 22px; min-height: 22px; margin: 0; }
+.grid button.save, #gal-open, #gal-more { width: 100%; margin-top: 4px; }
+#gal-more { margin-top: 12px; }
+.gal-caption { font-size: 0.85rem; color: var(--muted); overflow-wrap: anywhere; margin: 4px 0; }
+.gal-prompt { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 4px 0 0; }
 .screen { max-width: 40rem; margin: 12px auto; width: calc(100% - 24px); display: grid; gap: 8px; }
 .loading { text-align: center; color: var(--muted); margin: 24px 12px; }
 .button { display: flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 16px; font-weight: 600; text-decoration: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); }
