@@ -3,7 +3,15 @@ import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
-import { ConsoleBuffer, logLines, type ConsoleLimits, type ConsoleLine, type ConsoleStoreLike, type PhaseInfo } from "./console.js";
+import {
+  ConsoleBuffer,
+  logLines,
+  type ConsoleEndReason,
+  type ConsoleLimits,
+  type ConsoleLine,
+  type ConsoleStoreLike,
+  type PhaseInfo,
+} from "./console.js";
 import {
   CreateRejected,
   DestroyError,
@@ -154,24 +162,6 @@ export interface LifecycleDeps {
   /** Where the boot console persists (BOOT_LOG_PATH); without it the console lives in memory only. */
   consoleStore?: ConsoleStoreLike;
 }
-
-/**
- * Why the console's instance ended, as a fixed identifier: destroyed (Destroy button),
- * start_failed (the Start that created the console failed), the reconcile reasons hard_cap,
- * boot_timeout, unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
- * (the record disappeared some other way).
- */
-export type ConsoleEndReason =
-  | "destroyed"
-  | "start_failed"
-  | "hard_cap"
-  | "boot_timeout"
-  | "unreachable"
-  | "destroy_retry"
-  | "destroy_requested"
-  | "vanished"
-  | "never_created"
-  | "gone";
 
 /** GET /api/console: the boot console after `after`. Every text is masked; no hostname or token. */
 export interface ConsolePayload {
@@ -777,6 +767,9 @@ export class Lifecycle {
   /** Merged status of registry, Vast and agent. Never throws because one source is down. */
   async view(): Promise<StatusView> {
     const now = this.now();
+    // Taken before the first await: a Start while this view is in flight must not be undone by
+    // the console update at its end (see feedConsole).
+    const consoleEpoch = this.consoleEpoch();
     const record = await this.deps.registry.active();
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
@@ -845,7 +838,7 @@ export class Lifecycle {
     const startGpu =
       record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.gpu_name : null;
     const progress = agent?.progress ?? null;
-    this.feedConsole(record, inst, agent, instances, now);
+    this.feedConsole(consoleEpoch, record, inst, agent, instances, now);
 
     return {
       state,
@@ -950,8 +943,24 @@ export class Lifecycle {
     }
   }
 
+  /**
+   * The console generation now, or null when the console cannot be used. Callers take it
+   * synchronously BEFORE their first await and act on the console only while it is unchanged:
+   * every reset (a Start, or another call pointing the console at a new owner) bumps it, and a
+   * record read before that reset is stale (acting on it would end the new boot's console as
+   * "gone" or reset it back to the old owner).
+   */
+  private consoleEpoch(): number | null {
+    try {
+      return this.consoleBuffer().generation;
+    } catch {
+      return null;
+    }
+  }
+
   /** From view(): Vast's status and the agent summary (no extra requests), then a watched refresh. */
   private feedConsole(
+    epoch: number | null,
     record: InstanceRecord | null,
     inst: VastInstance | undefined,
     agent: AgentStatus | null,
@@ -959,6 +968,8 @@ export class Lifecycle {
     now: number,
   ): void {
     this.withConsole((buf) => {
+      const current = (): boolean => epoch !== null && buf.generation === epoch;
+      if (!current()) return; // the console was reset while this view was in flight
       this.syncConsoleOwner(buf, record);
       if (record === null || buf.owner !== record.tailnet_hostname || buf.ended) return;
       this.feedVast(buf, inst, this.consoleLimits().maxLines);
@@ -1046,21 +1057,31 @@ export class Lifecycle {
     if (!Number.isSafeInteger(after) || after < 0) throw new RangeError("after must be an integer >= 0");
     const now = this.now();
     this.consoleWatchedAt = now;
-    const record = await this.deps.registry.active();
+    // Taken before the first await (see consoleEpoch).
     const buf = this.consoleBuffer();
-    this.syncConsoleOwner(buf, record);
-    this.persistConsole(buf);
-    if (record !== null && buf.owner === record.tailnet_hostname && !buf.ended) {
-      await this.refreshConsole(record, now, null);
+    const epoch = buf.generation;
+    const current = (): boolean => buf.generation === epoch;
+    let record = await this.deps.registry.active();
+    if (current()) {
+      this.syncConsoleOwner(buf, record);
+      this.persistConsole(buf);
+      if (record !== null && buf.owner === record.tailnet_hostname && !buf.ended) {
+        await this.refreshConsole(record, now, null);
+      }
+    } else {
+      // Reset (a Start) while the registry was read: that record is stale. Leave the console as
+      // the reset made it and describe it with a fresh read.
+      record = await this.deps.registry.active();
     }
     const owner = buf.owner;
     const page = buf.since(after);
     // The tailnet hostname never leaves the server (Tailscale prints it while joining).
     const lines = owner === null ? page.lines : page.lines.map((l) => ({ ...l, text: l.text.split(owner).join(HOST_PLACEHOLDER) }));
-    const live = record !== null && !buf.ended;
+    const state = record !== null && !buf.ended ? record.status : null;
+    const live = state !== null;
     return {
       generation: buf.generation,
-      instance: { state: live ? record.status : "none", ended: buf.ended, ended_reason: buf.endedReason },
+      instance: { state: state ?? "none", ended: buf.ended, ended_reason: buf.endedReason },
       phases: buf.phases(),
       lines,
       last_seq: page.last_seq,

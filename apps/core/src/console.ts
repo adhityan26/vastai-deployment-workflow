@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -21,6 +21,26 @@ export interface ConsoleLine {
   source: ConsoleSource;
   text: string;
 }
+
+/**
+ * Why the console's instance ended, as a fixed identifier: destroyed (Destroy button),
+ * start_failed (the Start that created the console failed), the reconcile reasons hard_cap,
+ * boot_timeout, unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
+ * (the record disappeared some other way). A restored state with any other value is refused.
+ */
+export const CONSOLE_END_REASONS = [
+  "destroyed",
+  "start_failed",
+  "hard_cap",
+  "boot_timeout",
+  "unreachable",
+  "destroy_retry",
+  "destroy_requested",
+  "vanished",
+  "never_created",
+  "gone",
+] as const;
+export type ConsoleEndReason = (typeof CONSOLE_END_REASONS)[number];
 
 export type PhaseStatus = "pending" | "running" | "done" | "failed";
 
@@ -80,27 +100,55 @@ const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
 const MIXED_CASE_DIGIT = (s: string) => /[a-z]/.test(s) && /[A-Z]/.test(s) && /[0-9]/.test(s);
 
-/** Generic secret patterns, applied in this order after the known secrets. */
+/** A '/'-separated part this long that mixes cases and digits marks a base64 string, not a path. */
+const BASE64_SEGMENT = 16;
+
+/**
+ * A long run of base64/base64url characters is a secret when it mixes upper case, lower case and
+ * digits. With '/' in it (standard base64, unpadded) it could also be a path, so it then needs
+ * padding or one '/'-separated part of BASE64_SEGMENT+ characters that mixes them itself (path
+ * parts are short words; random base64 has a '/' only every 64 characters on average).
+ */
+function maskBase64(m: string): string {
+  if (!MIXED_CASE_DIGIT(m)) return m;
+  if (!m.includes("/") || m.endsWith("=")) return REDACTED;
+  return m.split("/").some((part) => part.length >= BASE64_SEGMENT && MIXED_CASE_DIGIT(part)) ? REDACTED : m;
+}
+
+// Names whose value is a secret. Every name rule starts its match AT the name (literal text), not
+// at a free prefix: the name's own prefix (AGENT_, X-Amz-) stays outside the match and needs no
+// capture. A free prefix such as `\b[\w.-]*?` made these rules quadratic on lines like
+// `a-a-a-...` (about 13 ms per 3200-character line); see the hostile-line test.
+const SECRET_NAMES = "api[_-]?key|access[_-]?key|auth[_-]?key|authkey|token|secret|password|passwd|passphrase|pwd|signature|credential";
+const PASSWORD_NAMES = "password|passwd|passphrase";
+
+/** Generic secret patterns, applied in this order after the known secrets. All linear in the line length. */
 const PATTERNS: readonly [RegExp, string | ((match: string, ...groups: string[]) => string)][] = [
-  // Credentials in a URL: scheme://user:password@host
-  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+(?::[^\s/@]*)?@/gi, `$1${REDACTED}@`],
-  // Tailscale keys.
-  [/\btskey-[A-Za-z0-9-]+/g, `tskey-${REDACTED}`],
+  // Credentials in a URL: scheme://user:password@host. The scheme starts where no scheme
+  // character precedes it and is at most 32 characters (otherwise quadratic, as above).
+  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]+(?::[^\s/@]*)?@/gi, `$1${REDACTED}@`],
+  // Tailscale keys (any case).
+  [/\btskey-[a-z0-9-]+/gi, `tskey-${REDACTED}`],
   // Authorization header values: everything after the name.
   [/\b(authorization)(\s*[:=]\s*).*$/gi, `$1$2${REDACTED}`],
   [/\bBearer\s+\S+/gi, `Bearer ${REDACTED}`],
   // Command-line flags carrying a secret: --api-key VALUE, --token=VALUE.
   [/(--(?:api[_-]?key|access[_-]?key|token|password|passwd|secret|auth[_-]?key)(?:=|\s+))(\S+)/gi, `$1${REDACTED}`],
-  // name=value / name: value for secret-looking names (API_KEY=, AGENT_TOKEN=, X-Amz-Signature=, "password": ...).
+  // A quoted value, which may contain spaces: "password": "two words", TOKEN='a b'.
   [
-    /\b([\w.-]*?(?:api[_-]?key|access[_-]?key|auth[_-]?key|authkey|token|secret|password|passwd|pwd|signature|credential))(["']?\s*[=:]\s*["']?)([^\s"'&,;]+)/gi,
-    `$1$2${REDACTED}`,
+    new RegExp(`(${SECRET_NAMES})(["']?\\s*[=:]\\s*)("[^"]*"|'[^']*')`, "gi"),
+    (_m: string, name: string, sep: string, quoted: string) => `${name}${sep}${quoted[0]}${REDACTED}${quoted[0]}`,
   ],
+  // An unquoted password runs to the end of the line (it may be several words).
+  [new RegExp(`(${PASSWORD_NAMES})(["']?\\s*[=:]\\s*)(?!["'\\[])\\S.*$`, "gi"), `$1$2${REDACTED}`],
+  // name=value / name: value for secret-looking names (API_KEY=, AGENT_TOKEN=, X-Amz-Signature=, "token": ...).
+  [new RegExp(`(${SECRET_NAMES})(["']?\\s*[=:]\\s*["']?)([^\\s"'&,;]+)`, "gi"), `$1$2${REDACTED}`],
+  // A query parameter named key: ?key=VALUE, &key=VALUE.
+  [/([?&]key=)[^\s&#]+/gi, `$1${REDACTED}`],
   // Long hex strings (tokens, keys; also full commit and image digests, an accepted loss).
   [/\b[0-9a-fA-F]{32,}\b/g, "[hex]"],
-  // Long base64/base64url strings that mix upper case, lower case and digits.
-  [/(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{40,}={0,2}/g, (m: string) => (MIXED_CASE_DIGIT(m) ? REDACTED : m)],
-  [/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={1,2}/g, (m: string) => (MIXED_CASE_DIGIT(m) ? REDACTED : m)],
+  // Long base64/base64url strings (see maskBase64), padded or not, with or without '/'.
+  [/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2}/g, maskBase64],
 ];
 
 /** One raw log line made safe to display: last \r segment, no escape sequences or control characters. */
@@ -124,13 +172,18 @@ export function normalizeLine(raw: string): string {
 
 /**
  * Mask one line: every known secret (longest first), a known secret's head at the end of the
- * line or its tail at the start (a secret split across two lines or cut by a partial read), then
- * the generic patterns. Never throws.
+ * line or its tail at the start (a secret split across two lines or cut by a partial read), a
+ * line that is only a piece from inside a known secret (the middle lines of a secret wrapped over
+ * three or more lines), then the generic patterns. Never throws.
+ * Known limit: a middle piece of a known secret that shares its line with other text is not
+ * caught by the known-secret rules (only by the generic patterns).
  */
 export function maskLine(line: string, secrets: readonly string[]): string {
   let out = line;
   const known = [...new Set(secrets)].filter((s) => typeof s === "string" && s.length >= MIN_SECRET_LENGTH);
   known.sort((a, b) => b.length - a.length);
+  const whole = out.trim();
+  if (whole.length >= MIN_FRAGMENT && known.some((s) => s.includes(whole))) return REDACTED;
   for (const s of known) if (out.includes(s)) out = out.split(s).join(REDACTED);
   for (const s of known) {
     for (let k = Math.min(s.length - 1, out.length); k >= MIN_FRAGMENT; k--) {
@@ -152,13 +205,22 @@ export function maskLine(line: string, secrets: readonly string[]): string {
   return out;
 }
 
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
+
 /** Cut a (masked) line to `max` characters, marking the cut; never splits a surrogate pair. */
 export function truncateLine(text: string, max: number): string {
   if (text.length <= max) return text;
   let cut = text.slice(0, Math.max(0, max - 1));
-  const last = cut.charCodeAt(cut.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  if (isHighSurrogate(cut.charCodeAt(cut.length - 1))) cut = cut.slice(0, -1);
   return cut + ELLIPSIS;
+}
+
+/** The last `keep` characters of `text` (one fewer when that would split a surrogate pair). */
+function tailOf(text: string, keep: number): string {
+  let cut = text.slice(-keep);
+  if (cut.length > 0 && isLowSurrogate(cut.charCodeAt(0))) cut = cut.slice(1);
+  return cut;
 }
 
 /**
@@ -195,7 +257,7 @@ interface ConsoleState {
   generation: number;
   owner: string | null;
   ended: boolean;
-  ended_reason: string | null;
+  ended_reason: ConsoleEndReason | null;
   last_seq: number;
   dropped: boolean;
   lines: ConsoleLine[];
@@ -242,7 +304,15 @@ function containsBlock(outer: readonly string[], inner: readonly string[]): bool
   return false;
 }
 
-/** The longest k such that the last k lines of `prev` equal the first k lines of `next`. */
+/**
+ * The longest k such that the last k lines of `prev` equal the first k lines of `next`.
+ * Ambiguity (accepted): lines carry no position, so periodic output cannot be told apart. With a
+ * previous tail `a b a b` and a new tail `a b a b`, either nothing is new or the log printed
+ * `a b` twice more and the fixed-size tail slid by two; the longest overlap says nothing is new,
+ * so the console may show fewer repeated lines than the log has. Likewise a log that restarted
+ * with the same first lines is taken as a continuation, not a gap. Choosing the longest k never
+ * duplicates a line; the cost is under-counting repeats.
+ */
 function overlap(prev: readonly string[], next: readonly string[]): number {
   for (let k = Math.min(prev.length, next.length); k >= 1; k--) {
     let ok = true;
@@ -314,7 +384,9 @@ export class ConsoleBuffer {
     if (!isCount(d["generation"]) || !isCount(d["last_seq"])) fail("bad counters");
     if (d["owner"] !== null && !isStr(d["owner"])) fail("bad owner");
     if (typeof d["ended"] !== "boolean" || typeof d["dropped"] !== "boolean") fail("bad flags");
-    if (d["ended_reason"] !== null && !isStr(d["ended_reason"])) fail("bad ended_reason");
+    if (d["ended_reason"] !== null && !CONSOLE_END_REASONS.includes(d["ended_reason"] as ConsoleEndReason)) {
+      fail("bad ended_reason");
+    }
     if (d["failed"] !== null && !isStr(d["failed"])) fail("bad failed");
     if (d["vast_status"] !== null && !isStr(d["vast_status"])) fail("bad vast_status");
     const step = d["step"];
@@ -351,7 +423,7 @@ export class ConsoleBuffer {
       generation: d["generation"] as number,
       owner: d["owner"] as string | null,
       ended: d["ended"] as boolean,
-      ended_reason: d["ended_reason"] as string | null,
+      ended_reason: d["ended_reason"] as ConsoleEndReason | null,
       last_seq: lastSeq,
       dropped: (d["dropped"] as boolean) || kept.length < lines.length,
       lines: kept,
@@ -370,13 +442,40 @@ export class ConsoleBuffer {
   }
 
   /**
-   * normalise -> mask -> cut. A very long raw line is first cut to PRE_CUT_FACTOR times the
-   * limit (bounded masking work); the visible cut happens only after masking.
+   * normalise -> mask -> cut. A line longer than PRE_CUT_FACTOR times the limit is oversized: it
+   * is pre-cut to its LAST preCut characters (the most recent part, e.g. of a progress line;
+   * bounded masking work), masked, then shown as an ellipsis and its last characters. Other lines
+   * are masked, then cut at the limit keeping their start. The visible cut is always after masking.
    */
-  private prepare(raw: string): string {
-    let text = normalizeLine(raw.length > this.preCut * 4 ? raw.slice(-this.preCut * 4) : raw);
-    if (text.length > this.preCut) text = text.slice(0, this.preCut);
-    return truncateLine(maskLine(text, this.secrets()), this.limits.maxLineChars);
+  private prepare(raw: string, secrets: readonly string[] = this.secrets()): string {
+    const preCut = this.preCut;
+    const max = this.limits.maxLineChars;
+    const text = normalizeLine(raw.length > preCut * 4 ? raw.slice(-preCut * 4) : raw);
+    if (text.length <= preCut) return truncateLine(maskLine(text, secrets), max);
+    const masked = maskLine(tailOf(text, preCut), secrets);
+    return masked.length <= max - 1 ? ELLIPSIS + masked : ELLIPSIS + tailOf(masked, max - 1);
+  }
+
+  // The prepared texts of the previous vast_logs tail by raw line: a tail is re-read whole on
+  // every poll, and its lines before the overlap need no second masking pass. Valid only for the
+  // secrets it was made with; holds at most one tail.
+  private prepCache = new Map<string, string>();
+  private prepCacheKey: string | null = null;
+
+  private prepareTail(lines: readonly string[]): string[] {
+    const secrets = this.secrets();
+    const key = secrets.join("\0");
+    const cache = key === this.prepCacheKey ? this.prepCache : new Map<string, string>();
+    const next = new Map<string, string>();
+    const out = lines.map((raw) => {
+      let text = cache.get(raw) ?? next.get(raw);
+      if (text === undefined) text = this.prepare(raw, secrets);
+      if (raw.length <= this.preCut * 4) next.set(raw, text);
+      return text;
+    });
+    this.prepCache = next;
+    this.prepCacheKey = key;
+    return out;
   }
 
   private get preCut(): number {
@@ -392,7 +491,7 @@ export class ConsoleBuffer {
   get ended(): boolean {
     return this.state.ended;
   }
-  get endedReason(): string | null {
+  get endedReason(): ConsoleEndReason | null {
     return this.state.ended_reason;
   }
   get lastSeq(): number {
@@ -423,7 +522,7 @@ export class ConsoleBuffer {
   }
 
   /** The owner instance is gone; lines are kept so the page can show why. The first reason wins. */
-  markEnded(reason: string): void {
+  markEnded(reason: ConsoleEndReason): void {
     if (this.state.ended) return;
     this.state.ended = true;
     this.state.ended_reason = reason;
@@ -438,7 +537,9 @@ export class ConsoleBuffer {
    */
   append(source: ConsoleSource, lines: readonly string[]): void {
     if (!SOURCES.includes(source)) throw new Error("unknown console source");
-    const prepared = lines.map((l) => this.prepare(l)).filter((l) => l.trim() !== "");
+    const prepared = (source === "vast_logs" ? this.prepareTail(lines) : lines.map((l) => this.prepare(l))).filter(
+      (l) => l.trim() !== "",
+    );
     const recent = this.state.recent;
     let add: string[];
     if (source === "vast_logs") {
@@ -509,7 +610,11 @@ export class ConsoleBuffer {
     return { lines, last_seq: this.state.last_seq, truncated };
   }
 
-  /** The fixed phase list with a status each, from the step markers and Vast's status only. */
+  /**
+   * The fixed phase list with a status each, from the step markers and Vast's status only.
+   * DISPLAY ONLY: the markers are printed by the instance and read back from its log, so nothing
+   * may act on them. Readiness (and every lifecycle decision) comes from view().state.
+   */
   phases(): PhaseInfo[] {
     const { step, failed, vast_status: vast } = this.state;
     const lastStep = BOOT_STEPS.length - 1;
@@ -564,12 +669,32 @@ export class ConsoleStore implements ConsoleStoreLike {
   }
 
   load(): unknown {
+    let fd: number | null = null;
     try {
       if (!existsSync(this.filePath)) return null;
-      if (statSync(this.filePath).size > this.maxFileBytes) return null;
-      return JSON.parse(readFileSync(this.filePath, "utf8"));
+      fd = openSync(this.filePath, "r");
+      if (fstatSync(fd).size > this.maxFileBytes) return null;
+      // The read itself is capped too (the file may grow after the size check): one byte past
+      // the cap means the file is too large.
+      const buf = Buffer.alloc(this.maxFileBytes + 1);
+      let used = 0;
+      for (;;) {
+        const n = readSync(fd, buf, used, buf.length - used, null);
+        if (n === 0) break;
+        used += n;
+        if (used > this.maxFileBytes) return null;
+      }
+      return JSON.parse(buf.subarray(0, used).toString("utf8"));
     } catch {
       return null;
+    } finally {
+      if (fd !== null) {
+        try {
+          closeSync(fd);
+        } catch {
+          // nothing to do
+        }
+      }
     }
   }
 

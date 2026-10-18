@@ -360,6 +360,64 @@ describe("Lifecycle.console", () => {
     for (let k = 6; k <= TOKEN.length; k++) expect(JSON.stringify(p)).not.toContain(TOKEN.slice(0, k));
   });
 
+  /** The next registry.active() reads now but answers only after `release()` (a request in flight). */
+  function holdNextActive(registry: Registry): { release: () => void; reached: Promise<void> } {
+    const original = registry.active.bind(registry);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reached!: () => void;
+    const reachedP = new Promise<void>((r) => (reached = r));
+    registry.active = async () => {
+      registry.active = original;
+      const value = await original();
+      reached();
+      await gate;
+      return value;
+    };
+    return { release, reached: reachedP };
+  }
+
+  it("a view in flight across start() neither ends nor clears the new boot's console", async () => {
+    const h = await harness({ active: false });
+    const held = holdNextActive(h.registry);
+    const view = h.lc.view(); // reads "no active record", then waits
+    await held.reached;
+    await h.lc.start();
+    const fresh = await h.lc.console(0);
+    held.release();
+    await view;
+    await h.lc.flushConsole();
+    const p = await h.lc.console(0);
+    expect(p.generation).toBe(fresh.generation);
+    expect(p.instance.ended).toBe(false);
+    expect(p.instance.ended_reason).toBeNull();
+  });
+
+  it("a console call in flight across destroy+Start does not wipe the new console", async () => {
+    const h = await harness();
+    h.vast.logText = "old boot\n";
+    await h.lc.console(0);
+    const held = holdNextActive(h.registry);
+    h.clock.t += 5;
+    const pending = h.lc.console(0); // reads the OLD record, then waits
+    await held.reached;
+    await h.lc.destroy();
+    await h.lc.start();
+    h.vast.instances[h.vast.instances.length - 1]!.actual_status = "running";
+    h.vast.logText = "new boot\n";
+    h.clock.t += 5;
+    const fresh = await h.lc.console(0);
+    expect(texts(fresh)).toEqual(["new boot"]);
+    held.release();
+    const stale = await pending;
+    expect(stale.generation).toBe(fresh.generation);
+    expect(stale.instance.ended).toBe(false);
+    const p = await h.lc.console(0);
+    expect(p.generation).toBe(fresh.generation);
+    expect(texts(p)).toEqual(["new boot"]);
+    expect(p.instance.ended).toBe(false);
+  });
+
   it("validates after", async () => {
     const h = await harness();
     for (const bad of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) await expect(h.lc.console(bad)).rejects.toThrow(RangeError);

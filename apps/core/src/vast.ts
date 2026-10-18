@@ -17,6 +17,8 @@ const RUNTYPE_SSH_DIRECT = "ssh_direc ssh_proxy"; // ssh + direct, as built by t
 // {"tail": "<n>"} answers {"result_url": ...}; the SDK then GETs that URL WITHOUT the API key
 // every 0.3 s until it answers 200 (the file is written asynchronously). Same delay here.
 const LOG_RESULT_RETRY_MS = 300;
+/** A log download stops after this many times BOOT_LOG_MAX_BYTES (a body that never ends). */
+const LOG_READ_FACTOR = 4;
 const HTTPS = "https:";
 /** Vast reports and filters gpu_ram in MB; the CLI converts GB with 1000 per GB. */
 export const MB_PER_GB = 1000;
@@ -345,8 +347,8 @@ export class VastClient {
   }
 
   /**
-   * The last `tail` lines of the instance's container log (PID 1 stdout), as text. Reads at most
-   * BOOT_LOG_MAX_BYTES of the log file (then the partial last line is dropped); waits for the file
+   * The last `tail` lines of the instance's container log (PID 1 stdout), as text. Keeps at most
+   * the last BOOT_LOG_MAX_BYTES of the log file (whole lines only, see readCapped); waits for the file
    * at most HTTP_TIMEOUT_S_APPS. The file URL must be https without credentials and is fetched
    * WITHOUT the Authorization header (it is a pre-signed download, not the Vast API). Every error
    * is a VastError with fixed text: never the URL (it carries a signature) or the key.
@@ -402,37 +404,52 @@ export class VastClient {
     }
   }
 
-  /** At most `maxBytes` of the body; a longer body is cut and its partial last line dropped. */
+  /**
+   * At most the LAST `maxBytes` of the body (the most recent lines). A longer body loses its
+   * start, then the partial first line; reading stops after LOG_READ_FACTOR x `maxBytes` (a body
+   * that keeps coming), and then the partial last line is dropped too.
+   */
   private async readCapped(res: Response, maxBytes: number, abort: AbortController): Promise<string> {
     if (res.body === null) return "";
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
-    let total = 0;
-    let capped = false;
+    let kept = 0;
+    let read = 0;
+    let stopped = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        const room = maxBytes - total;
-        if (value.byteLength > room) {
-          if (room > 0) chunks.push(value.subarray(0, room));
-          total += Math.max(room, 0);
-          capped = true;
+        chunks.push(value);
+        kept += value.byteLength;
+        read += value.byteLength;
+        // Drop whole chunks that are entirely before the last maxBytes.
+        while (chunks.length > 1 && kept - chunks[0]!.byteLength >= maxBytes) kept -= chunks.shift()!.byteLength;
+        if (read >= maxBytes * LOG_READ_FACTOR) {
+          stopped = true;
           break;
         }
-        chunks.push(value);
-        total += value.byteLength;
       }
     } catch {
       throw new VastError("request logs: the log download failed");
     }
-    if (capped) {
+    if (stopped) {
       abort.abort();
       await reader.cancel().catch(() => undefined);
     }
-    const text = new TextDecoder("utf-8").decode(Buffer.concat(chunks, total));
-    if (!capped) return text;
-    const end = text.lastIndexOf("\n");
-    return end < 0 ? "" : text.slice(0, end + 1);
+    let bytes = Buffer.concat(chunks, kept);
+    const cut = bytes.byteLength > maxBytes || read > kept;
+    if (bytes.byteLength > maxBytes) bytes = bytes.subarray(bytes.byteLength - maxBytes);
+    let text = new TextDecoder("utf-8").decode(bytes);
+    if (cut) {
+      // The first line lost its start (and possibly half a UTF-8 character).
+      const start = text.indexOf("\n");
+      text = start < 0 ? "" : text.slice(start + 1);
+    }
+    if (stopped) {
+      const end = text.lastIndexOf("\n");
+      text = end < 0 ? "" : text.slice(0, end + 1);
+    }
+    return text;
   }
 }

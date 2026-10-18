@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   BOOT_PHASES,
   BOOT_STEPS,
+  CONSOLE_END_REASONS,
   ConsoleBuffer,
   ConsoleCorruptError,
   ConsoleStore,
@@ -83,6 +84,40 @@ describe("maskLine", () => {
       "max_tokens=5 tokenizer_mode=auto",
     ]) {
       expect(maskLine(line, [SECRET])).toBe(line);
+    }
+  });
+
+  it("masks unpadded base64 with '/', ?key= values, multi-word passwords and upper-case tskey", () => {
+    expect(maskLine("blob AbCdEfGhIjKlMnOp/QrStUvWxYz0123456789abcdEFGH end", [])).toBe("blob [redacted] end");
+    expect(maskLine("GET https://api.example.test/v1/x?key=plainkeyvalue&y=1", [])).toBe(
+      "GET https://api.example.test/v1/x?key=[redacted]&y=1",
+    );
+    expect(maskLine("DB_PASSWORD=correct horse battery staple", [])).toBe("DB_PASSWORD=[redacted]");
+    expect(maskLine('{"password": "two words", "user": "bob"}', [])).toBe('{"password": "[redacted]", "user": "bob"}');
+    expect(maskLine("key TSKEY-AUTH-kAbC123-XyZ987 end", [])).toBe("key tskey-[redacted] end");
+    // Paths are not base64 even when long and mixed case with digits.
+    for (const path of [
+      "/workspace/ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors",
+      "models/checkpoints/Flux1Dev/unet/diffusion_pytorch_model.safetensors",
+      "/opt/vast-comfy/instance/ComfyUI/custom_nodes/Impact-Pack/v8/install",
+    ]) {
+      expect(maskLine(path, [])).toBe(path);
+    }
+  });
+
+  it("masks a known secret split over three or more lines (a middle line that is only a fragment)", () => {
+    const long = "Zq9SECRETvalue0123456789-and-more-and-more";
+    const parts = [long.slice(0, 12), long.slice(12, 26), long.slice(26)];
+    expect(parts.map((p) => maskLine(p, [long]))).toEqual(["[redacted]", "[redacted]", "[redacted]"]);
+  });
+
+  it("masks hostile lines in linear time", () => {
+    const shapes = ["a-", "a.", "a+", "x-y.", "token-", "a_b-", "aA1-"];
+    for (const shape of shapes) {
+      const line = shape.repeat(Math.ceil(3200 / shape.length)).slice(0, 3200);
+      const t = performance.now();
+      for (let i = 0; i < 300; i++) maskLine(line, [SECRET]);
+      expect(performance.now() - t, shape).toBeLessThan(1000);
     }
   });
 
@@ -236,6 +271,27 @@ describe("ConsoleBuffer bounds", () => {
     b.append("vast_status", ["z".repeat(5_000_000)]);
     expect(texts(b)[0]!.length).toBe(40);
   });
+
+  it("keeps the tail (most recent part) of an oversized line", () => {
+    const b = buffer({ maxLineChars: 40 });
+    // Longer than the pre-cut (8 x 40): the end is what is shown.
+    b.append("vast_logs", [`HEAD${"x".repeat(1000)}${SECRET} TAILEND`]);
+    const [line] = texts(b);
+    expect(line!.length).toBeLessThanOrEqual(40);
+    expect(line!.startsWith("…")).toBe(true);
+    expect(line!.endsWith("[redacted] TAILEND")).toBe(true);
+    expect(line).not.toContain("HEAD");
+  });
+
+  it("buffers 300 hostile lines per poll well under a second", () => {
+    const b = buffer({ maxLines: 1000, tailLines: 300 });
+    const lines = Array.from({ length: 300 }, (_v, i) => `${i} ${"a-".repeat(1600)}`);
+    const t = performance.now();
+    b.append("vast_logs", lines);
+    b.append("vast_logs", [...lines.slice(1), "next"]);
+    expect(performance.now() - t).toBeLessThan(1000);
+    expect(b.lastSeq).toBe(301);
+  });
 });
 
 describe("ConsoleBuffer lifecycle", () => {
@@ -348,9 +404,31 @@ describe("persistence", () => {
     expect(store.load()).toBeNull();
     writeFileSync(path, JSON.stringify({ pad: "x".repeat(2000) }));
     expect(store.load()).toBeNull();
-    for (const bad of [null, [], { version: 2 }, { ...buffer().toJSON(), lines: [{ seq: "1" }] }, { ...buffer().toJSON(), step: 99 }]) {
+    for (const bad of [
+      null,
+      [],
+      { version: 2 },
+      { ...buffer().toJSON(), lines: [{ seq: "1" }] },
+      { ...buffer().toJSON(), step: 99 },
+      { ...buffer().toJSON(), ended: true, ended_reason: "<script>" },
+      { ...buffer().toJSON(), ended: true, ended_reason: "x".repeat(10) },
+    ]) {
       expect(() => ConsoleBuffer.fromJSON(bad, LIMITS, () => [], () => 1)).toThrow(ConsoleCorruptError);
     }
+  });
+
+  it("restores every allowed ended_reason and loads a file exactly at the cap", () => {
+    for (const reason of CONSOLE_END_REASONS) {
+      const b = buffer();
+      b.reset("vast-x");
+      b.markEnded(reason);
+      expect(ConsoleBuffer.fromJSON(b.toJSON(), LIMITS, () => [], () => 1).endedReason).toBe(reason);
+    }
+    const path = join(dir(), "f.json");
+    const body = JSON.stringify({ pad: "y".repeat(100) });
+    writeFileSync(path, body);
+    expect(new ConsoleStore(path, Buffer.byteLength(body)).load()).toEqual({ pad: "y".repeat(100) });
+    expect(new ConsoleStore(path, Buffer.byteLength(body) - 1).load()).toBeNull();
   });
 
   it("clamps a restored state to the current limits and masks it again", () => {

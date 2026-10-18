@@ -173,7 +173,19 @@ describe("VastClient.instanceLogs", () => {
     expect(Buffer.byteLength(out)).toBeLessThanOrEqual(1024);
     expect(out.endsWith("\n")).toBe(true);
     expect(out.split("\n").slice(0, -1).every((l) => `${l}\n` === line)).toBe(true);
-    expect(pulled).toBeLessThan(10);
+    // The tail is kept, so reading goes on past the cap, but only up to a bounded amount.
+    expect(pulled).toBeLessThan(40);
+  });
+
+  it("keeps the last bytes of an oversized log (the most recent lines), from a whole line", async () => {
+    const body = Array.from({ length: 200 }, (_v, i) => `line ${String(i).padStart(5, "0")}\n`).join(""); // 11 bytes each
+    const { client } = await fake(logsOk(), () => text(body), { bootLogMaxBytes: 1024 });
+    const out = await client.instanceLogs(77, 200);
+    expect(Buffer.byteLength(out)).toBeLessThanOrEqual(1024);
+    expect(out.endsWith("line 00199\n")).toBe(true);
+    expect(out.startsWith("line ")).toBe(true);
+    expect(out.split("\n").slice(0, -1).every((l) => /^line \d{5}$/.test(l))).toBe(true);
+    expect(out).not.toContain("line 00000");
   });
 
   it("turns Vast API failures into VastError without the key", async () => {
