@@ -105,6 +105,19 @@
     </div>
   </section>
 
+  <section id="usage-card" class="card" aria-labelledby="usage-title" hidden>
+    <div class="card-head">
+      <h2 id="usage-title">History</h2>
+      <button id="usage-toggle" type="button" aria-expanded="true" aria-controls="usage-body">Hide history</button>
+    </div>
+    <div id="usage-body">
+      <p id="usage-error" class="muted" role="status" hidden></p>
+      <p id="usage-empty" class="muted">No instance sessions yet.</p>
+      <ul id="usage-list" class="usage-list" aria-label="Recent instance sessions"></ul>
+      <p class="muted">Costs are estimates: duration &times; price per hour. Disk and traffic are billed separately.</p>
+    </div>
+  </section>
+
   <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>
 
   <section class="card" aria-labelledby="gen-title">

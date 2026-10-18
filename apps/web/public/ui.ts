@@ -35,6 +35,13 @@ import {
   referenceHint,
   CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
+  HISTORY_COLLAPSED_KEY,
+  formatDuration,
+  historyRefreshDue,
+  historyTime,
+  parseHistory,
+  stopReasonText,
+  type UsageEntry,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
   characterCount,
@@ -165,6 +172,9 @@ export function mountApp(doc: Document, env: Env): App {
   let consoleTruncated = false; // sticky per generation: lines were dropped at some point
   let consoleEpoch = 0; // bumped by resetConsole; an answer from an older epoch is discarded
   const history: HistoryEntry[] = [];
+  let usageSeenState: string | null = null; // the state at the last history read decision (null: never read)
+  let usageEpoch = 0; // bumped by resetUsage; an answer from an older epoch is discarded
+  let usageBusy = false;
 
   // ---- requests ----
 
@@ -251,6 +261,7 @@ export function mountApp(doc: Document, env: Env): App {
     samples = [];
     jobPending = false;
     resetConsole();
+    resetUsage();
     setText("login-message", kind === "login" ? message : "");
     setText("noaccess-error", "");
     setText("logout-error", "");
@@ -1335,6 +1346,83 @@ export function mountApp(doc: Document, env: Env): App {
     }
   });
 
+  // ---- usage history (admin only) ----
+
+  const usageCard = $("usage-card");
+  const usageBody = $("usage-body");
+  const usageToggle = $<HTMLButtonElement>("usage-toggle");
+  const usageList = $("usage-list");
+  function setUsageCollapsed(collapsed: boolean, remember: boolean): void {
+    usageBody.hidden = collapsed;
+    usageToggle.setAttribute("aria-expanded", String(!collapsed));
+    usageToggle.textContent = collapsed ? "Show history" : "Hide history";
+    if (!remember) return;
+    try {
+      doc.defaultView?.localStorage.setItem(HISTORY_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+  try {
+    setUsageCollapsed(doc.defaultView?.localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1", false);
+  } catch {
+    // Storage unavailable: start expanded.
+  }
+  usageToggle.addEventListener("click", () => setUsageCollapsed(!usageBody.hidden, true));
+
+  function resetUsage(): void {
+    usageEpoch++;
+    usageSeenState = null;
+    usageBusy = false;
+    usageList.replaceChildren();
+    $("usage-empty").hidden = false;
+    setText("usage-error", "");
+    usageCard.hidden = true;
+  }
+
+  function usageRow(e: UsageEntry): HTMLElement {
+    const li = make("li");
+    const head = make("div");
+    head.append(make("span", historyTime(e.started_at)), doc.createTextNode(" · "), make("span", formatDuration(e.duration_s)), doc.createTextNode(" · "), make("span", e.gpu_name ?? "—"));
+    const meta = make("div", undefined, "um");
+    meta.append(make("span", stopReasonText(e.reason, e.stop_by, e.active)), doc.createTextNode(" · "), make("span", `${formatCost(e.estimated_cost)} est.`));
+    if (e.started_by !== null) meta.append(doc.createTextNode(" · "), make("span", `started by ${e.started_by}`));
+    li.append(head, meta);
+    return li;
+  }
+
+  async function loadUsage(): Promise<void> {
+    if (usageBusy) return;
+    usageBusy = true;
+    const epoch = usageEpoch;
+    try {
+      const entries = parseHistory(await call("GET", API.history));
+      if (epoch !== usageEpoch) return;
+      if (entries === null) throw new ApiError("unreadable history");
+      usageList.replaceChildren(...entries.map(usageRow));
+      $("usage-empty").hidden = entries.length > 0;
+      setText("usage-error", "");
+    } catch (err) {
+      if (err instanceof AuthLostError || epoch !== usageEpoch) return;
+      // A short note in the card only: the history is never worth a page-wide banner.
+      setText("usage-error", "The history could not be loaded. It is tried again when the instance state changes.");
+    } finally {
+      if (epoch === usageEpoch) usageBusy = false;
+    }
+  }
+
+  /** Admins only: read the history on the first state and when the state turns none or ready. */
+  function renderUsage(s: ApiState | null, isAdmin: boolean): void {
+    if (!isAdmin || s === null) {
+      if (!usageCard.hidden || usageSeenState !== null) resetUsage();
+      return;
+    }
+    usageCard.hidden = false;
+    const due = historyRefreshDue(usageSeenState, s.state);
+    usageSeenState = s.state;
+    if (due) void loadUsage();
+  }
+
   // ---- render + polling loop ----
 
   function render(): void {
@@ -1352,7 +1440,9 @@ export function mountApp(doc: Document, env: Env): App {
       $<HTMLButtonElement>("btn-destroy").disabled = !c.canDestroy;
       $<HTMLButtonElement>("btn-extend").disabled = !c.canExtend;
       renderUnknown(state?.unknown ?? []);
+      renderUsage(state, true);
     } else {
+      renderUsage(state, false);
       adminPanel.replaceChildren();
       adminPanel.hidden = true;
       adminBuilt = false;
