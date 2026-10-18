@@ -10,7 +10,9 @@ import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import {
   AgentClient,
   ComfyClient,
+  Gallery,
   Lifecycle,
+  MemoryObjectStore,
   Registry,
   TailscaleError,
   loadProfile,
@@ -212,6 +214,7 @@ interface Harness {
   sessions: Sessions | null;
   logs: string[];
   creditReads: { n: number };
+  galleryStore: MemoryObjectStore;
 }
 
 let h: Harness;
@@ -227,6 +230,8 @@ async function harness(
     editTemplate?: unknown;
     /** The Vast credit source; null leaves it unconfigured. Defaults to a counting fake. */
     credit?: (() => Promise<number>) | null;
+    /** null turns the gallery off; undefined gives an in-memory one with small limits. */
+    gallery?: Gallery | null;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -327,6 +332,11 @@ async function harness(
     vast.instances.push({ id: VAST_ID, label: `vastcomfy:${HOST}`, actual_status: "running", start_date: NOW_S, dph_total: 0.3 });
   }
   const logs: string[] = [];
+  const galleryStore = new MemoryObjectStore();
+  const gallery =
+    opts.gallery === undefined
+      ? new Gallery(galleryStore, { maxImages: 3, maxBytes: 100_000, pageSize: 2, adminScanMax: 100, maxImageBytes: 65_536 })
+      : (opts.gallery ?? undefined);
   const creditReads = { n: 0 };
   const credit = opts.credit === undefined ? async () => (creditReads.n++, 4.5377) : (opts.credit ?? undefined);
   const { auth, oidc, sessions } = createAuthStack(cfg, { onMisconfigured: (m) => logs.push(`error ${m}`), now: () => clock.ms });
@@ -341,6 +351,7 @@ async function harness(
     template,
     editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     credit,
+    gallery,
     publicDir,
     secrets: () => [VAST_KEY, AUTH_KEY, CLIENT_SECRET, SESSION_SECRET],
     now: () => clock.ms,
@@ -350,7 +361,7 @@ async function harness(
   opts.extraRoutes?.(app);
   await app.ready();
   return {
-    app, vast, registry, dir, publicDir, clock, sessions, logs, creditReads,
+    app, vast, registry, dir, publicDir, clock, sessions, logs, creditReads, galleryStore,
     agentSeen: agent.seen,
     comfySeen: comfy.seen,
     setAgent: (fn) => (agentHandler = fn),
@@ -852,6 +863,289 @@ describe("generate", () => {
 
 const location = (res: Res) => String(res.headers.location ?? "");
 const loginError = (res: Res) => new URL(location(res), PUBLIC_ORIGIN).searchParams.get("login_error");
+
+// ---- gallery: save to the object store, list, view, delete ----
+
+describe("gallery", () => {
+  const GPNG = () => pngOf(16, 16, "GALLERY-IMAGE-MARKER");
+
+  /** A ComfyUI whose finished job p-1 has one PNG with a real header. */
+  function comfyGallery(): Handler {
+    return (s, res) => {
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-1" });
+      if (s.url.startsWith("/history/")) {
+        return json(res, 200, { "p-1": { outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } } });
+      }
+      if (s.url.startsWith("/view")) {
+        res.writeHead(200, { "Content-Type": "image/png" });
+        return res.end(GPNG());
+      }
+      json(res, 404, {});
+    };
+  }
+
+  /** Submit a job as `who` and poll it to done, so it can be saved. */
+  async function finishedJob(who: Creds, body: Record<string, unknown> = okGen) {
+    h.setComfy(comfyGallery());
+    const sub = await post("/api/generate", who, body);
+    expect(sub.statusCode).toBe(202);
+    const poll = await call("GET", `/api/generate/${sub.json().id}`, who);
+    expect(poll.json().status).toBe("done");
+    return sub.json().id as string;
+  }
+  const save = (who: Creds, job: string, index = 0) => post("/api/gallery", who, { job, index });
+
+  it("tells the page whether saving is available", async () => {
+    expect((await call("GET", "/api/state", await member())).json().gallery).toBe(true);
+    h = await harness({ gallery: null });
+    expect((await call("GET", "/api/state", await member())).json().gallery).toBe(false);
+  });
+
+  it("saves a finished job's image from ComfyUI (the browser sends no image data) with the job's prompt and label", async () => {
+    const m = await member("ayu");
+    const job = await finishedJob(m, { ...okGen, prompt: "a red fox <b>" });
+    const res = await save(m, job);
+    expect(res.statusCode).toBe(201);
+    const { id } = res.json();
+    expect(res.json()).toEqual({ id: expect.stringMatching(/^[0-9a-f]{32}\.\d{13}\.p-1\.0$/), created: true });
+    const key = h.galleryStore.keys()[0]!;
+    expect(key.startsWith("u/")).toBe(true);
+    expect(key).not.toContain("ayu");
+    const head = await h.galleryStore.head(key);
+    expect(head?.contentType).toBe("image/png");
+    expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("a red fox <b>");
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1:1");
+    expect(head!.metadata["kind"]).toBe("generate");
+    expect(res.body).not.toContain("GALLERY-IMAGE-MARKER");
+    expect(id).toBe(res.json().id);
+  });
+
+  it("saving the same image twice keeps one object and answers 200 created:false", async () => {
+    const m = await member();
+    const job = await finishedJob(m);
+    expect((await save(m, job)).statusCode).toBe(201);
+    const again = await save(m, job);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().created).toBe(false);
+    expect(h.galleryStore.keys()).toHaveLength(1);
+  });
+
+  it("an edit job is saved with kind edit and its label", async () => {
+    h.setComfy((s, res) => {
+      if (s.url === "/upload/image") return json(res, 200, { name: /filename="([^"]+)"/.exec(s.body)![1]!, subfolder: "", type: "input" });
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-edit" });
+      if (s.url.startsWith("/history/")) return json(res, 200, { "p-edit": { outputs: { "9": { images: [{ filename: "e.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } } });
+      if (s.url.startsWith("/view")) { res.writeHead(200, { "Content-Type": "image/png" }); return res.end(GPNG()); }
+      json(res, 404, {});
+    });
+    const m = await member();
+    const sub = await post("/api/edit", m, okEdit);
+    expect(sub.statusCode).toBe(202);
+    await call("GET", "/api/generate/p-edit", m);
+    expect((await save(m, "p-edit")).statusCode).toBe(201);
+    const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
+    expect(head!.metadata["kind"]).toBe("edit");
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1024, 1 reference");
+  });
+
+  it("refuses a job that is not finished, someone else's job, an unknown image index and an unknown job", async () => {
+    const m = await member("ayu");
+    h.setComfy((s, res) => (s.url === "/prompt" ? json(res, 200, { prompt_id: "p-1" }) : json(res, 200, {})));
+    await post("/api/generate", m, okGen);
+    const early = await save(m, "p-1");
+    expect(early.statusCode).toBe(409);
+    expect(early.json().error.code).toBe("job_not_done");
+    h.setComfy(comfyGallery());
+    await call("GET", "/api/generate/p-1", m);
+    expect((await save(await member("budi"), "p-1")).statusCode).toBe(404);
+    expect((await save(m, "p-1", 5)).statusCode).toBe(404);
+    expect((await save(m, "nope")).statusCode).toBe(404);
+    expect(h.galleryStore.keys()).toEqual([]);
+  });
+
+  it("410 when the instance that made the image is gone, and nothing is stored", async () => {
+    const m = await member();
+    const job = await finishedJob(m);
+    await h.registry.update(HOST, { status: "gone" });
+    const res = await save(m, job);
+    expect(res.statusCode).toBe(410);
+    expect(h.galleryStore.keys()).toEqual([]);
+  });
+
+  it("409 gallery_quota when the member's gallery is full, other members are unaffected", async () => {
+    h = await harness({ gallery: new Gallery(new MemoryObjectStore(), { maxImages: 1, maxBytes: 100_000, pageSize: 2, adminScanMax: 100, maxImageBytes: 65_536 }) });
+    const m = await member("ayu");
+    const first = await finishedJob(m);
+    expect((await save(m, first)).statusCode).toBe(201);
+    h.setComfy((s, res) => (s.url === "/prompt" ? json(res, 200, { prompt_id: "p-2" }) : s.url.startsWith("/history/") ? json(res, 200, { "p-2": { outputs: { "10": { images: [{ filename: "b.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } } }) : comfyGallery()(s, res)));
+    await post("/api/generate", m, okGen);
+    await call("GET", "/api/generate/p-2", m);
+    const full = await save(m, "p-2");
+    expect(full.statusCode).toBe(409);
+    expect(full.json().error.code).toBe("gallery_quota");
+    const other = await member("budi");
+    await post("/api/generate", other, okGen);
+    await call("GET", "/api/generate/p-2", other);
+    expect((await save(other, "p-2")).statusCode).toBe(201);
+  });
+
+  it("502 gallery_error when the object store fails, with nothing from the store in the response or the logs", async () => {
+    const broken = new MemoryObjectStore();
+    broken.list = async () => { throw new (await import("@vast-comfy/core")).ObjectStoreError(`boom ${VAST_KEY} minio.internal`); };
+    h = await harness({ gallery: new Gallery(broken, { maxImages: 3, maxBytes: 100_000, pageSize: 2, adminScanMax: 100, maxImageBytes: 65_536 }) });
+    const m = await member();
+    const job = await finishedJob(m);
+    const res = await save(m, job);
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.code).toBe("gallery_error");
+    for (const text of [res.body, h.logs.join("\n")]) {
+      expect(text).not.toContain(VAST_KEY);
+      expect(text).not.toContain("minio.internal");
+    }
+  });
+
+  it("503 gallery_unavailable on every gallery route when saving is not set up", async () => {
+    h = await harness({ gallery: null });
+    const m = await member();
+    for (const [method, url, body] of [
+      ["POST", "/api/gallery", { job: "p-1", index: 0 }],
+      ["GET", "/api/gallery", undefined],
+      ["GET", "/api/gallery/00000000000000000000000000000000.0000000000000.p-1.0/image", undefined],
+      ["POST", "/api/gallery/delete", { id: "00000000000000000000000000000000.0000000000000.p-1.0" }],
+    ] as const) {
+      const res = await call(method, url, m, body);
+      expect(res.statusCode, url).toBe(503);
+      expect(res.json().error.code).toBe("gallery_unavailable");
+    }
+  });
+
+  it("validates the save body strictly", async () => {
+    const m = await member();
+    for (const body of [{}, { job: "p-1" }, { job: "p-1", index: -1 }, { job: "p-1", index: 1000 }, { job: "p-1", index: "0" }, { job: "../x", index: 0 }, { job: "p-1", index: 0, extra: 1 }]) {
+      const res = await post("/api/gallery", m, body);
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+      expect(res.json().error.code).toBe("invalid_body");
+    }
+  });
+
+  describe("list, view and delete", () => {
+    async function savedBy(who: Creds, n: number, prefix: string) {
+      for (let i = 0; i < n; i++) {
+        h.clock.ms += 1000;
+        h.setComfy((s, res) => {
+          if (s.url === "/prompt") return json(res, 200, { prompt_id: `${prefix}${i}` });
+          if (s.url.startsWith("/history/")) return json(res, 200, { [`${prefix}${i}`]: { outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } } });
+          if (s.url.startsWith("/view")) { res.writeHead(200, { "Content-Type": "image/png" }); return res.end(GPNG()); }
+          json(res, 404, {});
+        });
+        await post("/api/generate", who, { ...okGen, prompt: `${prefix} prompt ${i}` });
+        await call("GET", `/api/generate/${prefix}${i}`, who);
+        expect((await save(who, `${prefix}${i}`)).statusCode).toBe(201);
+      }
+    }
+
+    beforeEach(async () => {
+      h = await harness({ gallery: new Gallery(new MemoryObjectStore(), { maxImages: 10, maxBytes: 1_000_000, pageSize: 2, adminScanMax: 100, maxImageBytes: 65_536 }) });
+    });
+
+    it("lists a member's own images newest first in pages, with image urls and no storage details", async () => {
+      const ayu = await member("ayu");
+      await savedBy(ayu, 3, "a");
+      await savedBy(await member("budi"), 1, "b");
+      const p1 = await call("GET", "/api/gallery", ayu);
+      expect(p1.statusCode).toBe(200);
+      const body = p1.json();
+      expect(body.items.map((i: { prompt: string }) => i.prompt)).toEqual(["a prompt 2", "a prompt 1"]);
+      expect(body.items[0]).toEqual({
+        id: expect.stringMatching(/^[0-9a-f]{32}\.\d{13}\.a2\.0$/),
+        url: expect.stringMatching(/^\/api\/gallery\/[0-9a-f]{32}\.\d{13}\.a2\.0\/image$/),
+        created_at: expect.any(Number),
+        kind: "generate",
+        prompt: "a prompt 2",
+        label: "preview, 1:1",
+        owner_name: expect.any(String),
+        mine: true,
+        size: expect.any(Number),
+      });
+      expect(p1.body).not.toMatch(/"key"|vast-gallery|u\/[0-9a-f]{32}\//);
+      expect(body.next).toBe(body.items[1].id);
+      const p2 = await call("GET", `/api/gallery?cursor=${encodeURIComponent(body.next)}`, ayu);
+      expect(p2.json().items.map((i: { prompt: string }) => i.prompt)).toEqual(["a prompt 0"]);
+      expect(p2.json().next).toBeNull();
+    });
+
+    it("an admin can ask for everyone's images; a member cannot", async () => {
+      const ayu = await member("ayu");
+      await savedBy(ayu, 1, "a");
+      await savedBy(await member("budi"), 1, "b");
+      const root = await admin();
+      const all = await call("GET", "/api/gallery?scope=all", root);
+      expect(all.statusCode).toBe(200);
+      expect(all.json().items.map((i: { prompt: string }) => i.prompt)).toEqual(["b prompt 0", "a prompt 0"]);
+      expect(all.json().items.every((i: { mine: boolean }) => i.mine === false)).toBe(true);
+      const denied = await call("GET", "/api/gallery?scope=all", ayu);
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().error.code).toBe("forbidden");
+      expect((await call("GET", "/api/gallery", root)).json().items).toEqual([]);
+    });
+
+    it("validates the query and refuses another member's cursor", async () => {
+      const ayu = await member("ayu");
+      await savedBy(ayu, 3, "a");
+      const budi = await member("budi");
+      await savedBy(budi, 1, "b");
+      const cursor = (await call("GET", "/api/gallery", ayu)).json().next;
+      expect((await call("GET", `/api/gallery?cursor=${encodeURIComponent(cursor)}`, budi)).statusCode).toBe(403);
+      for (const q of ["?cursor=nonsense", "?scope=everything", "?limit=1000", "?cursor=" + "a".repeat(300)]) {
+        const res = await call("GET", `/api/gallery${q}`, ayu);
+        expect(res.statusCode, q).toBe(400);
+      }
+    });
+
+    it("serves a stored image to its owner and to an admin, never to another member, with the stored type and no caching", async () => {
+      const ayu = await member("ayu");
+      await savedBy(ayu, 1, "a");
+      const item = (await call("GET", "/api/gallery", ayu)).json().items[0];
+      const own = await call("GET", item.url, ayu);
+      expect(own.statusCode).toBe(200);
+      expect(own.headers["content-type"]).toBe("image/png");
+      expect(own.headers["cache-control"]).toBe("no-store");
+      expect(own.headers["content-disposition"]).toMatch(/^inline; filename="gallery-image\.png"$/);
+      expect(own.rawPayload.includes(Buffer.from("GALLERY-IMAGE-MARKER"))).toBe(true);
+      expect((await call("GET", item.url, await admin())).statusCode).toBe(200);
+      expect((await call("GET", item.url, await member("budi"))).statusCode).toBe(404);
+      expect((await call("GET", "/api/gallery/not-an-id/image", ayu)).statusCode).toBe(400);
+      expect((await call("GET", item.url.replace(/\.0\/image$/, ".7/image"), ayu)).statusCode).toBe(404);
+    });
+
+    it("deletes an own image (an admin: any), refuses another member, and is idempotent", async () => {
+      const ayu = await member("ayu");
+      await savedBy(ayu, 2, "a");
+      const items = (await call("GET", "/api/gallery", ayu)).json().items;
+      const budi = await member("budi");
+      expect((await post("/api/gallery/delete", budi, { id: items[0].id })).statusCode).toBe(404);
+      const del = await post("/api/gallery/delete", ayu, { id: items[0].id });
+      expect(del.statusCode).toBe(200);
+      expect(del.json()).toEqual({ deleted: true });
+      expect((await post("/api/gallery/delete", ayu, { id: items[0].id })).statusCode).toBe(200);
+      expect((await call("GET", items[0].url, ayu)).statusCode).toBe(404);
+      expect((await post("/api/gallery/delete", await admin(), { id: items[1].id })).statusCode).toBe(200);
+      expect((await call("GET", "/api/gallery", ayu)).json().items).toEqual([]);
+      for (const body of [{}, { id: "x" }, { id: items[0].id, extra: 1 }]) expect((await post("/api/gallery/delete", ayu, body)).statusCode).toBe(400);
+    });
+
+    it("keeps the gates: 401 without a session, 403 for role none, 403 csrf on the state-changing routes", async () => {
+      expect((await call("GET", "/api/gallery")).statusCode).toBe(401);
+      expect((await post("/api/gallery", {}, { job: "p", index: 0 })).statusCode).toBe(401);
+      const outsider = await cookieOf(["nobody"], "eve");
+      expect((await call("GET", "/api/gallery", outsider)).statusCode).toBe(403);
+      const m = await member();
+      const cross = await post("/api/gallery/delete", { cookie: m.cookie, origin: "https://evil.example.test" }, { id: "x" }); // config-lint: ok (test fixture)
+      expect(cross.statusCode).toBe(403);
+      expect(cross.json().error.code).toBe("csrf");
+    });
+  });
+});
 
 // ---- Vast account credit ----
 

@@ -45,6 +45,9 @@ export interface Job {
   /** Tailnet hostname of the instance that runs it; internal only, never sent to a client. */
   readonly hostname: string;
   readonly kind: JobKind;
+  /** What the submitter asked for and a short summary of the settings; kept so a saved image can say so. */
+  readonly prompt: string;
+  readonly label: string;
   state: JobState;
 }
 
@@ -63,7 +66,7 @@ export class JobStore {
     for (const [id, job] of this.jobs) if (t - job.createdAt >= this.ttlMs) this.jobs.delete(id);
   }
 
-  add(job: Omit<Job, "createdAt" | "state" | "kind"> & { kind?: JobKind }): Job {
+  add(job: Omit<Job, "createdAt" | "state" | "kind" | "prompt" | "label"> & { kind?: JobKind; prompt?: string; label?: string }): Job {
     this.purge();
     // Map iteration is insertion order: forget the oldest jobs first.
     while (this.jobs.size >= this.max) {
@@ -71,7 +74,7 @@ export class JobStore {
       if (oldest === undefined) break;
       this.jobs.delete(oldest);
     }
-    const stored: Job = { ...job, kind: job.kind ?? "generate", createdAt: this.now(), state: { kind: "pending" } };
+    const stored: Job = { ...job, kind: job.kind ?? "generate", prompt: job.prompt ?? "", label: job.label ?? "", createdAt: this.now(), state: { kind: "pending" } };
     this.jobs.delete(stored.id);
     this.jobs.set(stored.id, stored);
     return stored;

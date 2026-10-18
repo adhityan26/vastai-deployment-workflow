@@ -53,6 +53,13 @@ import {
   creditDue,
   formatCredit,
   parseCredit,
+  AUTOSAVE_STORAGE_KEY,
+  formatBytes,
+  formatSavedAt,
+  galleryImageUrl,
+  galleryPath,
+  isGalleryId,
+  parseGalleryPage,
   acceptTypes,
   base64FromDataUrl,
   editLabel,
@@ -545,5 +552,56 @@ describe("boot console model", () => {
     expect(bootSentence(parseConsole(payload({ phases: [{ id: "agent", name: "A", status: "pending" }] }))!)).toBeNull();
     expect(bootSentence(parseConsole(payload({ instance: { state: "none", ended: true, ended_reason: "gone" } }))!)).toBeNull();
     expect(bootSentence(null)).toBeNull();
+  });
+});
+
+describe("gallery helpers", () => {
+  const ID = `${"a".repeat(32)}.8199999999000.job-1_x.0`;
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: ID, url: `/api/gallery/${ID}/image`, created_at: 1_800_000_000, kind: "generate", prompt: "a fox", label: "preview, 1:1", owner_name: "Ayu", mine: true, size: 12345, ...over,
+  });
+
+  it("knows what a gallery id looks like", () => {
+    expect(isGalleryId(ID)).toBe(true);
+    for (const bad of ["", "x", `${ID}/..`, `../${ID}`, ID.toUpperCase(), `${ID}\n`, 5, null, `${"a".repeat(32)}.1.job.0`]) expect(isGalleryId(bad), String(bad)).toBe(false);
+  });
+
+  it("builds image urls from the id, never from server text", () => {
+    expect(galleryImageUrl(ID)).toBe(`/api/gallery/${ID}/image`);
+    expect(galleryImageUrl("../x")).toBeNull();
+  });
+
+  it("builds the list path: own images, a cursor, or everyone", () => {
+    expect(galleryPath(null, false)).toBe("/api/gallery");
+    expect(galleryPath(null, true)).toBe("/api/gallery?scope=all");
+    expect(galleryPath(ID, false)).toBe(`/api/gallery?cursor=${ID}`);
+    expect(galleryPath(ID, true)).toBe(`/api/gallery?scope=all&cursor=${ID}`);
+    expect(galleryPath("not an id", false)).toBe("/api/gallery"); // a bad cursor is dropped, not sent
+  });
+
+  it("parses a page, keeps the entries it can trust and rebuilds their urls", () => {
+    const page = parseGalleryPage({ items: [entry({ url: "https://evil.example/x.png" }), entry({ id: "bad" }), entry({ kind: "weird" }), entry({ size: "big" }), 5], next: ID });
+    expect(page).not.toBeNull();
+    expect(page!.items).toHaveLength(2);
+    expect(page!.items[0]).toEqual({ id: ID, url: `/api/gallery/${ID}/image`, createdAt: 1_800_000_000, kind: "generate", prompt: "a fox", label: "preview, 1:1", ownerName: "Ayu", mine: true, size: 12345 });
+    expect(page!.items[1]!.kind).toBe("generate"); // an unknown kind falls back instead of dropping the image
+    expect(page!.next).toBe(ID);
+    expect(parseGalleryPage({ items: [], next: null })).toEqual({ items: [], next: null });
+    expect(parseGalleryPage({ items: [], next: "junk" })!.next).toBeNull();
+    for (const bad of [null, "x", [], {}, { items: "no" }]) expect(parseGalleryPage(bad), JSON.stringify(bad)).toBeNull();
+  });
+
+  it("formats time and size", () => {
+    expect(formatSavedAt(1_800_000_000)).toBe("2027-01-15 08:00 UTC");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(2048)).toBe("2.0 KB");
+    expect(formatBytes(1_900_000)).toBe("1.8 MB");
+  });
+
+  it("reads the gallery flag from the state, off when absent or not exactly true", () => {
+    expect(parseState(base)!.gallery).toBe(false);
+    expect(parseState({ ...base, gallery: true })!.gallery).toBe(true);
+    expect(parseState({ ...base, gallery: "yes" })!.gallery).toBe(false);
+    expect(AUTOSAVE_STORAGE_KEY).toBe("vast-comfy.autosave");
   });
 });

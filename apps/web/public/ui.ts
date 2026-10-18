@@ -25,9 +25,15 @@ import {
   type ConsolePayload,
   type ConsoleView,
   DEFAULT_EXTEND_MINUTES,
+  AUTOSAVE_STORAGE_KEY,
   creditDue,
+  formatBytes,
   formatCredit,
+  formatSavedAt,
+  galleryPath,
   parseCredit,
+  parseGalleryPage,
+  type GalleryEntry,
   acceptTypes,
   base64FromDataUrl,
   editLabel,
@@ -114,6 +120,11 @@ interface HistoryEntry {
   status: "pending" | "done" | "failed";
   message: string;
   images: string[];
+  /** The server's index of each image in `images` (what Save sends). */
+  indexes: number[];
+  /** Per image: whether it was saved to the gallery. */
+  saves: ("idle" | "saving" | "saved" | "failed")[];
+  saveMessages: string[];
   node: HTMLElement;
 }
 
@@ -1008,7 +1019,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   const historyBox = $("history");
   function addEntry(id: string, prompt: string, label: string): HistoryEntry {
-    const entry: HistoryEntry = { id, prompt, label, status: "pending", message: "", images: [], node: make("article", undefined, "job") };
+    const entry: HistoryEntry = { id, prompt, label, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
     history.unshift(entry);
     historyBox.prepend(entry.node);
     $("hist-empty").hidden = true;
@@ -1037,6 +1048,19 @@ export function mountApp(doc: Document, env: Env): App {
         dl.href = src;
         dl.setAttribute("download", `image-${e.id}-${i}`);
         fig.append(img, dl);
+        if (state?.gallery === true) {
+          const st = e.saves[i] ?? "idle";
+          const save = make("button", st === "saved" ? "Saved ✓" : st === "saving" ? "Saving…" : "Save to gallery", "save");
+          save.type = "button";
+          save.disabled = st === "saving" || st === "saved";
+          save.addEventListener("click", () => void saveImage(e, i));
+          fig.append(save);
+          if (st === "failed") {
+            const note = make("p", `Not saved: ${e.saveMessages[i] ?? ""}`, "alert bad");
+            note.setAttribute("role", "alert");
+            fig.append(note);
+          }
+        }
         grid.append(fig);
       });
       kids.push(grid);
@@ -1050,7 +1074,158 @@ export function mountApp(doc: Document, env: Env): App {
     jobPending = false;
     renderEntry(e);
     if (state) renderForm(state);
+    if (status === "done" && state?.gallery === true && autosaveBox.checked) void autoSave(e);
   }
+
+  // ---- save to the gallery ----
+
+  /** Save one result image (by its position in the entry); the server fetches it from the instance. */
+  async function saveImage(e: HistoryEntry, i: number): Promise<void> {
+    const index = e.indexes[i];
+    if (index === undefined || e.saves[i] === "saving" || e.saves[i] === "saved") return;
+    e.saves[i] = "saving";
+    renderEntry(e);
+    try {
+      await call("POST", API.gallery, { job: e.id, index });
+      e.saves[i] = "saved";
+      e.saveMessages[i] = "";
+      if (galleryOpen) void loadGallery(true);
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+      e.saves[i] = "failed";
+      e.saveMessages[i] = err instanceof Error ? err.message : "the image could not be saved.";
+    }
+    renderEntry(e);
+  }
+
+  async function autoSave(e: HistoryEntry): Promise<void> {
+    for (let i = 0; i < e.indexes.length; i++) await saveImage(e, i);
+  }
+
+  const autosaveBox = $<HTMLInputElement>("autosave");
+  // The choice is a per-device preference; storage can be missing or throw.
+  function readAutosave(): boolean {
+    try {
+      return doc.defaultView?.localStorage.getItem(AUTOSAVE_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+  autosaveBox.checked = readAutosave();
+  autosaveBox.addEventListener("change", () => {
+    try {
+      doc.defaultView?.localStorage.setItem(AUTOSAVE_STORAGE_KEY, autosaveBox.checked ? "1" : "0");
+    } catch {
+      // not remembered, still honoured for this page
+    }
+  });
+
+  // ---- gallery card ----
+
+  const galleryCard = $("gallery-card");
+  const galOpenBtn = $<HTMLButtonElement>("gal-open");
+  const galList = $("gal-list");
+  const galMore = $<HTMLButtonElement>("gal-more");
+  const galEmpty = $("gal-empty");
+  const galError = $("gal-error");
+  const galAll = $<HTMLInputElement>("gal-all");
+  const galAllBox = $("gal-all-box");
+  let galleryOpen = false;
+  let galleryNext: string | null = null;
+  let galleryLoading = false;
+  let galleryEpoch = 0; // a newer load makes an older answer obsolete
+
+  function galleryItemNode(item: GalleryEntry, everyone: boolean): HTMLElement {
+    const fig = make("figure");
+    const img = make("img");
+    img.src = item.url;
+    img.alt = item.prompt === "" ? "Saved image" : `Saved image: ${item.prompt}`;
+    img.loading = "lazy";
+    const caption = [item.label, formatSavedAt(item.createdAt), formatBytes(item.size)];
+    if (everyone && !item.mine && item.ownerName !== "") caption.push(item.ownerName);
+    const dl = make("a", "Download", "dl");
+    dl.href = item.url;
+    dl.setAttribute("download", `gallery-${item.id}`);
+    const del = make("button", "Delete");
+    del.type = "button";
+    del.addEventListener("click", () => void deleteGalleryItem(item, fig));
+    fig.append(img, make("p", item.prompt, "gal-prompt"), make("p", caption.filter((c) => c !== "").join(" · "), "gal-caption"), dl, del);
+    return fig;
+  }
+
+  function updateGalleryEmpty(): void {
+    const any = galList.children.length > 0;
+    galEmpty.hidden = !galleryOpen || any || galleryLoading;
+    galList.hidden = !any;
+    galMore.hidden = galleryNext === null;
+  }
+
+  async function loadGallery(reset: boolean): Promise<void> {
+    if (!galleryOpen) return;
+    if (galleryLoading && !reset) return;
+    const epoch = ++galleryEpoch;
+    const everyone = galAll.checked && state?.role === "admin";
+    galleryLoading = true;
+    galMore.disabled = true;
+    galError.hidden = true;
+    try {
+      const page = parseGalleryPage(await call("GET", galleryPath(reset ? null : galleryNext, everyone)));
+      if (page === null) throw new ApiError("The server sent a gallery this page cannot read.");
+      if (epoch !== galleryEpoch) return;
+      if (reset) galList.replaceChildren();
+      galList.append(...page.items.map((i) => galleryItemNode(i, everyone)));
+      galleryNext = page.next;
+    } catch (err) {
+      if (err instanceof AuthLostError || epoch !== galleryEpoch) return;
+      galError.textContent = err instanceof Error ? err.message : "The gallery could not be loaded.";
+      galError.hidden = false;
+    } finally {
+      if (epoch === galleryEpoch) {
+        galleryLoading = false;
+        galMore.disabled = false;
+        updateGalleryEmpty();
+      }
+    }
+  }
+
+  async function deleteGalleryItem(item: GalleryEntry, node: HTMLElement): Promise<void> {
+    const ok = await confirmDialog("Delete this image?", ["It is removed from the gallery for good."], "Delete", true);
+    if (!ok) return;
+    try {
+      await call("POST", API.galleryDelete, { id: item.id });
+      node.remove();
+      updateGalleryEmpty();
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+      galError.textContent = err instanceof Error ? err.message : "The image could not be deleted.";
+      galError.hidden = false;
+    }
+  }
+
+  galOpenBtn.addEventListener("click", () => {
+    galleryOpen = true;
+    galOpenBtn.textContent = "Refresh";
+    galAllBox.hidden = state?.role !== "admin";
+    galleryNext = null;
+    void loadGallery(true);
+  });
+  galMore.addEventListener("click", () => void loadGallery(false));
+  galAll.addEventListener("change", () => {
+    galleryNext = null;
+    void loadGallery(true);
+  });
+
+  function renderGallery(s: ApiState): void {
+    galleryCard.hidden = !s.gallery;
+    $("autosave-box").hidden = !s.gallery;
+    if (!s.gallery) {
+      // The server turned it off: forget what was shown.
+      galleryOpen = false;
+      galList.replaceChildren();
+    }
+    galAllBox.hidden = !(galleryOpen && s.role === "admin");
+  }
+
 
   async function pollJob(e: HistoryEntry, errors: number): Promise<void> {
     if (stopped || !active) return;
@@ -1058,11 +1233,15 @@ export function mountApp(doc: Document, env: Env): App {
       const res = await call("GET", `${API.generate}/${e.id}`);
       const r = (typeof res === "object" && res !== null ? res : {}) as Record<string, unknown>;
       if (r["status"] === "done" && Array.isArray(r["images"])) {
-        e.images = r["images"].flatMap((img: unknown) => {
+        e.images = [];
+        e.indexes = [];
+        for (const img of r["images"] as unknown[]) {
           const idx = typeof img === "object" && img !== null ? (img as Record<string, unknown>)["index"] : undefined;
           const url = imageUrl(e.id, idx);
-          return url === null ? [] : [url];
-        });
+          if (url === null) continue;
+          e.images.push(url);
+          e.indexes.push(idx as number);
+        }
         return finishEntry(e, "done");
       }
       if (r["status"] === "failed") {
@@ -1342,6 +1521,7 @@ export function mountApp(doc: Document, env: Env): App {
     if (state) {
       renderStatus(state);
       renderForm(state);
+      renderGallery(state);
     }
     $("f-credit-box").hidden = !c.showAdmin;
     if (c.showAdmin) {

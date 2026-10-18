@@ -4,12 +4,14 @@ import {
   AlreadyActiveError,
   ComfyError,
   DestroyFailedError,
+  GalleryError,
   GenerateFailed,
   GenerateInputError,
   GpuNotAllowedError,
   NoActiveInstanceError,
   NoGpuConfiguredError,
   NoOffersError,
+  ObjectStoreError,
   RefusedError,
   ResponseTooLarge,
   StartError,
@@ -26,6 +28,7 @@ import {
   type GenerateDeps,
   type GenerateRequest,
   type ReferenceLimits,
+  type Viewer,
   type StartFailReason,
   type StatusView,
 } from "@vast-comfy/core";
@@ -196,6 +199,24 @@ const CONSOLE_QUERY = {
   additionalProperties: false,
   properties: { after: { type: "string", pattern: "^(0|[1-9][0-9]{0,15})$" } },
 } as const;
+// Public image id: <owner>.<time>.<job>.<index> (apps/core/src/gallery.ts).
+const GALLERY_ID = "^[0-9a-f]{32}\\.[0-9]{13}\\.[A-Za-z0-9_-]{1,128}\\.[0-9]{1,3}$";
+const GALLERY_ID_PARAMS = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", pattern: GALLERY_ID } } } as const;
+const GALLERY_SAVE_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["job", "index"],
+  properties: { job: { type: "string", pattern: PROMPT_ID.source }, index: { type: "integer", minimum: 0, maximum: 999 } },
+} as const;
+const GALLERY_DELETE_BODY = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", pattern: GALLERY_ID } } } as const;
+const GALLERY_QUERY = {
+  type: "object",
+  additionalProperties: false,
+  properties: { cursor: { type: "string", pattern: GALLERY_ID }, scope: { type: "string", enum: ["mine", "all"] } },
+} as const;
+const JOB_PROMPT_KEPT = 500;
+const JOB_LABEL_KEPT = 120;
+
 // Field values are validated by the generate service so its error codes reach the client.
 const GENERATE_BODY = {
   type: "object",
@@ -263,6 +284,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const limits: ReferenceLimits | null = editSpec !== null && editTemplate !== null ? referenceLimits(cfg) : null;
   const maxPromptChars = limits === null ? 0 : intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS");
 
+  const gallery = deps.gallery ?? null;
+
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
@@ -321,6 +344,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       role: req.role,
       presets: deps.profile.generate.qualityPresets.map((p) => ({ name: p.name, steps: p.steps })),
       sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
+      // Whether Save and the gallery are available (an object store is configured).
+      gallery: gallery !== null,
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null
@@ -517,7 +542,14 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return submitFailure(reply, err, "generate");
     }
     if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
-    jobs.add({ id: promptId, owner: identity.subject, hostname });
+    const asked = req.body as GenerateRequest;
+    jobs.add({
+      id: promptId,
+      owner: identity.subject,
+      hostname,
+      prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
+      label: `${asked.preset}, ${asked.size}`.slice(0, JOB_LABEL_KEPT),
+    });
     return reply.code(202).send({ id: promptId });
   });
 
@@ -543,7 +575,16 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return submitFailure(reply, err, "edit");
       }
       if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
-      jobs.add({ id: promptId, owner: identity.subject, hostname, kind: "edit" });
+      const asked = req.body as EditRequest;
+      const refs = Array.isArray(asked.images) ? asked.images.length : 0;
+      jobs.add({
+        id: promptId,
+        owner: identity.subject,
+        hostname,
+        kind: "edit",
+        prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
+        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}`.slice(0, JOB_LABEL_KEPT),
+      });
       return reply.code(202).send({ id: promptId });
     },
   );
@@ -588,37 +629,162 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     return { status: "pending" };
   });
 
-  app.get("/api/image/:id/:index", { ...member, schema: { params: IMAGE_PARAMS } }, async (req, reply: FastifyReply) => {
-    const { id, index } = req.params as { id: string; index: string };
+  type JobImage = { job: Job; bytes: Buffer; type: string; ext: string };
+  type Failure = { fail: { status: number; code: string; message: string } };
+  const failure = (status: number, code: string, message: string): Failure => ({ fail: { status, code, message } });
+
+  /** The bytes of one image of one of the caller's finished jobs, or the failure to report. */
+  const loadJobImage = async (
+    req: FastifyRequest,
+    id: string,
+    index: number,
+    notDone: { status: number; code: string; message: string },
+  ): Promise<JobImage | Failure> => {
     const job = ownJob(req, id);
-    if (job === null) return sendError(reply, 404, "not_found", "no such job");
-    if (job.state.kind !== "done") return sendError(reply, 404, "not_found", "no such image");
-    const image = job.state.images[Number(index)];
-    if (image === undefined) return sendError(reply, 404, "not_found", "no such image");
-    if (!(await sameInstance(job))) return sendError(reply, 410, "gone", "the instance that made this image is gone");
+    if (job === null) return failure(404, "not_found", "no such job");
+    if (job.state.kind !== "done") return { fail: notDone };
+    const image = job.state.images[index];
+    if (image === undefined) return failure(404, "not_found", "no such image");
+    if (!(await sameInstance(job))) return failure(410, "gone", "the instance that made this image is gone");
     let fetched: { bytes: Buffer; contentType: string };
     try {
       fetched = await deps.comfyFor(job.hostname).view(image.filename, image.subfolder, image.type);
     } catch (err) {
       if (err instanceof ComfyError && err.status === 0) {
         log("warn", "ComfyUI history named an unsafe image path; refused");
-        return sendError(reply, 502, "image_rejected", "the image reference was refused");
+        return failure(502, "image_rejected", "the image reference was refused");
       }
       if (err instanceof ResponseTooLarge) {
         log("warn", "image larger than WEB_IMAGE_MAX_BYTES; refused");
-        return tooLarge(reply, "image_too_large");
+        return failure(502, "image_too_large", "the instance sent a response larger than allowed");
       }
       if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
-      return sendError(reply, 502, "image_unavailable", "the image could not be fetched");
+      return failure(502, "image_unavailable", "the image could not be fetched");
     }
     const type = fetched.contentType.split(";")[0]!.trim().toLowerCase();
     const ext = IMAGE_TYPES[type];
-    if (ext === undefined) return sendError(reply, 502, "image_rejected", "ComfyUI did not return an image");
+    if (ext === undefined) return failure(502, "image_rejected", "ComfyUI did not return an image");
+    return { job, bytes: fetched.bytes, type, ext };
+  };
+
+  app.get("/api/image/:id/:index", { ...member, schema: { params: IMAGE_PARAMS } }, async (req, reply: FastifyReply) => {
+    const { id, index } = req.params as { id: string; index: string };
+    const loaded = await loadJobImage(req, id, Number(index), { status: 404, code: "not_found", message: "no such image" });
+    if ("fail" in loaded) return sendError(reply, loaded.fail.status, loaded.fail.code, loaded.fail.message);
     return reply
       .code(200)
       .header("cache-control", "no-store")
-      .header("content-disposition", `inline; filename="image-${Number(index)}.${ext}"`)
-      .type(type)
-      .send(fetched.bytes);
+      .header("content-disposition", `inline; filename="image-${Number(index)}.${loaded.ext}"`)
+      .type(loaded.type)
+      .send(loaded.bytes);
+  });
+
+  // ---- gallery: images saved to the object store (MinIO) ----
+
+  const viewerOf = (req: FastifyRequest): Viewer => ({ subject: req.identity!.subject, admin: req.role === "admin" });
+  const galleryOff = (reply: FastifyReply) => sendError(reply, 503, "gallery_unavailable", "saving to the gallery is not set up on this server");
+
+  /** The reply for a gallery or object-store failure; anything else is not ours to handle. */
+  const galleryFailure = (reply: FastifyReply, err: unknown, what: string): FastifyReply => {
+    if (err instanceof GalleryError) {
+      switch (err.code) {
+        case "invalid_id":
+          return sendError(reply, 400, "invalid_id", "not a valid image id");
+        case "invalid_input":
+          return sendError(reply, 400, "invalid_gallery_input", err.message);
+        case "forbidden":
+          return sendError(reply, 403, "forbidden", err.message);
+        case "not_found":
+          return sendError(reply, 404, "not_found", err.message);
+        case "quota_images":
+        case "quota_bytes":
+          return sendError(reply, 409, "gallery_quota", err.message);
+        case "invalid_image":
+          return sendError(reply, 502, "image_rejected", "the image could not be stored");
+      }
+    }
+    if (err instanceof ObjectStoreError) {
+      // A fixed line: the store's own text may name hosts or buckets.
+      log("warn", `gallery ${what} failed: ObjectStoreError`);
+      return sendError(reply, 502, "gallery_error", "the gallery storage could not be reached");
+    }
+    throw err;
+  };
+
+  app.post("/api/gallery", { ...member, schema: { body: GALLERY_SAVE_BODY } }, async (req, reply) => {
+    if (gallery === null) return galleryOff(reply);
+    const { job: jobId, index } = req.body as { job: string; index: number };
+    const loaded = await loadJobImage(req, jobId, index, { status: 409, code: "job_not_done", message: "the job has not finished yet" });
+    if ("fail" in loaded) return sendError(reply, loaded.fail.status, loaded.fail.code, loaded.fail.message);
+    const identity = req.identity!;
+    try {
+      const saved = await gallery.save({
+        owner: identity.subject,
+        ownerName: identity.name ?? identity.username,
+        jobId: loaded.job.id,
+        index,
+        createdMs: loaded.job.createdAt,
+        bytes: loaded.bytes,
+        contentType: loaded.type,
+        kind: loaded.job.kind,
+        prompt: loaded.job.prompt,
+        label: loaded.job.label,
+      });
+      return reply.code(saved.created ? 201 : 200).send(saved);
+    } catch (err) {
+      return galleryFailure(reply, err, "save");
+    }
+  });
+
+  app.get("/api/gallery", { ...member, schema: { querystring: GALLERY_QUERY } }, async (req, reply) => {
+    if (gallery === null) return galleryOff(reply);
+    const { cursor, scope } = req.query as { cursor?: string; scope?: "mine" | "all" };
+    try {
+      const page = await gallery.list(viewerOf(req), { scope: scope ?? "mine", ...(cursor === undefined ? {} : { cursor }) });
+      return {
+        items: page.items.map((i) => ({
+          id: i.id,
+          url: `/api/gallery/${i.id}/image`,
+          created_at: Math.floor(i.createdMs / 1000),
+          kind: i.kind,
+          prompt: i.prompt,
+          label: i.label,
+          owner_name: i.ownerName,
+          mine: i.mine,
+          size: i.size,
+        })),
+        next: page.next,
+      };
+    } catch (err) {
+      return galleryFailure(reply, err, "list");
+    }
+  });
+
+  app.get("/api/gallery/:id/image", { ...member, schema: { params: GALLERY_ID_PARAMS } }, async (req, reply) => {
+    if (gallery === null) return galleryOff(reply);
+    const { id } = req.params as { id: string };
+    try {
+      const image = await gallery.read(viewerOf(req), id);
+      const ext = IMAGE_TYPES[image.contentType] ?? "bin";
+      return reply
+        .code(200)
+        .header("cache-control", "no-store")
+        .header("content-disposition", `inline; filename="gallery-image.${ext}"`)
+        .type(image.contentType)
+        .send(image.bytes);
+    } catch (err) {
+      return galleryFailure(reply, err, "read");
+    }
+  });
+
+  app.post("/api/gallery/delete", { ...member, schema: { body: GALLERY_DELETE_BODY } }, async (req, reply) => {
+    if (gallery === null) return galleryOff(reply);
+    const { id } = req.body as { id: string };
+    try {
+      await gallery.remove(viewerOf(req), id);
+      return { deleted: true };
+    } catch (err) {
+      return galleryFailure(reply, err, "delete");
+    }
   });
 }
