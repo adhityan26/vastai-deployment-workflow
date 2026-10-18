@@ -1,6 +1,8 @@
+import { randomBytes } from "node:crypto";
 import type { ComfyClient } from "./comfy.js";
 import type { AppsConfig } from "./config.js";
-import { buildPrompt, GenerateInputError, type Profile } from "./profile.js";
+import { buildEditPrompt, buildPrompt, GenerateInputError, type Profile } from "./profile.js";
+import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
 
 export class GenerateTimeout extends Error {
   constructor(message = "generation timed out") {
@@ -52,25 +54,28 @@ function intKey(cfg: AppsConfig, key: string): number {
   return v;
 }
 
-/** Validate the request, then submit the filled workflow. Validation errors never reach ComfyUI. */
-export async function generate(deps: GenerateDeps, input: GenerateRequest): Promise<{ promptId: string }> {
-  const maxChars = intKey(deps.cfg, "generateMaxPromptChars");
+/** The prompt and seed checks shared by generate and edit; returns the seed to use. */
+function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined, input: { prompt: unknown; seed?: unknown }): number {
+  const maxChars = intKey(cfg, "generateMaxPromptChars");
   if (typeof input.prompt !== "string" || input.prompt.trim() === "") {
     throw new GenerateInputError("invalid_prompt", "prompt must be a non-empty string");
   }
   if (input.prompt.length > maxChars) {
     throw new GenerateInputError("prompt_too_long", `prompt exceeds ${maxChars} characters`);
   }
-  let seed: number;
   if (input.seed === undefined || input.seed === null) {
-    const r = (deps.random ?? Math.random)();
-    seed = Math.min(MAX_SEED, Math.max(0, Math.floor(r * (MAX_SEED + 1))));
-  } else {
-    if (typeof input.seed !== "number" || !Number.isSafeInteger(input.seed) || input.seed < 0 || input.seed > MAX_SEED) {
-      throw new GenerateInputError("invalid_seed", "seed must be an integer between 0 and 2^53-1");
-    }
-    seed = input.seed;
+    const r = (random ?? Math.random)();
+    return Math.min(MAX_SEED, Math.max(0, Math.floor(r * (MAX_SEED + 1))));
   }
+  if (typeof input.seed !== "number" || !Number.isSafeInteger(input.seed) || input.seed < 0 || input.seed > MAX_SEED) {
+    throw new GenerateInputError("invalid_seed", "seed must be an integer between 0 and 2^53-1");
+  }
+  return input.seed;
+}
+
+/** Validate the request, then submit the filled workflow. Validation errors never reach ComfyUI. */
+export async function generate(deps: GenerateDeps, input: GenerateRequest): Promise<{ promptId: string }> {
+  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
   const prompt = buildPrompt(deps.profile, deps.template, {
     prompt: input.prompt,
     preset: input.preset,
@@ -78,6 +83,60 @@ export async function generate(deps: GenerateDeps, input: GenerateRequest): Prom
     seed,
   });
   return deps.comfy.submit(prompt);
+}
+
+export interface EditDeps {
+  comfy: Pick<ComfyClient, "submit" | "uploadImage">;
+  profile: Profile;
+  /** The edit workflow template JSON from the profile (never from the request). */
+  template: unknown;
+  cfg: AppsConfig;
+  /** Uniform random in [0, 1); injectable for deterministic tests. */
+  random?: () => number;
+  /** A fresh random token for an uploaded file name; injectable for tests. */
+  newName?: () => string;
+}
+
+export interface EditRequest {
+  prompt: string;
+  /** A quality preset name (the generate presets). */
+  preset: string;
+  /** A resolution name from the profile's edit section. */
+  resolution: string;
+  seed?: number;
+  /** Base64 reference images, in order: the first one is image_1 in the prompt. */
+  images: unknown;
+}
+
+const FILE_TYPES: Record<ReferenceType, { ext: string; contentType: string }> = {
+  png: { ext: "png", contentType: "image/png" },
+  jpeg: { ext: "jpg", contentType: "image/jpeg" },
+  webp: { ext: "webp", contentType: "image/webp" },
+};
+const NAME_TOKEN_BYTES = 8;
+
+/**
+ * Validate an edit request completely (prompt, preset, resolution, every reference), then upload the
+ * references to the instance one by one under names chosen here and submit the filled edit workflow.
+ * Anything wrong with the request is a GenerateInputError raised before the first byte leaves; a
+ * failed upload (ComfyError, Unreachable, ResponseTooLarge) stops the job without submitting.
+ */
+export async function edit(deps: EditDeps, input: EditRequest): Promise<{ promptId: string }> {
+  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
+  const references = decodeReferences(input.images, referenceLimits(deps.cfg));
+  // Dry run with placeholder names: preset, resolution, edit section and workflow mismatches
+  // surface now, before anything is uploaded.
+  const fields = { prompt: input.prompt, preset: input.preset, resolution: input.resolution, seed };
+  buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: references.map((_r, i) => `check-${i}.png`) });
+
+  const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
+  const names: string[] = [];
+  for (const ref of references) {
+    const kind = FILE_TYPES[ref.type];
+    const stored = await deps.comfy.uploadImage(`edit-${token()}.${kind.ext}`, ref.bytes, kind.contentType);
+    names.push(stored.name);
+  }
+  return deps.comfy.submit(buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: names }));
 }
 
 function clipMessage(text: string): string {

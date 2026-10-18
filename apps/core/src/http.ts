@@ -62,6 +62,14 @@ export class ResponseTooLarge extends Error {
   }
 }
 
+/** A request body that is sent as is (for example a multipart form) instead of being JSON-encoded. */
+export class RawBody {
+  constructor(
+    readonly bytes: Buffer,
+    readonly contentType: string,
+  ) {}
+}
+
 export interface RequestOptions {
   /** Largest response body accepted; a larger one throws ResponseTooLarge as soon as it is seen. */
   maxBytes: number;
@@ -111,7 +119,10 @@ export async function request(
     signal: AbortSignal.any([AbortSignal.timeout(ms), abort.signal]),
     redirect: "error",
   };
-  if (body !== undefined) {
+  if (body instanceof RawBody) {
+    init.body = body.bytes as unknown as BodyInit;
+    (init.headers as Record<string, string>)["Content-Type"] = body.contentType;
+  } else if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)["Content-Type"] = "application/json";
   }

@@ -10,6 +10,7 @@ import { awaitResult, generate, GenerateFailed, GenerateTimeout, pollResult, typ
 const template = JSON.parse(readFileSync(new URL("../../../instance/workflows/qwen-image-t2i.json", import.meta.url), "utf8"));
 const profile: Profile = {
   name: "t",
+  edit: null,
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",

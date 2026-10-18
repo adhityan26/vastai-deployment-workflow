@@ -6,5 +6,6 @@ export * from "./comfy.js";
 export * from "./generate.js";
 export * from "./lifecycle.js";
 export * from "./profile.js";
+export * from "./references.js";
 export * from "./registry.js";
 export * from "./vast.js";

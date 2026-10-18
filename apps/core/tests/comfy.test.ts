@@ -208,3 +208,92 @@ describe("ComfyClient response caps", () => {
     await expect(client.history("p1")).rejects.toBeInstanceOf(ResponseTooLarge);
   });
 });
+
+describe("ComfyClient.uploadImage", () => {
+  interface Upload { method: string; url: string; contentType: string; body: Buffer }
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from([0, 1, 2, 255, 254, 13, 10, 45, 45])]);
+
+  async function fakeUpload(handler: (u: Upload, res: ServerResponse) => void, over: Record<string, unknown> = {}) {
+    const seen: Upload[] = [];
+    server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const u = { method: req.method ?? "", url: req.url ?? "", contentType: String(req.headers["content-type"] ?? ""), body: Buffer.concat(chunks) };
+        seen.push(u);
+        handler(u, res);
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as AddressInfo;
+    const cfg = { comfyPort: port, httpTimeoutSApps: 5, webImageTimeoutS: 5, webJsonMaxBytes: 4096, webImageMaxBytes: 8192, secretNames: [], ...over } as unknown as AppsConfig;
+    return { client: new ComfyClient("127.0.0.1", cfg), seen };
+  }
+
+  const ok = (name: string) => (_u: Upload, res: ServerResponse) => json(res, 200, { name, subfolder: "", type: "input" });
+
+  it("posts a multipart form with the file, type=input and overwrite=false, and returns the stored name", async () => {
+    const { client, seen } = await fakeUpload(ok("edit-ab12.png"));
+    expect(await client.uploadImage("edit-ab12.png", PNG, "image/png")).toEqual({ name: "edit-ab12.png" });
+    expect(seen).toHaveLength(1);
+    const u = seen[0]!;
+    expect(u.method).toBe("POST");
+    expect(u.url).toBe("/upload/image");
+    const boundary = /^multipart\/form-data; boundary=(.+)$/.exec(u.contentType)?.[1];
+    expect(boundary).toBeTruthy();
+    const text = u.body.toString("latin1");
+    expect(text.startsWith(`--${boundary}\r\n`)).toBe(true);
+    expect(text.endsWith(`\r\n--${boundary}--\r\n`)).toBe(true);
+    expect(text).toContain('Content-Disposition: form-data; name="image"; filename="edit-ab12.png"\r\nContent-Type: image/png\r\n\r\n');
+    expect(text).toContain('name="type"\r\n\r\ninput\r\n');
+    expect(text).toContain('name="overwrite"\r\n\r\nfalse\r\n');
+    // The file bytes travel untouched, binary content and CRLF included.
+    expect(u.body.includes(PNG)).toBe(true);
+  });
+
+  it("returns the name ComfyUI chose when it renamed the file", async () => {
+    const { client } = await fakeUpload(ok("edit-ab12-1.png"));
+    expect(await client.uploadImage("edit-ab12.png", PNG, "image/png")).toEqual({ name: "edit-ab12-1.png" });
+  });
+
+  it("refuses a file name that is not one plain name, a content type that is not an image type, and an empty file, with no request", async () => {
+    const { client, seen } = await fakeUpload(ok("x.png"));
+    for (const name of ["../x.png", "a/b.png", 'a"b.png', "a\r\nb.png", "", "a b.png", ".hidden"]) {
+      await expect(client.uploadImage(name, PNG, "image/png")).rejects.toBeInstanceOf(ComfyError);
+    }
+    await expect(client.uploadImage("x.png", PNG, "text/html")).rejects.toBeInstanceOf(ComfyError);
+    await expect(client.uploadImage("x.png", Buffer.alloc(0), "image/png")).rejects.toBeInstanceOf(ComfyError);
+    expect(seen).toHaveLength(0);
+  });
+
+  const badReplies: Record<string, (res: ServerResponse) => void> = {
+    http_error: (res) => json(res, 500, { error: "boom" }),
+    not_json: (res) => res.end("nope"),
+    no_name: (res) => json(res, 200, { subfolder: "", type: "input" }),
+    name_not_plain: (res) => json(res, 200, { name: "../../etc/passwd", subfolder: "", type: "input" }),
+    name_not_string: (res) => json(res, 200, { name: 7, subfolder: "", type: "input" }),
+    in_subfolder: (res) => json(res, 200, { name: "x.png", subfolder: "sub", type: "input" }),
+    wrong_type: (res) => json(res, 200, { name: "x.png", subfolder: "", type: "output" }),
+  };
+  it.each(Object.keys(badReplies))("treats a %s reply as a ComfyError", async (name) => {
+    const { client } = await fakeUpload((_u, res) => badReplies[name]!(res));
+    await expect(client.uploadImage("edit-ab12.png", PNG, "image/png")).rejects.toBeInstanceOf(ComfyError);
+  });
+
+  it("an unreachable instance is Unreachable, an oversized reply is ResponseTooLarge", async () => {
+    const big = await fakeUpload((_u, res) => res.end("x".repeat(5000)));
+    await expect(big.client.uploadImage("edit-ab12.png", PNG, "image/png")).rejects.toBeInstanceOf(ResponseTooLarge);
+    server?.closeAllConnections?.();
+    server?.close();
+    const dead = new ComfyClient("127.0.0.1", { comfyPort: 1, httpTimeoutSApps: 1, webImageTimeoutS: 1, webJsonMaxBytes: 4096, webImageMaxBytes: 8192, secretNames: [] } as unknown as AppsConfig);
+    await expect(dead.uploadImage("edit-ab12.png", PNG, "image/png")).rejects.toBeInstanceOf(Unreachable);
+  });
+
+  it("uses the longer image timeout, not the JSON timeout", async () => {
+    const { client } = await fakeUpload(
+      (_u, res) => setTimeout(() => json(res, 200, { name: "edit-ab12.png", subfolder: "", type: "input" }), 1300),
+      { httpTimeoutSApps: 1, webImageTimeoutS: 5 },
+    );
+    expect(await client.uploadImage("edit-ab12.png", PNG, "image/png")).toEqual({ name: "edit-ab12.png" });
+  });
+});

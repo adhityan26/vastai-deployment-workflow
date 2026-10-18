@@ -7,12 +7,12 @@ nodes:
   # leejet fork: native Qwen-Image 2.1 GGUF support (city96/ComfyUI-GGUF fails with "Unknown model architecture").
   - {repo: leejet/ComfyUI-GGUF, commit: 373048b8403a7820620065210a691263d4da0a61}
 # Node classes the nodes above must register; boot checks them via ComfyUI /object_info before `ready`.
-provides_node_classes: [UnetLoaderGGUF]
+provides_node_classes: [UnetLoaderGGUF, TextEncodeQwenImage21, QwenImage21Cache]
 models:
   - {file: qwen-image-2.1-UC-Q4_K_M.gguf, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/diffusion_models/, size_bytes: 4604558112}
   - {file: text_encoders/qwen3vl_8b_int8_convrot.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/text_encoders/, size_bytes: 9350798360}
   - {file: vae/qwen_image_2.1_vae_bf16.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/vae/, size_bytes: 675509688}
-workflows: [qwen-image-t2i.json]
+workflows: [qwen-image-t2i.json, qwen-image-edit.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
   workflow: qwen-image-t2i.json
@@ -32,3 +32,20 @@ generate:
     - {name: "4:3", width: 1152, height: 896}
     - {name: "16:9", width: 1344, height: 768}
     - {name: "9:16", width: 768, height: 1344}
+# Edit with reference images (spike S6, docs/superpowers/plans/2026-10-18-image-edit.md). The web app copies
+# workflows/qwen-image-edit.json, adds one `references.node_class` node per reference (ids `ref_1`..`ref_N`)
+# and wires each to `references.encoder.node` as `<input_prefix><k>` (k starts at 1). Quality presets are the
+# generate ones. `resolution` is the encoder's total pixel budget (not width/height); only 1024 was measured.
+edit:
+  workflow: qwen-image-edit.json
+  params:
+    prompt: {node: "6", input: prompt}
+    steps: {node: "7", input: steps}
+    seed: {node: "7", input: seed}
+    resolution: {node: "6", input: resolution}
+  references:
+    node_class: LoadImage
+    image_input: image
+    encoder: {node: "6", input_prefix: "images.image_"}
+  resolutions:
+    - {name: "1024", value: 1024}

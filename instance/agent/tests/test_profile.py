@@ -389,8 +389,11 @@ def test_invalid_provides_node_classes_are_rejected(tmp_path, value):
         load_profile(write_profile(tmp_path, PROFILE_YAML + f"provides_node_classes: {value}\n"))
 
 
-def test_the_shipped_image_profile_declares_the_gguf_loader_class():
+def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     from pathlib import Path
 
     instance = Path(__file__).resolve().parents[2]
-    assert load_profile(instance / "profiles" / "image.yaml").provides_node_classes == ("UnetLoaderGGUF",)
+    profile = load_profile(instance / "profiles" / "image.yaml")
+    # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
+    assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
+    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json")

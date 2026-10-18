@@ -4,12 +4,16 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
-import { GenerateInputError, ProfileError, buildPrompt, loadProfile } from "../src/profile.js";
+import { GenerateInputError, ProfileError, buildEditPrompt, buildPrompt, loadProfile } from "../src/profile.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const shipped = join(root, "instance/profiles/image.yaml");
 const workflowPath = join(root, "instance/workflows/qwen-image-t2i.json");
 const template = JSON.parse(readFileSync(workflowPath, "utf8")) as Record<string, { inputs: Record<string, unknown> }>;
+const editTemplate = JSON.parse(readFileSync(join(root, "instance/workflows/qwen-image-edit.json"), "utf8")) as Record<
+  string,
+  { class_type?: string; inputs: Record<string, unknown> }
+>;
 
 type Doc = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -33,7 +37,7 @@ describe("loadProfile", () => {
 
   it("still loads the shipped profile with instance-only fields such as provides_node_classes", () => {
     const doc = parse(readFileSync(shipped, "utf8")) as Doc;
-    expect(doc["provides_node_classes"]).toEqual(["UnetLoaderGGUF"]);
+    expect(doc["provides_node_classes"]).toEqual(["UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache"]);
     expect(loadProfile(shipped).generate.sizes.length).toBeGreaterThan(0);
     const extra = writeProfile((d) => (d.provides_node_classes = ["UnetLoaderGGUF", "OtherNode"]));
     expect(loadProfile(extra).name).toBe("image");
@@ -127,5 +131,95 @@ describe("buildPrompt", () => {
 
   it("rejects a workflow that lacks a mapped node", () => {
     expect(() => buildPrompt(profile, {}, input)).toThrowError(expect.objectContaining({ code: "workflow_mismatch" }));
+  });
+});
+
+describe("edit section", () => {
+  it("loads the shipped edit section and maps every node/input in its workflow", () => {
+    const edit = loadProfile(shipped).edit;
+    expect(edit).not.toBeNull();
+    expect(edit!.workflow).toBe("qwen-image-edit.json");
+    for (const ref of Object.values(edit!.params)) expect(editTemplate[ref.node]?.inputs).toHaveProperty(ref.input);
+    expect(editTemplate[edit!.references.encoderNode]?.class_type).toBe("TextEncodeQwenImage21");
+    expect(edit!.references.nodeClass).toBe("LoadImage");
+    expect(edit!.references.inputPrefix).toBe("images.image_");
+    expect(edit!.resolutions).toEqual([{ name: "1024", value: 1024 }]);
+  });
+
+  it("treats a profile without an edit section as edit-disabled", () => {
+    expect(loadProfile(writeProfile((d) => delete d.edit)).edit).toBeNull();
+  });
+
+  const bad: Record<string, (e: Doc) => void> = {
+    not_a_mapping: (e) => Object.keys(e).forEach((k) => delete e[k]),
+    missing_workflow: (e) => delete e.workflow,
+    workflow_path: (e) => (e.workflow = "../x.json"),
+    unknown_param: (e) => (e.params.cfg = { node: "7", input: "cfg" }),
+    missing_param: (e) => delete e.params.resolution,
+    missing_param_node: (e) => delete e.params.seed.node,
+    missing_references: (e) => delete e.references,
+    bad_node_class: (e) => (e.references.node_class = "Load Image;rm"),
+    missing_image_input: (e) => delete e.references.image_input,
+    missing_encoder: (e) => delete e.references.encoder,
+    bad_prefix: (e) => (e.references.encoder.input_prefix = "images image_"),
+    empty_resolutions: (e) => (e.resolutions = []),
+    resolution_zero: (e) => (e.resolutions[0].value = 0),
+    resolution_text: (e) => (e.resolutions[0].value = "1024"),
+    duplicate_resolution: (e) => e.resolutions.push({ name: "1024", value: 2048 }),
+  };
+  it.each(Object.keys(bad))("rejects %s", (name) => {
+    expect(() => loadProfile(writeProfile((doc) => bad[name]!(doc.edit)))).toThrow(ProfileError);
+  });
+});
+
+describe("buildEditPrompt", () => {
+  const profile = loadProfile(shipped);
+  const input = { prompt: "make it real", preset: "high", resolution: "1024", seed: 9, imageNames: ["edit-aa.png", "edit-bb.jpg"] };
+
+  it("adds one LoadImage per reference, wires images.image_k in order and sets only mapped inputs", () => {
+    const out = buildEditPrompt(profile, editTemplate, input);
+    const expected = structuredClone(editTemplate);
+    expected["6"]!.inputs["prompt"] = "make it real";
+    expected["6"]!.inputs["resolution"] = 1024;
+    expected["7"]!.inputs["steps"] = 40;
+    expected["7"]!.inputs["seed"] = 9;
+    expected["ref_1"] = { class_type: "LoadImage", inputs: { image: "edit-aa.png" } };
+    expected["ref_2"] = { class_type: "LoadImage", inputs: { image: "edit-bb.jpg" } };
+    expected["6"]!.inputs["images.image_1"] = ["ref_1", 0];
+    expected["6"]!.inputs["images.image_2"] = ["ref_2", 0];
+    expect(out).toEqual(expected);
+  });
+
+  it("does not mutate the template", () => {
+    const before = structuredClone(editTemplate);
+    buildEditPrompt(profile, editTemplate, input);
+    expect(editTemplate).toEqual(before);
+  });
+
+  const refused: Record<string, [Partial<typeof input>, string]> = {
+    unknown_preset: [{ preset: "ultra" }, "unknown_preset"],
+    unknown_resolution: [{ resolution: "4096" }, "unknown_resolution"],
+    empty_prompt: [{ prompt: "  " }, "invalid_prompt"],
+    negative_seed: [{ seed: -1 }, "invalid_seed"],
+    no_references: [{ imageNames: [] }, "no_references"],
+    unsafe_name: [{ imageNames: ["../x.png"] }, "invalid_reference_name"],
+    name_with_slash: [{ imageNames: ["a/b.png"] }, "invalid_reference_name"],
+  };
+  it.each(Object.keys(refused))("refuses %s", (name) => {
+    const [over, code] = refused[name]!;
+    expect(() => buildEditPrompt(profile, editTemplate, { ...input, ...over })).toThrowError(
+      expect.objectContaining({ name: "GenerateInputError", code }),
+    );
+  });
+
+  it("refuses when the profile has no edit section", () => {
+    const noEdit = loadProfile(writeProfile((d) => delete d.edit));
+    expect(() => buildEditPrompt(noEdit, editTemplate, input)).toThrowError(expect.objectContaining({ code: "edit_unavailable" }));
+  });
+
+  it("refuses a workflow that lacks a mapped node or already has a ref_ node", () => {
+    expect(() => buildEditPrompt(profile, {}, input)).toThrowError(expect.objectContaining({ code: "workflow_mismatch" }));
+    const clash = { ...structuredClone(editTemplate), ref_1: { class_type: "LoadImage", inputs: { image: "x.png" } } };
+    expect(() => buildEditPrompt(profile, clash, input)).toThrowError(expect.objectContaining({ code: "workflow_mismatch" }));
   });
 });

@@ -1,5 +1,7 @@
 import type { AppsConfig } from "./config.js";
-import { baseUrl, clip, imageTimeoutMs, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, type RawReply } from "./http.js";
+import { randomBytes } from "node:crypto";
+import { baseUrl, clip, imageTimeoutMs, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, RawBody, type RawReply } from "./http.js";
+import { isPlainFileName } from "./profile.js";
 
 export { ResponseTooLarge, Unreachable } from "./http.js";
 
@@ -22,6 +24,8 @@ export interface HistoryEntry {
 const VIEW_TYPES = ["input", "output", "temp"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
 const PROMPT_ID = /^[\w-]+$/;
+const UPLOAD_CONTENT_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const BOUNDARY_BYTES = 12;
 const SEGMENT_FORBIDDEN = /[\0\\]/;
 
 /** Reject path traversal and absolute paths in a /view file or folder name. */
@@ -91,6 +95,42 @@ export class ComfyClient {
     const reply = await this.call("GET", `/view?${q.toString()}`, undefined, this.imageMax, this.imageMs);
     if (reply.status !== 200) this.fail("view", reply);
     return { bytes: reply.body, contentType: reply.contentType };
+  }
+
+  /**
+   * Upload one reference image to ComfyUI's input folder (POST /upload/image) and return the name it
+   * stored the file under. The name we send is chosen by the caller (never by a browser) and must be
+   * a plain file name; the name in the reply is checked again before it can reach a workflow.
+   */
+  async uploadImage(name: string, bytes: Buffer, contentType: string): Promise<{ name: string }> {
+    if (!isPlainFileName(name)) throw new ComfyError(0, "upload name must be a plain file name");
+    if (!UPLOAD_CONTENT_TYPES.includes(contentType)) throw new ComfyError(0, "upload content type must be png, jpeg or webp");
+    if (bytes.length === 0) throw new ComfyError(0, "upload must not be empty");
+    const boundary = `----vastcomfy${randomBytes(BOUNDARY_BYTES).toString("hex")}`;
+    const field = (key: string, value: string) =>
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`, "latin1");
+    const body = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${name}"\r\nContent-Type: ${contentType}\r\n\r\n`,
+        "latin1",
+      ),
+      bytes,
+      Buffer.from("\r\n", "latin1"),
+      field("type", "input"),
+      field("overwrite", "false"),
+      Buffer.from(`--${boundary}--\r\n`, "latin1"),
+    ]);
+    // A megabytes-sized body over the tailnet needs the image timeout, like /view downloads.
+    const reply = await request("POST", `${this.base}/upload/image`, this.imageMs, {}, new RawBody(body, `multipart/form-data; boundary=${boundary}`), {
+      maxBytes: this.jsonMax,
+    });
+    if (reply.status !== 200) this.fail("upload", reply);
+    const parsed = parseJson(reply.body) as { name?: unknown; subfolder?: unknown; type?: unknown } | null;
+    // The reference must sit directly in input/: a subfolder or another type would need a different LoadImage value.
+    if (!parsed || !isPlainFileName(parsed.name) || parsed.subfolder !== "" || parsed.type !== "input") {
+      throw new ComfyError(reply.status, "upload: unexpected response");
+    }
+    return { name: parsed.name };
   }
 
   async queue(): Promise<{ running: unknown[]; pending: unknown[] }> {

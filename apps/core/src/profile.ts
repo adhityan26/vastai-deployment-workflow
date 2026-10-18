@@ -5,6 +5,19 @@ import { parse } from "yaml";
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
 const PARAM_KEYS = ["prompt", "steps", "width", "height", "seed"] as const;
 type ParamKey = (typeof PARAM_KEYS)[number];
+const EDIT_PARAM_KEYS = ["prompt", "steps", "seed", "resolution"] as const;
+type EditParamKey = (typeof EDIT_PARAM_KEYS)[number];
+// Plain identifiers only: these end up in a workflow graph that ComfyUI executes.
+const NODE_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
+// Names ComfyUI returns for an uploaded reference (and the ones we choose): one plain file name.
+const REFERENCE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** True for a plain, single-segment file name (what an uploaded reference is called). */
+export function isPlainFileName(value: unknown): value is string {
+  return typeof value === "string" && REFERENCE_NAME.test(value);
+}
+/** Prefix of the LoadImage node ids the web app adds to the edit workflow (ref_1 .. ref_N). */
+const REFERENCE_NODE_PREFIX = "ref_";
 
 export interface ParamRef {
   readonly node: string;
@@ -25,6 +38,26 @@ export interface GenerateSpec {
   readonly qualityPresets: readonly QualityPreset[];
   readonly sizes: readonly SizeSpec[];
 }
+export interface ResolutionSpec {
+  readonly name: string;
+  /** The encoder's total pixel budget (not width/height). */
+  readonly value: number;
+}
+export interface ReferenceSpec {
+  /** Node class added once per reference (LoadImage). */
+  readonly nodeClass: string;
+  /** Its input that takes the uploaded file name. */
+  readonly imageInput: string;
+  /** The node whose `<inputPrefix><k>` inputs receive the k-th reference (k starts at 1). */
+  readonly encoderNode: string;
+  readonly inputPrefix: string;
+}
+export interface EditSpec {
+  readonly workflow: string;
+  readonly params: Readonly<Record<EditParamKey, ParamRef>>;
+  readonly references: ReferenceSpec;
+  readonly resolutions: readonly ResolutionSpec[];
+}
 /** One model file of the profile, in download order (the instance loader owns the other fields). */
 export interface ModelSpec {
   /** As written in the profile; may include a subpath (the agent reports the basename). */
@@ -34,6 +67,8 @@ export interface ModelSpec {
 export interface Profile {
   readonly name: string;
   readonly generate: GenerateSpec;
+  /** Null when the profile has no edit section (edit with reference images is then off). */
+  readonly edit: EditSpec | null;
   readonly models: readonly ModelSpec[];
 }
 
@@ -44,6 +79,17 @@ export interface GenerateInput {
   preset: string;
   size: string;
   seed: number;
+}
+
+export interface EditInput {
+  prompt: string;
+  /** A quality preset name from the generate section. */
+  preset: string;
+  /** A resolution name from the edit section. */
+  resolution: string;
+  seed: number;
+  /** Names of the already uploaded references, in order: the first one is image_1. */
+  imageNames: readonly string[];
 }
 
 export class ProfileError extends Error {
@@ -138,6 +184,54 @@ function parseGenerate(raw: unknown): GenerateSpec {
   return { workflow, params, qualityPresets, sizes };
 }
 
+function paramRef(raw: unknown, what: string): ParamRef {
+  const ref = mapping(raw, what);
+  return { node: required(ref["node"], `${what} node`), input: required(ref["input"], `${what} input`) };
+}
+
+function parseEdit(raw: unknown): EditSpec {
+  const edit = mapping(raw, "edit");
+  const workflow = required(edit["workflow"], "edit workflow");
+  if (!WORKFLOW_NAME.test(workflow)) throw new ProfileError(`edit workflow is not a valid workflow name: ${workflow}`);
+
+  const paramsRaw = mapping(edit["params"], "edit params");
+  const unknown = Object.keys(paramsRaw).filter((k) => !(EDIT_PARAM_KEYS as readonly string[]).includes(k));
+  if (unknown.length > 0) throw new ProfileError(`edit params has unknown keys: ${unknown.sort().join(", ")}`);
+  const params = {} as Record<EditParamKey, ParamRef>;
+  for (const key of EDIT_PARAM_KEYS) {
+    if (!(key in paramsRaw)) throw new ProfileError(`edit params is missing ${key}`);
+    params[key] = paramRef(paramsRaw[key], `edit param ${key}`);
+  }
+
+  const refs = mapping(edit["references"], "edit references");
+  const nodeClass = required(refs["node_class"], "edit references node_class");
+  if (!NODE_CLASS.test(nodeClass)) throw new ProfileError(`edit references node_class is not a plain class name: ${nodeClass}`);
+  const imageInput = required(refs["image_input"], "edit references image_input");
+  if (!INPUT_NAME.test(imageInput)) throw new ProfileError(`edit references image_input is not a plain input name: ${imageInput}`);
+  const encoder = mapping(refs["encoder"], "edit references encoder");
+  const inputPrefix = required(encoder["input_prefix"], "edit references encoder input_prefix");
+  if (!INPUT_NAME.test(inputPrefix)) throw new ProfileError(`edit references encoder input_prefix is not plain: ${inputPrefix}`);
+
+  const resolutionsRaw = edit["resolutions"];
+  if (!Array.isArray(resolutionsRaw) || resolutionsRaw.length === 0) {
+    throw new ProfileError("edit resolutions must be a non-empty list");
+  }
+  const resolutions: ResolutionSpec[] = [];
+  for (const item of resolutionsRaw) {
+    const entry = mapping(item, "resolution");
+    const name = required(entry["name"], "resolution name");
+    const value = positiveInt(entry["value"], `resolution ${name} value`);
+    if (resolutions.some((r) => r.name === name)) throw new ProfileError(`duplicate resolution name '${name}'`);
+    resolutions.push({ name, value });
+  }
+  return {
+    workflow,
+    params,
+    references: { nodeClass, imageInput, encoderNode: required(encoder["node"], "edit references encoder node"), inputPrefix },
+    resolutions,
+  };
+}
+
 /** Load the parts of a profile the web app needs (name, generate, models); the rest is the instance loader's business. */
 export function loadProfile(path: string): Profile {
   try {
@@ -146,6 +240,7 @@ export function loadProfile(path: string): Profile {
     return {
       name: required(raw["name"], "name"),
       generate: parseGenerate(raw["generate"]),
+      edit: raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]),
       models: parseModels(raw["models"]),
     };
   } catch (e) {
@@ -183,5 +278,54 @@ export function buildPrompt(profile: Profile, workflowJson: unknown, input: Gene
     }
     node.inputs[ref.input] = values[key];
   }
+  return copy;
+}
+
+/**
+ * Fill the edit workflow: a deep copy with the mapped inputs set, one LoadImage node per uploaded
+ * reference (ids ref_1..ref_N) and each wired to the encoder as `<inputPrefix><k>`.
+ */
+export function buildEditPrompt(profile: Profile, workflowJson: unknown, input: EditInput): ComfyPrompt {
+  const edit = profile.edit;
+  if (edit === null) throw new GenerateInputError("edit_unavailable", "this profile has no edit section");
+  const preset = profile.generate.qualityPresets.find((p) => p.name === input.preset);
+  if (!preset) throw new GenerateInputError("unknown_preset", "unknown quality preset");
+  const resolution = edit.resolutions.find((r) => r.name === input.resolution);
+  if (!resolution) throw new GenerateInputError("unknown_resolution", "resolution is not offered by the profile");
+  if (typeof input.prompt !== "string" || input.prompt.trim() === "") {
+    throw new GenerateInputError("invalid_prompt", "prompt must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(input.seed) || input.seed < 0) {
+    throw new GenerateInputError("invalid_seed", "seed must be a non-negative integer");
+  }
+  if (input.imageNames.length === 0) throw new GenerateInputError("no_references", "at least one reference image is required");
+  if (!input.imageNames.every((n) => REFERENCE_NAME.test(n))) {
+    throw new GenerateInputError("invalid_reference_name", "a reference file name is not a plain file name");
+  }
+  const copy = structuredClone(workflowJson) as ComfyPrompt;
+  const values: Record<EditParamKey, string | number> = {
+    prompt: input.prompt,
+    steps: preset.steps,
+    seed: input.seed,
+    resolution: resolution.value,
+  };
+  for (const key of EDIT_PARAM_KEYS) {
+    const ref = edit.params[key];
+    const node = copy[ref.node];
+    if (!node || typeof node.inputs !== "object" || node.inputs === null || !(ref.input in node.inputs)) {
+      throw new GenerateInputError("workflow_mismatch", `workflow lacks node ${ref.node} input ${ref.input}`);
+    }
+    node.inputs[ref.input] = values[key];
+  }
+  const encoder = copy[edit.references.encoderNode];
+  if (!encoder || typeof encoder.inputs !== "object" || encoder.inputs === null) {
+    throw new GenerateInputError("workflow_mismatch", `workflow lacks encoder node ${edit.references.encoderNode}`);
+  }
+  input.imageNames.forEach((name, i) => {
+    const id = `${REFERENCE_NODE_PREFIX}${i + 1}`;
+    if (id in copy) throw new GenerateInputError("workflow_mismatch", `workflow already has a node ${id}`);
+    copy[id] = { class_type: edit.references.nodeClass, inputs: { [edit.references.imageInput]: name } };
+    encoder.inputs[`${edit.references.inputPrefix}${i + 1}`] = [id, 0];
+  });
   return copy;
 }
