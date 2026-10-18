@@ -23,10 +23,12 @@ services:
     stop_grace_period: 60s
     env_file: .env
     environment:
-      # Paths inside the container (not secrets). The registry and the boot console lines
-      # (masked, kept after an instance ends) live on the named volume, side by side.
+      # Paths inside the container (not secrets). The registry, the boot console lines
+      # (masked, kept after an instance ends) and the usage history live on the named volume,
+      # side by side.
       REGISTRY_PATH: /data/registry.json
       BOOT_LOG_PATH: /data/boot-console.json
+      USAGE_LOG_PATH: /data/usage-history.json
       WEB_PORT: "3000"
     # The only published port. The Cloudflare tunnel (and the LAN) reach the app here; the app
     # enforces login itself (OIDC), so there is no proxy in front of it.

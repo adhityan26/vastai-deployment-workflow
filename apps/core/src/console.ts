@@ -666,14 +666,16 @@ export interface ConsoleStoreLike {
   save(state: unknown): void;
 }
 
-/** One JSON file (BOOT_LOG_PATH), written atomically (temp file + rename, mode 600). */
-export class ConsoleStore implements ConsoleStoreLike {
+/** One JSON file, written atomically (temp file + rename, mode 600); shared by the console and the usage history. */
+export class JsonFileStore implements ConsoleStoreLike {
   constructor(
     private readonly filePath: string,
     /** A larger file is ignored on load (it cannot have been written by this code with these limits). */
     private readonly maxFileBytes: number,
+    /** The setting that names the file, for the error messages. */
+    private readonly setting: string,
   ) {
-    if (filePath === "") throw new Error("BOOT_LOG_PATH is not configured");
+    if (filePath === "") throw new Error(`${setting} is not configured`);
   }
 
   load(): unknown {
@@ -709,7 +711,7 @@ export class ConsoleStore implements ConsoleStoreLike {
 
   save(state: unknown): void {
     const text = JSON.stringify(state);
-    if (Buffer.byteLength(text, "utf8") > this.maxFileBytes) throw new Error("boot console state is larger than allowed");
+    if (Buffer.byteLength(text, "utf8") > this.maxFileBytes) throw new Error(`the ${this.setting} state is larger than allowed`);
     const dir = dirname(this.filePath);
     mkdirSync(dir, { recursive: true });
     const tmp = join(dir, `.${basename(this.filePath)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -724,6 +726,13 @@ export class ConsoleStore implements ConsoleStoreLike {
       }
       throw err;
     }
+  }
+}
+
+/** The boot console file (BOOT_LOG_PATH). */
+export class ConsoleStore extends JsonFileStore {
+  constructor(filePath: string, maxFileBytes: number) {
+    super(filePath, maxFileBytes, "BOOT_LOG_PATH");
   }
 }
 

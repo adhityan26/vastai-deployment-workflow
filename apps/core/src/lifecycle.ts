@@ -3,6 +3,7 @@ import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
+import type { StopReason, UsageHistory, UsageItem } from "./usage.js";
 import {
   ConsoleBuffer,
   logLines,
@@ -52,6 +53,13 @@ const VAST_LOADING = "loading";
 const PERCENT = 100;
 const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
 const HOST_PLACEHOLDER = "[host]";
+// Usage stop reason per web-side enforcement reason; destroy_retry keeps the reason recorded when
+// the stop began (a later end without one is inferred).
+const WATCHDOG_STOPS: Readonly<Record<string, { reason: StopReason }>> = {
+  hard_cap: { reason: "hard_cap" },
+  boot_timeout: { reason: "boot_failed" },
+  unreachable: { reason: "agent_unreachable" },
+};
 
 export class NoOffersError extends Error {
   constructor() {
@@ -161,6 +169,8 @@ export interface LifecycleDeps {
   profileModels?: readonly ModelSpec[];
   /** Where the boot console persists (BOOT_LOG_PATH); without it the console lives in memory only. */
   consoleStore?: ConsoleStoreLike;
+  /** The usage history (USAGE_LOG_PATH); without it nothing is recorded and history() is empty. */
+  usage?: UsageHistory;
 }
 
 /** GET /api/console: the boot console after `after`. Every text is masked; no hostname or token. */
@@ -525,7 +535,7 @@ export class Lifecycle {
    * (`creating`) is written before any Vast call. A definite failure marks it gone; an ambiguous
    * create failure leaves it `creating` for reconcile to resolve by its label.
    */
-  start(gpu?: string): Promise<StartResult> {
+  start(gpu?: string, by?: string | null): Promise<StartResult> {
     // Validate the model before sharing an attempt or writing anything.
     let models: string[];
     try {
@@ -534,7 +544,7 @@ export class Lifecycle {
       return Promise.reject(err);
     }
     if (this.starting) return this.starting;
-    const run = this.exclusive(() => this.doStart(models));
+    const run = this.exclusive(() => this.doStart(models, by ?? null));
     this.starting = run;
     const clear = (): void => {
       if (this.starting === run) this.starting = null;
@@ -543,7 +553,7 @@ export class Lifecycle {
     return run;
   }
 
-  private async doStart(models: readonly string[]): Promise<StartResult> {
+  private async doStart(models: readonly string[], by: string | null): Promise<StartResult> {
     const { registry, vast } = this.deps;
     const hostname = this.deps.newHostname();
     const token = this.deps.newToken();
@@ -558,10 +568,13 @@ export class Lifecycle {
     });
     // A new Start clears the console of the previous instance.
     this.withConsole((buf) => buf.reset(hostname));
+    this.withUsage((u) => u.begin(hostname, record.created_at, by));
 
     // Until create is called nothing exists on Vast: every failure marks the record gone.
     const failBeforeCreate = async (err: unknown, reason: StartFailReason): Promise<never> => {
+      this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
       await registry.markGone(record.tailnet_hostname);
+      this.endUsage(hostname);
       this.endConsole(record.tailnet_hostname, "start_failed");
       if (err instanceof NoOffersError) throw err;
       throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason);
@@ -609,13 +622,16 @@ export class Lifecycle {
       return failBeforeCreate(err, "config_invalid");
     }
     this.startedGpu = { hostname, gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null };
+    this.withUsage((u) => u.noteOffer(hostname, offer.gpu_name, offer.dph_total));
 
     let created: { id: number };
     try {
       created = await vast.createInstance(offer.id, request);
     } catch (err) {
       if (err instanceof CreateRejected) {
+        this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
         await registry.markGone(record.tailnet_hostname);
+        this.endUsage(hostname);
         this.endConsole(record.tailnet_hostname, "start_failed");
         throw new StartError(this.scrub(`Vast refused to create the instance: ${err.message}`), false, "vast_rejected");
       }
@@ -628,6 +644,7 @@ export class Lifecycle {
       );
     }
 
+    this.withUsage((u) => u.noteInstance(hostname, created.id));
     try {
       const updated = await registry.update(record.tailnet_hostname, {
         status: "booting",
@@ -638,9 +655,11 @@ export class Lifecycle {
       return { record: publicRecord(updated), estimate: this.estimateFor(offer) };
     } catch (err) {
       // The instance exists but the registry could not record it: destroy it right away.
+      this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
       const outcome = await this.vastDestroy(created.id).catch(() => null);
       if (outcome !== null) {
         await registry.markGone(record.tailnet_hostname).catch(() => undefined);
+        this.endUsage(hostname);
         this.endConsole(record.tailnet_hostname, "start_failed");
       }
       throw new StartError(
@@ -679,9 +698,12 @@ export class Lifecycle {
     record: InstanceRecord,
     id: number,
     reason: "manual" | "watchdog",
+    stop: { reason: StopReason; by?: string | null } | null,
   ): Promise<DestroyResult> {
     const { registry } = this.deps;
     this.secrets.add(record.agent_token);
+    // The reason is written before anything changes, so whoever notices the end agrees on it.
+    if (stop !== null) this.withUsage((u) => u.requestStop(record.tailnet_hostname, stop.reason, stop.by));
     let current = record;
     if (current.status !== "stopping") {
       current = await registry.update(record.tailnet_hostname, { status: "stopping", vast_instance_id: id });
@@ -701,12 +723,13 @@ export class Lifecycle {
       throw err instanceof DestroyFailedError ? err : new DestroyFailedError(error);
     }
     await registry.markGone(record.tailnet_hostname);
+    this.endUsage(record.tailnet_hostname);
     if (this.lastDestroyError?.hostname === record.tailnet_hostname) this.lastDestroyError = null;
     return { outcome, agent_error: agentError };
   }
 
-  /** Destroy the active instance. Idempotent: no active record -> outcome "none". */
-  destroy(): Promise<DestroyResult> {
+  /** Destroy the active instance (the Destroy button; `by` is the user). Idempotent: no active record -> outcome "none". */
+  destroy(by?: string | null): Promise<DestroyResult> {
     return this.exclusive(async () => {
       const record = await this.deps.registry.active();
       if (record === null) return { outcome: "none", agent_error: null };
@@ -720,11 +743,12 @@ export class Lifecycle {
           // Vast does not list it (yet). Keep the record and remember the request: reconcile
           // destroys the instance as soon as it links it by label.
           this.destroyRequested.add(record.tailnet_hostname);
+          this.withUsage((u) => u.requestStop(record.tailnet_hostname, "destroy_button", by));
           return { outcome: "pending", agent_error: null };
         }
         id = match.id;
       }
-      const result = await this.destroyRecord(record, id, "manual");
+      const result = await this.destroyRecord(record, id, "manual", { reason: "destroy_button", by });
       this.endConsole(record.tailnet_hostname, "destroyed");
       return result;
     });
@@ -839,6 +863,8 @@ export class Lifecycle {
       record !== null && this.startedGpu?.hostname === record.tailnet_hostname ? this.startedGpu.gpu_name : null;
     const progress = agent?.progress ?? null;
     this.feedConsole(consoleEpoch, record, inst, agent, instances, now);
+    if (record !== null) this.noteUsage(record, inst, agent, now);
+    await this.syncUsage(record, now);
 
     return {
       state,
@@ -863,6 +889,77 @@ export class Lifecycle {
       },
       unknown,
     };
+  }
+
+  // ---- usage history ----
+
+  /** Run `fn` on the usage history; it never makes a lifecycle operation fail. */
+  private withUsage(fn: (u: UsageHistory) => void): void {
+    const usage = this.deps.usage;
+    if (usage === undefined) return;
+    try {
+      fn(usage);
+    } catch {
+      // best effort
+    }
+  }
+
+  private endUsage(hostname: string): void {
+    this.withUsage((u) => u.end(hostname, this.now()));
+  }
+
+  /** What a status read learned about the active record's session (adopting one without an entry). */
+  private noteUsage(record: InstanceRecord, inst: VastInstance | undefined, agent: AgentStatus | null, now: number): void {
+    if (record.status === "gone") return;
+    const hostname = record.tailnet_hostname;
+    this.withUsage((u) => {
+      u.adopt(hostname, record.created_at);
+      if (record.vast_instance_id !== null) u.noteInstance(hostname, record.vast_instance_id);
+      if (inst !== undefined) u.noteDph(hostname, inst.dph_total);
+      if (agent !== null) {
+        u.observe(hostname, agent, now);
+        if (READY_STATES.has(agent.state ?? "")) u.noteReady(hostname, now);
+      }
+    });
+  }
+
+  /**
+   * Close every open entry whose registry record is gone (or missing). The open entries are taken
+   * BEFORE the registry is read: an entry is only begun after the registry wrote its record, so a
+   * read queued later always sees it, and a Start that begins meanwhile is never closed by a stale
+   * read. `active` is the record the caller just read: when it owns the only open entry nothing
+   * needs reading.
+   */
+  private async syncUsage(active: InstanceRecord | null, now: number): Promise<void> {
+    const usage = this.deps.usage;
+    if (usage === undefined) return;
+    let open: string[];
+    try {
+      open = usage.openHostnames();
+    } catch {
+      return;
+    }
+    if (open.length === 0 || (active !== null && open.every((h) => h === active.tailnet_hostname))) return;
+    let records: InstanceRecord[];
+    try {
+      records = await this.deps.registry.all();
+    } catch {
+      return; // the registry cannot be read: decide nothing
+    }
+    for (const hostname of open) {
+      const record = records.find((r) => r.tailnet_hostname === hostname);
+      if (record === undefined || record.status === "gone") this.withUsage((u) => u.end(hostname, now));
+    }
+  }
+
+  /** GET /api/history: every session, newest first; open sessions whose record is gone are closed first. */
+  async history(): Promise<UsageItem[]> {
+    if (this.deps.usage === undefined) return [];
+    const now = this.now();
+    const active = await this.deps.registry.active().catch(() => null);
+    if (active !== null) this.noteUsage(active, undefined, null, now);
+    await this.syncUsage(active, now);
+    return this.deps.usage.list(this.now());
   }
 
   // ---- boot console ----
@@ -1137,11 +1234,13 @@ export class Lifecycle {
           vast_start_date: match.start_date > 0 ? match.start_date : null,
         });
         report.linked.push({ tailnet_hostname: hostname, vast_instance_id: match.id });
+        this.withUsage((u) => u.noteInstance(hostname, match.id));
         if (this.destroyRequested.has(hostname)) {
           // The user asked to destroy it while Vast did not list it yet: do it now.
           this.destroyRequested.delete(hostname);
           try {
-            const result = await this.destroyRecord(record, match.id, "manual");
+            // The Destroy button's own request (with its user) was recorded when it was pressed.
+            const result = await this.destroyRecord(record, match.id, "manual", { reason: "destroy_button" });
             this.endConsole(hostname, "destroy_requested");
             report.destroyed.push({
               tailnet_hostname: hostname,
@@ -1164,7 +1263,9 @@ export class Lifecycle {
         }
       } else if (now - record.created_at >= grace) {
         this.destroyRequested.delete(hostname);
+        this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
         await registry.markGone(hostname);
+        this.endUsage(hostname);
         this.endConsole(hostname, "never_created");
         report.gone.push({ tailnet_hostname: hostname, reason: "never_created" });
         record = null;
@@ -1192,6 +1293,7 @@ export class Lifecycle {
         if (misses >= VANISH_CONFIRMATIONS) {
           this.vanishMisses.delete(hostname);
           await registry.markGone(hostname);
+          this.endUsage(hostname); // inferred from the last agent status seen
           this.endConsole(hostname, "vanished");
           report.gone.push({ tailnet_hostname: hostname, reason: "vanished" });
         } else {
@@ -1211,6 +1313,7 @@ export class Lifecycle {
       // unreachable timer, the safer choice for a billing instance.
       agent = null;
     }
+    this.noteUsage(record, inst, agent, now);
     const patch: Partial<Omit<InstanceRecord, "tailnet_hostname">> = {};
     if (agent !== null && READY_STATES.has(agent.state ?? "") && record.status === "booting") {
       patch.status = "ready";
@@ -1245,7 +1348,7 @@ export class Lifecycle {
     }
     if (reason === null) return report;
     try {
-      const result = await this.destroyRecord(record, id, "watchdog");
+      const result = await this.destroyRecord(record, id, "watchdog", WATCHDOG_STOPS[reason] ?? null);
       this.endConsole(hostname, reason as ConsoleEndReason);
       report.destroyed.push({
         tailnet_hostname: hostname,
