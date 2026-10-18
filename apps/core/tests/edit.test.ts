@@ -181,3 +181,59 @@ describe("edit", () => {
     expect(seen[0]!.body.toString("latin1")).not.toContain("evil");
   });
 });
+
+describe("edit with a style", () => {
+  const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+  async function styled() {
+    const { parse, stringify } = await import("yaml");
+    const doc = parse(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
+    doc.styles[0].enabled = true;
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const path = join(mkdtempSync(join(tmpdir(), "styled-")), "p.yaml");
+    writeFileSync(path, stringify(doc));
+    return loadProfile(path);
+  }
+
+  it("adds the LoRA loader to the submitted workflow with the asked strength", async () => {
+    const { deps, seen } = await fake(comfy());
+    const out = await edit({ ...deps, profile: await styled() }, request({ style: { id: "anything2real", params: { strength: 0.85 } } }));
+    expect(out.promptId).toBe("p-edit");
+    const prompt = JSON.parse(seen[seen.length - 1]!.body.toString("utf8")).prompt;
+    expect(prompt["style_lora"].inputs).toEqual({ model: ["1", 0], lora_name: LORA, strength_model: 0.85 });
+    expect(prompt["4"].inputs.model).toEqual(["style_lora", 0]);
+  });
+
+  it("uses the default strength when none is sent", async () => {
+    const { deps, seen } = await fake(comfy());
+    await edit({ ...deps, profile: await styled() }, request({ style: { id: "anything2real" } }));
+    expect(JSON.parse(seen[seen.length - 1]!.body.toString("utf8")).prompt["style_lora"].inputs.strength_model).toBe(0.7);
+  });
+
+  const refused: Record<string, [unknown, string]> = {
+    unknown: [{ id: "nope" }, "unknown_style"],
+    bad_param: [{ id: "anything2real", params: { strength: 5 } }, "invalid_style_param"],
+    stray_param: [{ id: "anything2real", params: { node: "4" } }, "unknown_style_param"],
+    not_object: ["anything2real", "invalid_style"],
+  };
+  it.each(Object.keys(refused))("refuses a bad style (%s) before anything is uploaded", async (name) => {
+    const { deps, seen } = await fake(comfy());
+    const [style, code] = refused[name]!;
+    await expect(edit({ ...deps, profile: await styled() }, request({ style }))).rejects.toMatchObject({ name: "GenerateInputError", code });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("the shipped profile (style off) refuses it as unknown", async () => {
+    const { deps, seen } = await fake(comfy());
+    await expect(edit(deps, request({ style: { id: "anything2real" } }))).rejects.toMatchObject({ code: "unknown_style" });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("without a style the workflow has no LoRA loader", async () => {
+    const { deps, seen } = await fake(comfy());
+    await edit({ ...deps, profile: await styled() }, request());
+    expect(JSON.parse(seen[seen.length - 1]!.body.toString("utf8")).prompt["style_lora"]).toBeUndefined();
+  });
+});

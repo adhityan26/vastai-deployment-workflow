@@ -32,7 +32,7 @@ export interface GalleryLimits {
   maxImageBytes: number;
 }
 
-export type GalleryKind = "generate" | "edit";
+export type GalleryKind = "generate" | "edit" | "upscale";
 
 export interface Viewer {
   subject: string;

@@ -223,3 +223,60 @@ describe("buildEditPrompt", () => {
     expect(() => buildEditPrompt(profile, clash, input)).toThrowError(expect.objectContaining({ code: "workflow_mismatch" }));
   });
 });
+
+describe("styles in the profile", () => {
+  const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+  const loraModel = { file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 123456 };
+  const enable = (doc: Doc) => {
+    doc.models.push(loraModel);
+    doc.styles[0].enabled = true;
+  };
+
+  it("the shipped profile declares Anything to Real but keeps it off until its LoRA is pinned", () => {
+    const doc = parse(readFileSync(shipped, "utf8")) as Doc;
+    expect(doc.styles[0].id).toBe("anything2real");
+    expect(doc.styles[0].enabled).toBe(false);
+    expect(loadProfile(shipped).styles).toEqual([]);
+    // no LoRA among the models: nothing for the agent to download
+    expect(loadProfile(shipped).models.map((m) => m.file)).not.toContain(LORA);
+  });
+
+  it("turning the style on (model entry added, enabled true) offers it and counts its download", () => {
+    const profile = loadProfile(writeProfile(enable));
+    expect(profile.styles.map((s) => s.id)).toEqual(["anything2real"]);
+    expect(profile.models.map((m) => m.file)).toContain(LORA);
+  });
+
+  it("enabling it without the model entry is refused at load", () => {
+    expect(() => loadProfile(writeProfile((d) => (d.styles[0].enabled = true)))).toThrow(ProfileError);
+  });
+
+  it("the shipped lora placement fits both shipped workflows", () => {
+    const profile = loadProfile(writeProfile(enable));
+    const style = profile.styles[0]!;
+    for (const [workflow, mode] of [[template, "generate"], [editTemplate, "edit"]] as const) {
+      const copy = structuredClone(workflow) as Record<string, { inputs: Record<string, unknown> }>;
+      expect(copy[style.lora.modelFrom]).toBeDefined();
+      expect(copy[style.lora.modelTo.node]!.inputs[style.lora.modelTo.input]).toEqual([style.lora.modelFrom, 0]);
+      void mode;
+    }
+  });
+
+  it("buildEditPrompt inserts the LoRA loader into the edit workflow", () => {
+    const profile = loadProfile(writeProfile(enable));
+    const style = { style: profile.styles[0]!, values: { strength: 0.8 } };
+    const out = buildEditPrompt(profile, editTemplate, { prompt: "x", preset: "preview", resolution: "1024", seed: 1, imageNames: ["a.png"], style });
+    expect(out["style_lora"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: LORA, strength_model: 0.8 } });
+    expect(out["4"]!.inputs["model"]).toEqual(["style_lora", 0]);
+    const plain = buildEditPrompt(profile, editTemplate, { prompt: "x", preset: "preview", resolution: "1024", seed: 1, imageNames: ["a.png"] });
+    expect(plain["style_lora"]).toBeUndefined();
+  });
+
+  it("buildPrompt inserts it into the generate workflow too when a style is given", () => {
+    const profile = loadProfile(writeProfile(enable));
+    const style = { style: profile.styles[0]!, values: { strength: 0.6 } };
+    const out = buildPrompt(profile, template, { prompt: "x", preset: "preview", size: "1:1", seed: 1, style });
+    expect(out["style_lora"]!.inputs["strength_model"]).toBe(0.6);
+    expect(out["4"]!.inputs["model"]).toEqual(["style_lora", 0]);
+  });
+});

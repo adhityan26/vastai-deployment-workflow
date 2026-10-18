@@ -67,6 +67,15 @@ import {
   pickReferences,
   referenceHint,
   type EditInfo,
+  isChainableUrl,
+  upscaleAsEdit,
+  upscaleHint,
+  upscaleLabel,
+  snapToStep,
+  styleDefaults,
+  styleRequest,
+  stylesForMode,
+  type StyleInfo,
 } from "../../public/model.js";
 
 const base = {
@@ -603,5 +612,85 @@ describe("gallery helpers", () => {
     expect(parseState({ ...base, gallery: true })!.gallery).toBe(true);
     expect(parseState({ ...base, gallery: "yes" })!.gallery).toBe(false);
     expect(AUTOSAVE_STORAGE_KEY).toBe("vast-comfy.autosave");
+  });
+});
+
+describe("styles from the state", () => {
+  const strength = { id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 };
+  const style = { id: "anything2real", title: "Anything to Real", modes: ["edit"], params: [strength] };
+
+  it("is an empty list when the server sends none or something unusable", () => {
+    expect(parseState(base)!.styles).toEqual([]);
+    expect(parseState({ ...base, styles: "x" })!.styles).toEqual([]);
+    expect(parseState({ ...base, styles: [style] })!.styles).toEqual([style]);
+  });
+
+  it("leaves out a style whose panel cannot be drawn faithfully, keeps the others", () => {
+    const bad: unknown[] = [
+      { ...style, id: "" },
+      { ...style, modes: ["upscale"] },
+      { ...style, modes: "edit" },
+      { ...style, params: [{ ...strength, type: "text" }] },
+      { ...style, params: [{ ...strength, step: 0 }] },
+      { ...style, params: [{ ...strength, min: 2 }] },
+      { ...style, params: [{ ...strength, default: 5 }] },
+      { ...style, params: [{ id: "c", title: "C", type: "choice", choices: ["a"], default: "b" }] },
+      { ...style, params: [{ id: "c", title: "C", type: "choice", choices: [], default: "" }] },
+      { ...style, params: [{ id: "b", title: "B", type: "bool", default: "yes" }] },
+      null,
+    ];
+    for (const b of bad) expect(parseState({ ...base, styles: [b, { ...style, id: "ok" }] })!.styles.map((x) => x.id), JSON.stringify(b)).toEqual(["ok"]);
+  });
+
+  it("lists the styles of a mode, with defaults, and builds the request", () => {
+    const all = parseState({ ...base, styles: [style, { id: "both", title: "Both", modes: ["generate", "edit"], params: [{ id: "on", title: "On", type: "bool", default: true }] }] })!.styles;
+    expect(stylesForMode(all, "generate").map((x) => x.id)).toEqual(["both"]);
+    expect(stylesForMode(all, "edit").map((x) => x.id)).toEqual(["anything2real", "both"]);
+    const a = all[0] as StyleInfo;
+    expect(styleDefaults(a)).toEqual({ strength: 0.7 });
+    expect(styleRequest(null, {})).toBeUndefined();
+    expect(styleRequest(a, { strength: 0.8 })).toEqual({ id: "anything2real", params: { strength: 0.8 } });
+    expect(styleRequest(a, {})).toEqual({ id: "anything2real", params: { strength: 0.7 } });
+  });
+
+  it("snaps slider values onto the grid and inside the limits", () => {
+    const p = parseState({ ...base, styles: [style] })!.styles[0]!.params[0]!;
+    expect(snapToStep(p, 0.7000000000000001)).toBe(0.7);
+    expect(snapToStep(p, 0.62)).toBe(0.6);
+    expect(snapToStep(p, 5)).toBe(1);
+    expect(snapToStep(p, -3)).toBe(0.4);
+    expect(snapToStep(p, Number.NaN)).toBe(0.7);
+  });
+
+  it("chains only our own result paths", () => {
+    expect(isChainableUrl("/api/image/abc_1-2/0")).toBe(true);
+    for (const u of ["https://evil.example/api/image/a/0", "//evil.example/x", "/api/image/a/../0", "/api/image/a/0?x=1", "/api/other/a/0", "data:image/png;base64,AA"]) {
+      expect(isChainableUrl(u), u).toBe(false);
+    }
+  });
+});
+
+describe("upscale info from the state", () => {
+  const up = { scales: ["2x", "4x"], max_bytes: 8_388_608, max_pixels: 16_777_216, types: ["png", "jpeg"] };
+
+  it("is null when absent or unusable, kept when valid", () => {
+    expect(parseState(base)!.upscale).toBeNull();
+    const bad: unknown[] = ["yes", { ...up, scales: [] }, { ...up, scales: [""] }, { ...up, scales: "2x" }, { ...up, max_bytes: 0 }, { ...up, max_pixels: 1.5 }, { ...up, types: ["gif"] }, { ...up, types: [] }];
+    for (const b of bad) expect(parseState({ ...base, upscale: b })!.upscale, JSON.stringify(b)).toBeNull();
+    expect(parseState({ ...base, upscale: up })!.upscale).toEqual(up);
+  });
+
+  it("canUpscale needs a ready instance, the section and no pending job", () => {
+    const s = (state: string) => parseState({ ...base, state, upscale: up })!;
+    expect(controls(s("ready"), false, false).canUpscale).toBe(true);
+    expect(controls(s("booting"), false, false).canUpscale).toBe(false);
+    expect(controls(s("ready"), false, true).canUpscale).toBe(false);
+    expect(controls(parseState({ ...base, state: "ready" })!, false, false).canUpscale).toBe(false);
+  });
+
+  it("takes one image under the server limits", () => {
+    expect(upscaleAsEdit(up)).toMatchObject({ max_references: 1, max_bytes: 8_388_608, types: ["png", "jpeg"] });
+    expect(upscaleHint(up)).toBe("One image (PNG, JPEG), 8.0 MB at most. The result size is limited by the server.");
+    expect(upscaleLabel("2x")).toBe("Upscale: 2x");
   });
 });

@@ -78,6 +78,10 @@ async function main(): Promise<void> {
   const gallery =
     str(cfg, "galleryS3Endpoint") === "" ? undefined : new Gallery(new S3ObjectStore(cfg), galleryLimits(cfg));
   if (gallery === undefined) log("info", "GALLERY_S3_ENDPOINT is empty: Save and the gallery are off");
+  // Upscale likewise: only with an enabled upscale section, and its workflow must load.
+  const upscaleTemplate: unknown = profile.upscale
+    ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.upscale.workflow), "utf8"))
+    : null;
 
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
@@ -157,6 +161,7 @@ async function main(): Promise<void> {
     profile,
     template,
     editTemplate,
+    upscaleTemplate,
     credit: () => vast.accountCredit(),
     gallery,
     login: { configured: auth.configured, oidc, sessions },

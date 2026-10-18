@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { ComfyClient } from "./comfy.js";
 import type { AppsConfig } from "./config.js";
 import { buildEditPrompt, buildPrompt, GenerateInputError, type Profile } from "./profile.js";
+import { buildUpscalePrompt } from "./upscale.js";
+import { resolveStyle } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
 
 export class GenerateTimeout extends Error {
@@ -36,6 +38,8 @@ export interface GenerateRequest {
   preset: string;
   size: string;
   seed?: number;
+  /** Optional `{id, params}` of one of the profile's styles; checked against the profile. */
+  style?: unknown;
 }
 
 export interface ResultImage {
@@ -76,11 +80,13 @@ function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined,
 /** Validate the request, then submit the filled workflow. Validation errors never reach ComfyUI. */
 export async function generate(deps: GenerateDeps, input: GenerateRequest): Promise<{ promptId: string }> {
   const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
+  const style = resolveStyle(deps.profile.styles, "generate", input.style);
   const prompt = buildPrompt(deps.profile, deps.template, {
     prompt: input.prompt,
     preset: input.preset,
     size: input.size,
     seed,
+    style,
   });
   return deps.comfy.submit(prompt);
 }
@@ -106,6 +112,8 @@ export interface EditRequest {
   seed?: number;
   /** Base64 reference images, in order: the first one is image_1 in the prompt. */
   images: unknown;
+  /** Optional `{id, params}` of one of the profile's styles; checked against the profile. */
+  style?: unknown;
 }
 
 const FILE_TYPES: Record<ReferenceType, { ext: string; contentType: string }> = {
@@ -126,7 +134,8 @@ export async function edit(deps: EditDeps, input: EditRequest): Promise<{ prompt
   const references = decodeReferences(input.images, referenceLimits(deps.cfg));
   // Dry run with placeholder names: preset, resolution, edit section and workflow mismatches
   // surface now, before anything is uploaded.
-  const fields = { prompt: input.prompt, preset: input.preset, resolution: input.resolution, seed };
+  const style = resolveStyle(deps.profile.styles, "edit", input.style);
+  const fields = { prompt: input.prompt, preset: input.preset, resolution: input.resolution, seed, style };
   buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: references.map((_r, i) => `check-${i}.png`) });
 
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
@@ -137,6 +146,46 @@ export async function edit(deps: EditDeps, input: EditRequest): Promise<{ prompt
     names.push(stored.name);
   }
   return deps.comfy.submit(buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: names }));
+}
+
+export interface UpscaleDeps {
+  comfy: Pick<ComfyClient, "submit" | "uploadImage">;
+  profile: Profile;
+  /** The upscale workflow template JSON from the profile (never from the request). */
+  template: unknown;
+  cfg: AppsConfig;
+  newName?: () => string;
+}
+
+export interface UpscaleRequest {
+  /** One base64 image. */
+  image: unknown;
+  /** A scale name from the profile's upscale section. */
+  scale: unknown;
+}
+
+/**
+ * Validate an upscale request (the image like a reference, the scale against the profile, the output
+ * size against UPSCALE_MAX_OUTPUT_PIXELS), upload the image and submit the filled workflow. Nothing
+ * leaves for the instance before every check has passed.
+ */
+export async function upscale(deps: UpscaleDeps, input: UpscaleRequest): Promise<{ promptId: string }> {
+  const spec = deps.profile.upscale;
+  if (spec === null) throw new GenerateInputError("upscale_unavailable", "this profile has no upscale section");
+  if (typeof input.scale !== "string") throw new GenerateInputError("unknown_scale", "scale is not offered by the profile");
+  const option = spec.scales.find((s) => s.name === input.scale);
+  if (!option) throw new GenerateInputError("unknown_scale", "scale is not offered by the profile");
+  const [image] = decodeReferences(typeof input.image === "string" ? [input.image] : null, referenceLimits(deps.cfg));
+  const maxOut = deps.cfg["upscaleMaxOutputPixels"];
+  if (typeof maxOut !== "number" || !Number.isInteger(maxOut) || maxOut < 1) throw new Error("UPSCALE_MAX_OUTPUT_PIXELS must be a positive integer");
+  if (image!.width * image!.height * option.factor * option.factor > maxOut) {
+    throw new GenerateInputError("upscale_too_large", `the result would have more than ${maxOut} pixels`);
+  }
+  buildUpscalePrompt(spec, deps.template, "check-0.png", option.name); // template mismatch surfaces before the upload
+  const kind = FILE_TYPES[image!.type];
+  const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
+  const stored = await deps.comfy.uploadImage(`upscale-${token()}.${kind.ext}`, image!.bytes, kind.contentType);
+  return deps.comfy.submit(buildUpscalePrompt(spec, deps.template, stored.name, option.name));
 }
 
 function clipMessage(text: string): string {

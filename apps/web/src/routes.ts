@@ -18,6 +18,9 @@ import {
   StartError,
   Unreachable,
   edit as runEdit,
+  upscale as runUpscale,
+  type UpscaleDeps,
+  type UpscaleRequest,
   generate,
   labelHostname,
   pollResult,
@@ -243,7 +246,7 @@ const GENERATE_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "size"],
-  properties: { prompt: {}, preset: {}, size: {}, seed: {} },
+  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {} },
 } as const;
 
 // Edit: the references travel as base64 text in the JSON body (so every gate for JSON bodies applies
@@ -252,7 +255,14 @@ const EDIT_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "resolution", "images"],
-  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" } },
+  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {} },
+} as const;
+// Upscale: one base64 image and a scale name; the service validates both and has the error codes.
+const UPSCALE_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["image", "scale"],
+  properties: { image: {}, scale: {} },
 } as const;
 // JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
 const EDIT_JSON_OVERHEAD = 8;
@@ -306,11 +316,21 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const maxPromptChars = limits === null ? 0 : intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS");
 
   const gallery = deps.gallery ?? null;
+  // Upscale is on only when the profile has an enabled upscale section AND its template was loaded.
+  const upscaleSpec = deps.profile.upscale;
+  const upscaleTemplate = deps.upscaleTemplate ?? null;
+  const upscaleLimits: ReferenceLimits | null = upscaleSpec !== null && upscaleTemplate !== null ? referenceLimits(cfg) : null;
 
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
-    template: kind === "edit" ? editTemplate : deps.template,
+    template: kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : deps.template,
+    cfg,
+  });
+  const upscaleDeps = (hostname: string): UpscaleDeps => ({
+    comfy: deps.comfyFor(hostname),
+    profile: deps.profile,
+    template: upscaleTemplate,
     cfg,
   });
   const editDeps = (hostname: string): EditDeps => ({
@@ -320,6 +340,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     cfg,
   });
 
+  /** ", <style title>" for the label of a job that ran with a style (it was validated before submit). */
+  const styleSuffix = (style: unknown): string => {
+    const id = typeof style === "object" && style !== null ? (style as { id?: unknown }).id : undefined;
+    const found = deps.profile.styles.find((st) => st.id === id);
+    return found ? `, ${found.title}` : "";
+  };
+
   /** The reply for a job that could not be submitted (shared by generate and edit). */
   const submitFailure = (reply: FastifyReply, err: unknown, what: string): FastifyReply => {
     if (err instanceof GenerateInputError) {
@@ -327,6 +354,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         log("error", "the profile does not match its workflow template");
         return sendError(reply, 500, "profile_mismatch", "the server profile is misconfigured");
       }
+      if (err.code === "upscale_unavailable") return sendError(reply, 404, "upscale_unavailable", "upscale is not available on this server");
       if (err.code === "edit_unavailable") return sendError(reply, 404, "edit_unavailable", "image edit is not available on this server");
       return sendError(reply, 400, err.code, err.message);
     }
@@ -367,6 +395,33 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
       // Whether Save and the gallery are available (an object store is configured).
       gallery: gallery !== null,
+      // The enabled styles with the limits the page needs to draw their panels. Never the LoRA file
+      // name, the workflow nodes or where a value goes.
+      styles: deps.profile.styles.map((st) => ({
+        id: st.id,
+        title: st.title,
+        modes: [...st.modes],
+        params: st.params.map((p) => ({
+          id: p.id,
+          title: p.title,
+          type: p.type,
+          ...(p.min === undefined ? {} : { min: p.min }),
+          ...(p.max === undefined ? {} : { max: p.max }),
+          ...(p.step === undefined ? {} : { step: p.step }),
+          ...(p.choices === undefined ? {} : { choices: [...p.choices] }),
+          default: p.default,
+        })),
+      })),
+      // Upscale for the page: the scale names and the image limits; null when upscale is off here.
+      upscale:
+        upscaleLimits === null || upscaleSpec === null
+          ? null
+          : {
+              scales: upscaleSpec.scales.map((sc) => sc.name),
+              max_bytes: upscaleLimits.maxBytes,
+              max_pixels: upscaleLimits.maxPixels,
+              types: [...upscaleLimits.types],
+            },
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null
@@ -616,6 +671,32 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
         label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}`.slice(0, JOB_LABEL_KEPT),
       });
+      return reply.code(202).send({ id: promptId });
+    },
+  );
+
+  app.post(
+    "/api/upscale",
+    { ...member, schema: { body: UPSCALE_BODY }, ...(upscaleLimits === null ? {} : { bodyLimit: editBodyLimit({ ...upscaleLimits, maxCount: 1 }, 0) }) },
+    async (req, reply) => {
+      const identity = req.identity!;
+      if (upscaleLimits === null) return sendError(reply, 404, "upscale_unavailable", "upscale is not available on this server");
+      const view = await deps.lifecycle.view();
+      const hostname = view.record?.tailnet_hostname;
+      if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
+        return sendError(reply, 409, "not_ready", "the instance is not ready");
+      }
+      if (!generateLimiter.take(identity.subject)) {
+        return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
+      }
+      let promptId: string;
+      try {
+        ({ promptId } = await runUpscale(upscaleDeps(hostname), req.body as UpscaleRequest));
+      } catch (err) {
+        return submitFailure(reply, err, "upscale");
+      }
+      if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      jobs.add({ id: promptId, owner: identity.subject, hostname, kind: "upscale" });
       return reply.code(202).send({ id: promptId });
     },
   );

@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeJwt } from "jose";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import {
   AgentClient,
@@ -39,6 +40,7 @@ const STATUS_SCHEMA = repo("contracts/status.schema.json");
 const OPENAPI = repo("contracts/web.openapi.json");
 const profile = loadProfile(repo("instance/profiles/image.yaml"));
 const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.generate.workflow}`), "utf8"));
+const upscaleTemplate = JSON.parse(readFileSync(repo("instance/workflows/image-upscale.json"), "utf8"));
 const editTemplate = JSON.parse(readFileSync(repo(`instance/workflows/${profile.edit!.workflow}`), "utf8"));
 
 const PUBLIC_ORIGIN = "https://comfy.example.test"; // config-lint: ok (test fixture)
@@ -305,6 +307,7 @@ async function harness(
     editReferenceMaxPixels: 1_000_000,
     editReferenceMaxSide: 8192,
     editReferenceTypes: ["png", "jpeg", "webp"],
+    upscaleMaxOutputPixels: 100_000,
     bootLogMaxLines: 500,
     bootLogMaxLineChars: 400,
     bootLogPollMinS: 5,
@@ -354,6 +357,7 @@ async function harness(
     comfyFor: () => new ComfyClient("127.0.0.1", cfg),
     profile: opts.profile ?? profile,
     template,
+    upscaleTemplate: opts.profile?.upscale ? upscaleTemplate : null,
     editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     credit,
     gallery,
@@ -2180,3 +2184,164 @@ function newFilesWith(before: Map<string, number>, roots: string[], marker: Buff
   }
   return hits;
 }
+
+// ---- styles ----
+
+describe("styles", () => {
+  const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+
+  /** The shipped profile with the Anything to Real style switched on (its LoRA among the models). */
+  function styledProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
+    doc.styles[0].enabled = true;
+    mutate?.(doc);
+    const dir = mkdtempSync(join(tmpdir(), "styled-profile-"));
+    tempDirs.push(dir);
+    const path = join(dir, "image.yaml");
+    writeFileSync(path, stringifyYaml(doc));
+    return loadProfile(path);
+  }
+
+  const asked = { style: { id: "anything2real", params: { strength: 0.85 } } };
+
+  it("lists the enabled styles in /api/state with their limits, and nothing about the LoRA file or the workflow nodes", async () => {
+    h = await harness({ profile: styledProfile() });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.styles).toEqual([
+      {
+        id: "anything2real",
+        title: "Anything to Real",
+        modes: ["edit"],
+        params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 }],
+      },
+    ]);
+    const text = JSON.stringify(body.styles);
+    for (const secret of [LORA, "model_from", "model_to", "lora", "target", "\"4\""]) expect(text).not.toContain(secret);
+  });
+
+  it("the shipped profile has the style off, so state.styles is empty and the style is refused as unknown", async () => {
+    const m = await member();
+    expect((await call("GET", "/api/state", m)).json().styles).toEqual([]);
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", m, { ...okEdit, style: { id: "anything2real" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("unknown_style");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("an edit with a style submits the workflow with the LoRA loader at the asked strength", async () => {
+    h = await harness({ profile: styledProfile() });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, ...asked });
+    expect(res.statusCode).toBe(202);
+    const sent = JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+    expect(sent["style_lora"].inputs).toEqual({ model: ["1", 0], lora_name: LORA, strength_model: 0.85 });
+    expect(sent["4"].inputs.model).toEqual(["style_lora", 0]);
+  });
+
+  const bad: [string, "edit" | "generate", unknown, string][] = [
+    ["an unknown style", "edit", { id: "nope" }, "unknown_style"],
+    ["an edit-only style in generate", "generate", { id: "anything2real" }, "style_not_for_mode"],
+    ["a strength out of range", "edit", { id: "anything2real", params: { strength: 3 } }, "invalid_style_param"],
+    ["a strength off its step", "edit", { id: "anything2real", params: { strength: 0.72 } }, "invalid_style_param"],
+    ["a text strength", "edit", { id: "anything2real", params: { strength: "0.7" } }, "invalid_style_param"],
+    ["a param the style does not have", "edit", { id: "anything2real", params: { node: "4" } }, "unknown_style_param"],
+    ["a style that is not an object", "edit", "anything2real", "invalid_style"],
+    ["extra keys in the style", "edit", { id: "anything2real", lora: "x.safetensors" }, "invalid_style"],
+  ];
+  it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_name, mode, style, code) => {
+    h = await harness({ profile: styledProfile() });
+    h.setComfy(comfyEdit());
+    const m = await member();
+    const res = mode === "edit" ? await post("/api/edit", m, { ...okEdit, style }) : await post("/api/generate", m, { ...okGen, style });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("500 profile_mismatch when the workflow does not have the nodes the style names", async () => {
+    h = await harness({ profile: styledProfile((d) => (d.styles[0].lora.model_to.node = "99")) });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, ...asked });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("profile_mismatch");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+});
+
+describe("upscale", () => {
+  const MODEL = "4x-test.pth";
+  function upscaleProfile(): typeof profile {
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.models.push({ file: MODEL, repo: "org/up", revision: "a".repeat(40), dest: "models/upscale_models/", size_bytes: 1000 });
+    doc.upscale.enabled = true;
+    doc.upscale.model = MODEL;
+    const dir = mkdtempSync(join(tmpdir(), "upscale-profile-"));
+    tempDirs.push(dir);
+    const path = join(dir, "image.yaml");
+    writeFileSync(path, stringifyYaml(doc));
+    return loadProfile(path);
+  }
+  const small = pngOf(100, 100, "UP").toString("base64");
+  const ok = { image: small, scale: "2x" };
+  /** The edit fake already stores uploads and accepts prompts; the upscale workflow saves through node 5. */
+  const comfyUp = (images: unknown[] | null = null): Handler => {
+    const base = comfyEdit(images);
+    return (s, res) => (s.url.startsWith("/history/") && images ? json(res, 200, { [s.url.split("/")[2]!]: { outputs: { "5": { images } }, status: { completed: true, status_str: "success" } } }) : base(s, res));
+  };
+
+  it("is off by default: state.upscale is null and POST /api/upscale is 404 with nothing sent", async () => {
+    const m = await member();
+    expect((await call("GET", "/api/state", m)).json().upscale).toBeNull();
+    h.setComfy(comfyUp());
+    const res = await post("/api/upscale", m, ok);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("upscale_unavailable");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("lists the scale names and image limits only, when enabled", async () => {
+    h = await harness({ profile: upscaleProfile() });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.upscale).toEqual({ scales: ["2x", "4x"], max_bytes: 4096, max_pixels: 1_000_000, types: ["png", "jpeg", "webp"] });
+    expect(JSON.stringify(body.upscale)).not.toContain(MODEL);
+  });
+
+  it("uploads the image and submits the filled workflow, then serves the job through the generate poll", async () => {
+    h = await harness({ profile: upscaleProfile() });
+    h.setComfy(comfyUp([{ filename: "upscale_00001_.png", subfolder: "", type: "output" }]));
+    const m = await member();
+    const res = await post("/api/upscale", m, ok);
+    expect(res.statusCode).toBe(202);
+    const prompt = JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+    expect(prompt["2"].inputs.model_name).toBe(MODEL);
+    expect(prompt["4"].inputs.scale_by).toBe(0.5);
+    expect(prompt["1"].inputs.image).toMatch(/^upscale-[0-9a-f]+\.png$/);
+    const poll = await call("GET", `/api/generate/${res.json().id}`, m);
+    expect(poll.json().status).toBe("done");
+  });
+
+  const bad: [string, unknown, number, string][] = [
+    ["an unknown scale", { ...ok, scale: "8x" }, 400, "unknown_scale"],
+    ["a result over the pixel limit", { image: pngOf(300, 300, "BIG").toString("base64"), scale: "2x" }, 400, "upscale_too_large"],
+    ["text that is not an image", { image: Buffer.from("hello").toString("base64"), scale: "2x" }, 400, "invalid_reference"],
+    ["a missing scale", { image: small }, 400, "invalid_body"],
+    ["an extra key", { ...ok, model: "x.pth" }, 400, "invalid_body"],
+  ];
+  it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_n, body, status, code) => {
+    h = await harness({ profile: upscaleProfile() });
+    h.setComfy(comfyUp());
+    const res = await post("/api/upscale", await member(), body);
+    expect(res.statusCode).toBe(status);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("needs a session and a ready instance", async () => {
+    h = await harness({ profile: upscaleProfile() });
+    expect((await post("/api/upscale", {}, ok)).statusCode).toBe(401);
+    h = await harness({ profile: upscaleProfile(), ready: false });
+    expect((await post("/api/upscale", await member(), ok)).statusCode).toBe(409);
+  });
+});

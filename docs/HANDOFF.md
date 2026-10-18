@@ -30,6 +30,14 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
 2. **Styles with sub-menus, Anything to Real LoRA, chaining ("use this result as a reference") and later Upscale and
    Camera angle.** Agreed design: `docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md` (read it fully).
    The live test of the LoRA on the GGUF base needs a real instance, which only the owner's laptop session can start.
+   STATUS: the framework, the page (style sub-menu, parameter panels, "Use as reference" on results) and the first style
+   are built on branch `feat/styles-and-chaining` (plan: `docs/superpowers/plans/2026-10-18-styles-and-chaining.md`).
+   The style ships `enabled: false` until the owner pins the LoRA (`scripts/pin_model.py`, steps in
+   `deploy/web/README.md`, "Styles") and live-tests it. Upscale mode is also built (same branch, disabled until a licensed model is pinned; README "Upscale"). Not built:
+   chaining from the gallery (the gallery is in PR #4, not on master; add a "Use as reference" button there after it
+   merges, reusing `chainResult` in `apps/web/public/ui.ts`) and Camera angle (AnyAngle): its mechanism is not
+   documented in this repo (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the
+   Anything to Real live test comes first, so guessing a workflow would be fiction.
 3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
    `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
    a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).
