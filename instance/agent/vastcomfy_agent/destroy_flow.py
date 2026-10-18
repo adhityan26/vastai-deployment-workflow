@@ -5,7 +5,7 @@ import threading
 from typing import Callable
 
 from .destroyer import Destroyer
-from .state import InvalidTransition, State, StateStore
+from .state import REASONS, InvalidTransition, State, StateStore
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,12 @@ class DestroyFlow:
             self._running = True
         try:
             self._record(State.STOPPING, reason)
+            # One line on stdout for the container logs; only a known reason id is ever printed.
+            shown = reason if reason in REASONS else "unknown"
+            try:
+                print(f"[watchdog] destroying instance: reason={shown}", flush=True)
+            except Exception:  # a full disk or a closed pipe must never skip the destroy
+                pass
             if self._destroyer.destroy():
                 return True
             self._record(State.DESTROY_FAILED)

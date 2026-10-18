@@ -38,7 +38,7 @@ declare module "fastify" {
 export interface ServerDeps {
   cfg: AppsConfig;
   auth: Pick<Auth, "identify" | "role">;
-  lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "start" | "destroy" | "destroyUnknown" | "extend" | "console">;
+  lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "start" | "destroy" | "destroyUnknown" | "extend" | "console" | "history">;
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
@@ -48,6 +48,8 @@ export interface ServerDeps {
   template: unknown;
   /** The edit workflow template named by the profile's edit section; absent or null turns edit off. */
   editTemplate?: unknown;
+  /** The upscale workflow template; null/absent when the profile has no enabled upscale section. */
+  upscaleTemplate?: unknown;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
   /** Saved images (MinIO); absent means saving and the gallery are off (the routes answer 503). */

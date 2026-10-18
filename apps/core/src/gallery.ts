@@ -32,7 +32,7 @@ export interface GalleryLimits {
   maxImageBytes: number;
 }
 
-export type GalleryKind = "generate" | "edit";
+export type GalleryKind = "generate" | "edit" | "upscale";
 
 export interface Viewer {
   subject: string;
@@ -244,7 +244,8 @@ export class Gallery {
       page.map(async (p): Promise<GalleryItem | null> => {
         const head = await this.store.head(p.key);
         if (head === null) return null; // deleted since the listing
-        const kind = head.metadata["kind"] === "edit" ? "edit" : "generate";
+        const stored = head.metadata["kind"];
+        const kind: GalleryKind = stored === "edit" || stored === "upscale" ? stored : "generate";
         return {
           id: idOf(p),
           createdMs: RTS_BASE - Number(p.rts),

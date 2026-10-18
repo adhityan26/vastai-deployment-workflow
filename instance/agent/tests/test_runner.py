@@ -83,6 +83,21 @@ def test_failsafe_marker_moves_the_state_to_stopping_without_a_second_destroy(tm
     assert flow.reasons == []
 
 
+def test_failsafe_marker_carries_the_hard_cap_reason(tmp_path):
+    clock, states, flow, runner = make(tmp_path)
+    write_json(tmp_path / "destroy_failsafe.json", {"pending": True, "attempts": 1, "last_error": None, "reason": "hard_cap"})
+    runner.tick()
+    record = states.get()
+    assert (record.state, record.reason) == (State.STOPPING, "hard_cap")
+
+
+def test_failsafe_marker_with_an_unknown_reason_is_failsafe_deadline(tmp_path):
+    clock, states, flow, runner = make(tmp_path)
+    write_json(tmp_path / "destroy_failsafe.json", {"pending": True, "attempts": 1, "last_error": None, "reason": "manual"})
+    runner.tick()
+    assert states.get().reason == "failsafe_deadline"
+
+
 def test_boot_states_are_left_alone(tmp_path):
     clock, states, flow, runner = make(tmp_path, ready=False)
     clock.t = T0 + 10**6

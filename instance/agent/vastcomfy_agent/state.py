@@ -25,7 +25,7 @@ REASONS = frozenset(
         "missing_container_credentials", "config_invalid", "hard_cap_missing", "failsafe_failed",
         "tailscale_failed", "node_install_failed", "download_failed", "disk_insufficient",
         "comfyui_start_failed", "idle_timeout", "failsafe_deadline", "manual", "watchdog",
-        "agent_start_failed", "supervisor_failed", "boot_failed", "node_import_failed",
+        "agent_start_failed", "supervisor_failed", "boot_failed", "node_import_failed", "hard_cap",
     }
 )
 

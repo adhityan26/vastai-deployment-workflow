@@ -149,6 +149,10 @@ ul { padding: 0; margin: 0; list-style: none; }
 .console-actions > * { flex: 1 1 6rem; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .card-head h2 { margin: 0; }
+.usage-list { list-style: none; margin: 8px 0; padding: 0; }
+.usage-list li { padding: 6px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.usage-list li:last-child { border-bottom: none; }
+.usage-list .um { color: var(--muted); font-size: 0.85rem; }
 #console-body[hidden] { display: none; }
 @media (min-width: 40rem) { .modal { align-items: center; } }
 @media (prefers-reduced-motion: no-preference) {
@@ -157,3 +161,10 @@ ul { padding: 0; margin: 0; list-style: none; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.style-params { display: grid; gap: 8px; margin-top: 8px; }
+.style-params label { margin: 0; }
+.style-params input[type="range"] { width: 100%; min-height: 44px; }
+.style-params .style-value { font-weight: 600; }
+.grid .chain { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.grid .chain button { min-height: 44px; }

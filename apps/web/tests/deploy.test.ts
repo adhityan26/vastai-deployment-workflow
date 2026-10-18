@@ -96,6 +96,19 @@ describe("deploy files", () => {
     }
   });
 
+  it("the usage history file sits on the data volume too and its tunables are documented", () => {
+    const env = (svc["environment"] ?? {}) as Record<string, string>;
+    expect(env["USAGE_LOG_PATH"]).toBe("/data/usage-history.json");
+    const example = read(".env.example");
+    for (const n of ["USAGE_LOG_MAX_ENTRIES", "USAGE_REASON_SLACK_S"]) {
+      expect(example).toMatch(new RegExp(`^# ${n}=`, "m"));
+      expect(schemaKeys.has(n)).toBe(true);
+    }
+    expect(schemaKeys.has("USAGE_LOG_PATH")).toBe(true);
+    const max = (schema.keys as { name: string; min?: number }[]).find((k) => k.name === "USAGE_LOG_MAX_ENTRIES");
+    expect(max?.min).toBe(2);
+  });
+
   it("the Tailscale OAuth keys exist in the schema and in .env.example (secrets empty, tunables commented)", () => {
     const keys = schema.keys as { name: string; secret?: boolean; components?: string[] }[];
     const byName = new Map(keys.map((k) => [k.name, k]));

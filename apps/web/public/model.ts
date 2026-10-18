@@ -22,9 +22,11 @@ export const API = {
   destroyUnknown: "/api/destroy-unknown",
   generate: "/api/generate",
   edit: "/api/edit",
+  upscale: "/api/upscale",
   credit: "/api/credit",
   gallery: "/api/gallery",
   galleryDelete: "/api/gallery/delete",
+  history: "/api/history",
   me: "/api/me",
 } as const;
 
@@ -47,6 +49,7 @@ const MAX_GPU_NAME = 64; // the API refuses longer names
 // Where the last GPU choice is remembered in the browser (only a model name, no secret).
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
 export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
+export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
 export const SPEED_WINDOW_SAMPLES = 6;
 export const SPEED_MAX_GAP_MS = 120_000;
@@ -61,6 +64,24 @@ export interface Download { files_total: number; files_done: number; bytes_done:
 export interface Resolution { name: string; value: number }
 /** What the server offers for edit with reference images (null in the state when edit is off). */
 export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[] }
+export type Mode = "generate" | "edit";
+/** The page's modes: the two that take styles, and upscale (one image in, a bigger one out). */
+export type PageMode = Mode | "upscale";
+export type StyleValue = number | string | boolean;
+/** One parameter of a style, as the server lists it (limits only; where it goes stays on the server). */
+export interface StyleParam {
+  id: string;
+  title: string;
+  type: "float" | "int" | "choice" | "bool";
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+  default: StyleValue;
+}
+export interface StyleInfo { id: string; title: string; modes: Mode[]; params: StyleParam[] }
+/** What the server offers for upscale (null in the state when upscale is off). */
+export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -83,6 +104,8 @@ export interface ApiState {
   edit: EditInfo | null;
   /** Save and the gallery are available (the server has an object store). */
   gallery: boolean;
+  styles: StyleInfo[];
+  upscale: UpscaleInfo | null;
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
@@ -107,6 +130,50 @@ function parseEdit(v: unknown): EditInfo | null {
     resolutions.push({ name: r["name"], value: r["value"] });
   }
   return { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels, types: types as string[], resolutions };
+}
+
+function parseStyleParam(v: unknown): StyleParam | null {
+  if (!isObj(v) || typeof v["id"] !== "string" || v["id"] === "" || typeof v["title"] !== "string") return null;
+  const type = v["type"];
+  const id = v["id"];
+  const title = v["title"];
+  const d = v["default"];
+  if (type === "bool") return typeof d === "boolean" ? { id, title, type, default: d } : null;
+  if (type === "choice") {
+    const ch = v["choices"];
+    if (!Array.isArray(ch) || ch.length === 0 || !ch.every((c) => typeof c === "string")) return null;
+    return typeof d === "string" && ch.includes(d) ? { id, title, type, choices: ch as string[], default: d } : null;
+  }
+  if (type === "float" || type === "int") {
+    const min = num(v["min"]);
+    const max = num(v["max"]);
+    const step = num(v["step"]);
+    const dn = num(d);
+    if (min === null || max === null || step === null || dn === null || step <= 0 || min > max || dn < min || dn > max) return null;
+    return { id, title, type, min, max, step, default: dn };
+  }
+  return null;
+}
+
+function parseStyles(v: unknown): StyleInfo[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((st) => {
+    if (!isObj(st) || typeof st["id"] !== "string" || st["id"] === "" || typeof st["title"] !== "string" || !Array.isArray(st["modes"])) return [];
+    const modes = st["modes"].filter((m): m is Mode => m === "generate" || m === "edit");
+    const rawParams = Array.isArray(st["params"]) ? st["params"] : [];
+    const params = rawParams.map(parseStyleParam);
+    // A style whose panel cannot be drawn faithfully is left out rather than drawn wrong.
+    if (modes.length === 0 || params.some((p) => p === null)) return [];
+    return [{ id: st["id"], title: st["title"], modes, params: params as StyleParam[] }];
+  });
+}
+
+function parseUpscale(v: unknown): UpscaleInfo | null {
+  if (!isObj(v) || !posInt(v["max_bytes"]) || !posInt(v["max_pixels"])) return null;
+  const { scales, types } = v;
+  if (!Array.isArray(scales) || scales.length === 0 || !scales.every((x) => typeof x === "string" && x !== "")) return null;
+  if (!Array.isArray(types) || types.length === 0 || !types.every((t) => typeof t === "string" && EDIT_TYPES.includes(t))) return null;
+  return { scales: scales as string[], max_bytes: v["max_bytes"], max_pixels: v["max_pixels"], types: types as string[] };
 }
 
 function parseDownload(v: unknown): Download | null {
@@ -181,6 +248,8 @@ export function parseState(json: unknown): ApiState | null {
     ),
     edit: parseEdit(json["edit"]),
     gallery: json["gallery"] === true,
+    styles: parseStyles(json["styles"]),
+    upscale: parseUpscale(json["upscale"]),
   };
 }
 
@@ -432,6 +501,8 @@ export interface Controls {
   canGenerate: boolean;
   /** Generating is possible and the server offers edit with reference images. */
   canEdit: boolean;
+  /** Generating is possible and the server offers upscale. */
+  canUpscale: boolean;
 }
 
 export function controls(s: ApiState | null, busy: boolean, jobPending: boolean): Controls {
@@ -444,6 +515,7 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canDestroy: admin && state !== "none" && state !== "stopping" && !busy,
     canGenerate: s !== null && GENERATE_STATES.has(state) && !jobPending,
     canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
+    canUpscale: s !== null && s.upscale !== null && GENERATE_STATES.has(state) && !jobPending,
   };
 }
 
@@ -541,6 +613,58 @@ export function base64FromDataUrl(url: string): string | null {
 
 export function editLabel(presetLabelText: string, resolution: string, references: number): string {
   return `Edit: ${presetLabelText}, ${resolution}, ${references} reference${references === 1 ? "" : "s"}`;
+}
+
+// ---- styles ----
+
+/** The styles the server allows in a mode, in the order it lists them. */
+export function stylesForMode(styles: readonly StyleInfo[], mode: Mode): StyleInfo[] {
+  return styles.filter((st) => st.modes.includes(mode));
+}
+
+/** The parameter values a style panel starts with. */
+export function styleDefaults(style: StyleInfo): Record<string, StyleValue> {
+  return Object.fromEntries(style.params.map((p) => [p.id, p.default]));
+}
+
+/** A slider value kept inside the limits and on the step grid (the server refuses anything else). */
+export function snapToStep(p: StyleParam, value: number): number {
+  if (p.min === undefined || p.max === undefined || p.step === undefined || !Number.isFinite(value)) return typeof p.default === "number" ? p.default : 0;
+  const clamped = Math.min(p.max, Math.max(p.min, value));
+  const snapped = p.min + Math.round((clamped - p.min) / p.step) * p.step;
+  // Rounding away float noise such as 0.7000000000000001.
+  return Math.min(p.max, Number(snapped.toFixed(6)));
+}
+
+/** The `style` member of a generate or edit body; undefined when no style is chosen. */
+export function styleRequest(style: StyleInfo | null, values: Record<string, StyleValue>): { id: string; params: Record<string, StyleValue> } | undefined {
+  if (style === null) return undefined;
+  const params: Record<string, StyleValue> = {};
+  for (const p of style.params) {
+    const v = values[p.id];
+    params[p.id] = (p.type === "float" || p.type === "int") && typeof v === "number" ? snapToStep(p, v) : v ?? p.default;
+  }
+  return { id: style.id, params };
+}
+
+/** A result may be chained only when it is one of our own same-origin result paths. */
+export function isChainableUrl(url: string): boolean {
+  return /^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url);
+}
+
+// ---- upscale ----
+
+/** The reference rules for the one image of an upscale, in the shape pickReferences takes. */
+export function upscaleAsEdit(u: UpscaleInfo): EditInfo {
+  return { max_references: 1, max_bytes: u.max_bytes, max_pixels: u.max_pixels, types: u.types, resolutions: [] };
+}
+
+export function upscaleHint(u: UpscaleInfo): string {
+  return `One image (${u.types.map((t) => t.toUpperCase()).join(", ")}), ${formatMegabytes(u.max_bytes)} at most. The result size is limited by the server.`;
+}
+
+export function upscaleLabel(scale: string): string {
+  return `Upscale: ${scale}`;
 }
 
 export function characterCount(text: string): string {
@@ -788,7 +912,7 @@ export interface GalleryEntry {
   id: string;
   url: string;
   createdAt: number;
-  kind: "generate" | "edit";
+  kind: "generate" | "edit" | "upscale";
   prompt: string;
   label: string;
   ownerName: string;
@@ -826,7 +950,7 @@ export function parseGalleryPage(json: unknown): { items: GalleryEntry[]; next: 
       id: raw["id"],
       url: `${API.gallery}/${raw["id"]}/image`,
       createdAt,
-      kind: raw["kind"] === "edit" ? "edit" : "generate",
+      kind: raw["kind"] === "edit" || raw["kind"] === "upscale" ? raw["kind"] : "generate",
       prompt: typeof raw["prompt"] === "string" ? raw["prompt"] : "",
       label: typeof raw["label"] === "string" ? raw["label"] : "",
       ownerName: typeof raw["owner_name"] === "string" ? raw["owner_name"] : "",
@@ -846,4 +970,75 @@ export function formatBytes(bytes: number): string {
   if (bytes >= MB) return `${(bytes / MB).toFixed(1)} MB`;
   if (bytes >= KB) return `${(bytes / KB).toFixed(1)} KB`;
   return `${Math.max(0, Math.floor(bytes))} B`;
+}
+
+// ---- usage history (admin only) ----
+
+/** One session of GET /api/history (contracts/web.openapi.json HistoryEntry). */
+export interface UsageEntry {
+  vast_instance_id: number | null;
+  gpu_name: string | null;
+  dph: number | null;
+  started_at: number;
+  ready_at: number | null;
+  ended_at: number | null;
+  duration_s: number;
+  estimated_cost: number | null;
+  started_by: string | null;
+  reason: string | null;
+  stop_by: string | null;
+  active: boolean;
+}
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const numOrNull = (v: unknown): boolean => v === null || isNum(v);
+const strOrNull = (v: unknown): boolean => v === null || typeof v === "string";
+
+/** The entries, or null when the body is not a usable history. */
+export function parseHistory(json: unknown): UsageEntry[] | null {
+  if (json === null || typeof json !== "object") return null;
+  const list = (json as { entries?: unknown }).entries;
+  if (!Array.isArray(list)) return null;
+  const ok = list.every((e: unknown) => {
+    if (e === null || typeof e !== "object") return false;
+    const r = e as Record<string, unknown>;
+    return (
+      numOrNull(r["vast_instance_id"]) && strOrNull(r["gpu_name"]) && numOrNull(r["dph"]) && isNum(r["started_at"]) &&
+      numOrNull(r["ready_at"]) && numOrNull(r["ended_at"]) && isNum(r["duration_s"]) && numOrNull(r["estimated_cost"]) &&
+      strOrNull(r["started_by"]) && strOrNull(r["reason"]) && strOrNull(r["stop_by"]) && typeof r["active"] === "boolean"
+    );
+  });
+  return ok ? (list as UsageEntry[]) : null;
+}
+
+const STOP_REASON_TEXT: Record<string, string> = {
+  destroy_button: "Destroy button",
+  idle_timeout: "Idle timeout",
+  failsafe_deadline: "Failsafe deadline",
+  hard_cap: "Hard cap",
+  boot_failed: "Boot failed",
+  agent_unreachable: "Agent unreachable",
+  gone: "Disappeared",
+};
+
+/** Why a session stopped, in plain words ("Destroy button (by ayu)"); "Running" while active. */
+export function stopReasonText(reason: string | null, stopBy: string | null, active: boolean): string {
+  if (active) return "Running";
+  const text = reason === null ? undefined : STOP_REASON_TEXT[reason];
+  if (text === undefined) return "Stopped";
+  return reason === "destroy_button" && stopBy !== null && stopBy !== "" ? `${text} (by ${stopBy})` : text;
+}
+
+/** The history is read once, then again only when the state changes to none or ready (no polling). */
+export function historyRefreshDue(previous: string | null, next: string): boolean {
+  if (previous === null) return true;
+  return previous !== next && (next === "none" || next === "ready");
+}
+
+/** Local "YYYY-MM-DD HH:MM" of an epoch second. */
+export function historyTime(t: number): string {
+  if (!Number.isFinite(t) || t <= 0) return DASH;
+  const d = new Date(t * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }

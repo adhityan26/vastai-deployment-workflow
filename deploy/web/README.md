@@ -237,6 +237,35 @@ values, long hex/base64 strings, URL credentials); the instance hostname shows a
 - The phases come only from the instance's marker lines `[boot] step <n>/<m>: <id>` and
   `[boot] FAILED: <code>` (the fixed step list is defined once in `apps/core/src/console.ts`).
 
+## Usage history
+
+Admins see a "History" card (`GET /api/history`; members get 403): one line per instance session with
+the start time, duration, GPU, an estimated cost (duration x price per hour; disk and traffic are
+billed separately) and why it stopped: the Destroy button (with who pressed it), the idle timeout,
+the failsafe deadline, the hard cap, a failed boot or Start, an unreachable agent, or "disappeared"
+when the cause is unknown (e.g. Vast removed it).
+
+- When the web service stops the instance itself it records why before it acts. When the instance
+  stops itself, the reason comes from the last agent `/status` the web saw: the agent's own destroy
+  state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by
+  the time the web noticed (plus `USAGE_REASON_SLACK_S` for clock skew), else "disappeared".
+  The first recorded reason wins, so in two rare cases the label can be wrong: Destroy pressed while
+  the create was still uncertain followed by a web restart (the boot timeout then destroys it, the
+  history says Destroy button), and a Start whose registry write and cleanup destroy both failed (a
+  later stop still shows "Boot failed").
+- The instance prints `[watchdog] destroying instance: reason=<reason>` before each self-destroy
+  (agent log under supervisor, `failsafe.log` for the standalone failsafe).
+- Times: a stop by the web is dated when it completed; a self-stop at the passed deadline, or else at
+  the last time the web saw the agent. Agent sightings are written to the file when something the
+  reason depends on changes (state, reason, the order of the deadlines, a deadline moving earlier or
+  later by more than the slack) and otherwise about once per `USAGE_REASON_SLACK_S`. After a web
+  restart, until the agent is seen again, the saved copy is used: its deadlines may be up to the slack
+  early, so they are compared without the slack (a deadline then counts only when it lies before the
+  moment the web noticed the end), and its last sighting may be up to about the slack old.
+- `USAGE_LOG_MAX_ENTRIES` (at least 2) sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
+  next to the registry); a corrupt file is ignored. The web log gets one `usage: start ...` and one
+  `usage: stop ...` line per session (GPU, price, reason, duration and user names only).
+
 ## Image edit with reference images
 
 Members can switch the Generate card to "Edit images", attach up to `EDIT_MAX_REFERENCES` PNG/JPEG/WebP
@@ -259,6 +288,40 @@ Limits to keep in mind:
   4-reference request through the tunnel before relying on the defaults.
 - Reference images stay in ComfyUI's `input/` directory on the instance until the instance is
   destroyed; the web service does not delete them after the job.
+
+## Styles and "Use as reference"
+
+Styles come from the `styles:` section of `instance/profiles/image.yaml`. The page shows them as a sub-menu per mode
+(`Standard` plus the enabled styles) with a panel built from the style's parameters. The browser sends only
+`style: {id, params}`; the server validates every value against the profile and takes the LoRA file, nodes and targets
+from the profile, never from the request. A style with `enabled: false` is not listed and is refused.
+
+Enable Anything to Real (needs network access to huggingface.co, so on the laptop, not in a cloud session):
+
+1. `python3 scripts/pin_model.py WarmBloodAban/Qwen-Image-2.1-LoRAs Qwen2.1_Anything2RealCharacters.safetensors`
+2. Paste the printed line into `models:` of `instance/profiles/image.yaml` (the LoRA downloads at boot with the other
+   models; the agent needs no change) and set `enabled: true` on the style. Boot fails closed if the file is missing.
+3. Live test (UNVERIFIED): edit an anime image with and without the style at strength 0.6 / 0.7 / 0.8. The LoRA node is
+   inserted as `style_lora` between `lora.model_from` and `lora.model_to`; whether that is right relative to
+   `QwenImage21Cache` and the GGUF base is unknown. If the result is wrong, change those two profile lines.
+
+"Use as reference" on a result downloads the image from `/api/image/...` into the page and attaches it as a reference
+in Edit (optionally with an edit style chosen). It goes through the same checks as an upload.
+
+## Upscale
+
+A third mode, "Upscale": one image in, a bigger one out (`ImageUpscaleWithModel`, then `ImageScaleBy` to trim 4x to
+2x). It is OFF (`upscale.enabled: false` in `instance/profiles/image.yaml`) because no model is pinned yet. To turn it on:
+
+1. Pick an upscale model and CHECK ITS LICENSE (not done; Real-ESRGAN and 4x-UltraSharp differ).
+2. On the laptop: `python3 scripts/pin_model.py <owner/repo> <file> models/upscale_models/` and add the printed line
+   to `models:`.
+3. Set `upscale.model` to that file name and `enabled: true`. Deploy; the model downloads at boot like the others.
+
+The result size is bounded before anything is sent: input width x height x factor squared must be at most
+`UPSCALE_MAX_OUTPUT_PIXELS` (default 32 MP). The image is validated like an edit reference (magic bytes, size,
+pixels). Every result also gets an "Upscale" button next to "Use as reference". UNVERIFIED on a real instance: the
+workflow `instance/workflows/image-upscale.json` has never run, and VRAM use of a large upscale is unknown.
 
 ## Vast credit (admin)
 

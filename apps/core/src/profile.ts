@@ -1,5 +1,8 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
+import { GenerateInputError, ProfileError } from "./profile-errors.js";
+import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./styles.js";
+import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
@@ -69,6 +72,10 @@ export interface Profile {
   readonly generate: GenerateSpec;
   /** Null when the profile has no edit section (edit with reference images is then off). */
   readonly edit: EditSpec | null;
+  /** The enabled styles (LoRA variations with their own parameters); empty when the profile has none. */
+  readonly styles: readonly StyleSpec[];
+  /** The upscale mode when the profile enables it; null otherwise. */
+  readonly upscale: UpscaleSpec | null;
   readonly models: readonly ModelSpec[];
 }
 
@@ -79,6 +86,8 @@ export interface GenerateInput {
   preset: string;
   size: string;
   seed: number;
+  /** A style already checked by resolveStyle; null or absent for the plain workflow. */
+  style?: ResolvedStyle | null;
 }
 
 export interface EditInput {
@@ -90,23 +99,11 @@ export interface EditInput {
   seed: number;
   /** Names of the already uploaded references, in order: the first one is image_1. */
   imageNames: readonly string[];
+  /** A style already checked by resolveStyle; null or absent for the plain workflow. */
+  style?: ResolvedStyle | null;
 }
 
-export class ProfileError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ProfileError";
-  }
-}
-
-export class GenerateInputError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "GenerateInputError";
-    this.code = code;
-  }
-}
+export { GenerateInputError, ProfileError };
 
 function mapping(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -237,11 +234,14 @@ export function loadProfile(path: string): Profile {
   try {
     const raw = mapping(parse(readFileSync(path, "utf8")), "profile");
     if (raw["generate"] === undefined || raw["generate"] === null) throw new ProfileError("profile has no generate section");
+    const models = parseModels(raw["models"]);
     return {
       name: required(raw["name"], "name"),
       generate: parseGenerate(raw["generate"]),
       edit: raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]),
-      models: parseModels(raw["models"]),
+      styles: parseStyles(raw["styles"], models.map((m) => m.file)),
+      upscale: parseUpscale(raw["upscale"], models.map((m) => m.file)),
+      models,
     };
   } catch (e) {
     if (e instanceof ProfileError) throw new ProfileError(`${path}: ${e.message}`);
@@ -278,6 +278,7 @@ export function buildPrompt(profile: Profile, workflowJson: unknown, input: Gene
     }
     node.inputs[ref.input] = values[key];
   }
+  if (input.style) applyStyle(copy, input.style);
   return copy;
 }
 
@@ -327,5 +328,6 @@ export function buildEditPrompt(profile: Profile, workflowJson: unknown, input: 
     copy[id] = { class_type: edit.references.nodeClass, inputs: { [edit.references.imageInput]: name } };
     encoder.inputs[`${edit.references.inputPrefix}${i + 1}`] = [id, 0];
   });
+  if (input.style) applyStyle(copy, input.style);
   return copy;
 }

@@ -6,18 +6,50 @@ Written so a fresh session (for example a cloud session that only has this repo)
 
 Private, cost-efficient image generation on rented Vast.ai GPUs: ComfyUI + Qwen-Image 2.1 GGUF (`qwen-image-2.1-UC-Q4_K_M`). A web service on the homelab (`apps/core` + `apps/web`, Node/TypeScript, Fastify) starts/extends/destroys one instance, shows status and generates images. The instance runtime lives in `instance/` (Python agent + bash bootstrap/failsafe). Login is in-app OIDC with Authentik (admins start/destroy/extend; members generate).
 
-## Branches
+## State on 2026-10-18 (evening)
 
-- `master` (pushed): everything up to GPU choice, including OIDC login, compose file, GPU dropdown with allow-list, overall download progress, cache busting. This is what is deployed on the homelab and tested by the owner.
-- `feat/ts-oauth` (pushed, NOT deployed, NOT merged): mint single-use Tailscale auth keys per Start through an OAuth client. Needs the owner to create the OAuth client first.
-- `feat/boot-console` (pushed, NOT merged, on top of ts-oauth): boot console. Only Task 1 (core/API) is done and it needs a fix round (below).
+Everything below is on `master` (pushed and DEPLOYED on the homelab, commit 318464a):
+OIDC login, GPU choice, overall download progress, Vast credit for admins (`GET /api/credit`), image EDIT with multiple
+references (`POST /api/edit`, hardened against multi-frame images), the boot console (API, stepper, collapsible log panel;
+Tasks 1 and 2 only) and the Tailscale OAuth key minting code (inactive until `TS_OAUTH_CLIENT_ID/SECRET` are set; the
+manual key file is used meanwhile). Branches other than `master` are merged and can be deleted.
 
-Start new work from `master` unless it depends on the above.
+Not verified live: a real edit through the web stack, the Cloudflare body size for edit requests, the Vast log-request
+flow behind the boot console, Tailscale OAuth against the real API, RTX 5090 (Blackwell).
+Edit notes: a 4 x 8 MiB request needs about 12 Mbit/s of upload within `WEB_REQUEST_TIMEOUT_S` (30 s); references stay in
+ComfyUI `input/` until the instance is destroyed; animated/multi-frame references are refused (`reference_animated`);
+`EDIT_REFERENCE_MAX_SIDE` bounds width/height. Edit design: `docs/superpowers/plans/2026-10-18-image-edit.md`.
 
-## Done on `claude/wonderful-ride-9xfkah`: image EDIT with multiple reference images
+## Next work, in order
 
-Plan and rationale: `docs/superpowers/plans/2026-10-18-image-edit.md` (references travel as base64 in the JSON
-body instead of multipart, on purpose). Summary of what exists now:
+1. **Usage history** (in progress locally on branch `feat/usage-history`; check origin for that branch first, if it is
+   there continue from it, otherwise implement from the brief): a persistent log of when an instance started and stopped
+   and why (Destroy button with who, idle timeout, failsafe deadline, hard cap, boot failed, gone), shown in an
+   admin-only collapsible "History" card, plus `[watchdog] destroying instance: reason=...` from the agent.
+   Brief: `docs/superpowers/plans/2026-10-18-usage-history-brief.md`.
+2. **Styles with sub-menus, Anything to Real LoRA, chaining ("use this result as a reference") and later Upscale and
+   Camera angle.** Agreed design: `docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md` (read it fully).
+   The live test of the LoRA on the GGUF base needs a real instance, which only the owner's laptop session can start.
+   STATUS: the framework, the page (style sub-menu, parameter panels, "Use as reference" on results) and the first style
+   are built on branch `feat/styles-and-chaining` (plan: `docs/superpowers/plans/2026-10-18-styles-and-chaining.md`).
+   The style ships `enabled: false` until the owner pins the LoRA (`scripts/pin_model.py`, steps in
+   `deploy/web/README.md`, "Styles") and live-tests it. Upscale mode is also built (same branch, disabled until a licensed model is pinned; README "Upscale"). Not built:
+   chaining from the gallery (the gallery is in PR #4, not on master; add a "Use as reference" button there after it
+   merges, reusing `chainResult` in `apps/web/public/ui.ts`) and Camera angle (AnyAngle): its mechanism is not
+   documented in this repo (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the
+   Anything to Real live test comes first, so guessing a workflow would be fiction.
+3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
+   `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
+   a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).
+4. Save + Gallery: optional Save per result (and auto-save option), cross-device gallery tab backed by an S3-compatible
+   bucket (MinIO on the homelab, bucket `vast-gallery`, config keys `GALLERY_S3_*`). The bucket stays private, images are
+   served through the web service; owners see their own images, admins see all; quotas from config. Local per-device
+   history stays. Reuse later for a Discord `save` mode.
+5. Tailscale OAuth: the owner creates an OAuth client (scope Auth Keys: Write only, tag `tag:gpu`) and sets
+   `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` in `.env`; then deploy and verify the minimum `expirySeconds` against
+   the real API. The current reusable Tailscale key expires around 2026-10-19. Deferred minors: `TS_KEY_TTL_S` minimum
+   about 900, mint after the offer is chosen, trim whitespace, cap the token cache at 1 hour.
+6. Later: Discord bot, video/3D, and `docs/superpowers/plans/2026-10-17-web-interface-followups.md`.
 
 - Profile `edit:` section + `instance/workflows/qwen-image-edit.json`; `provides_node_classes` also lists
   `TextEncodeQwenImage21` and `QwenImage21Cache` (boot fails closed without them).
@@ -48,6 +80,8 @@ body instead of multipart, on purpose). Summary of what exists now:
 4. Tailscale OAuth: owner creates an OAuth client (scope Auth Keys: Write only, tag `tag:gpu`) and sets `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` in `.env`; then deploy `feat/ts-oauth` and verify the minimum `expirySeconds` against the real API. Deferred minors are listed in the review notes: `TS_KEY_TTL_S` minimum about 900, mint after the offer is chosen, trim whitespace, cap the token cache at 1 hour.
 5. Merge `feat/ts-oauth` and `feat/boot-console` into `master` when done and reviewed (the owner approves merges and pushes explicitly), then deploy.
 6. Later: Discord bot, watchdog, video/3D, and `docs/superpowers/plans/2026-10-17-web-interface-followups.md`.
+What a cloud session cannot do: reach the homelab or start Vast instances, read the owner's `.env`, or deploy. Use the
+fake servers in the test suites, and leave live checks and the deploy to the owner's laptop session.
 
 ## Facts that matter
 

@@ -41,6 +41,13 @@ import {
   referenceHint,
   CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
+  HISTORY_COLLAPSED_KEY,
+  formatDuration,
+  historyRefreshDue,
+  historyTime,
+  parseHistory,
+  stopReasonText,
+  type UsageEntry,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
   characterCount,
@@ -59,6 +66,20 @@ import {
   gpuOptionLabel,
   imageUrl,
   isJobId,
+  isChainableUrl,
+  snapToStep,
+  styleDefaults,
+  styleRequest,
+  stylesForMode,
+  type EditInfo,
+  type Mode,
+  type PageMode,
+  upscaleAsEdit,
+  upscaleHint,
+  upscaleLabel,
+  type StyleInfo,
+  type StyleParam,
+  type StyleValue,
   parseEstimate,
   parseGpus,
   parseSeed,
@@ -158,7 +179,9 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
-  let mode: "generate" | "edit" = "generate";
+  let mode: PageMode = "generate";
+  const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
+  const styleValues: Record<string, Record<string, StyleValue>> = {};
   let refSeq = 0;
   const references: Reference[] = [];
   let consoleView: ConsoleView = EMPTY_CONSOLE_VIEW;
@@ -176,6 +199,10 @@ export function mountApp(doc: Document, env: Env): App {
   let consoleTruncated = false; // sticky per generation: lines were dropped at some point
   let consoleEpoch = 0; // bumped by resetConsole; an answer from an older epoch is discarded
   const history: HistoryEntry[] = [];
+  let usageSeenState: string | null = null; // the state at the last history read decision (null: never read)
+  let usageEpoch = 0; // bumped by resetUsage; an answer from an older epoch is discarded
+  let usageBusy = false;
+  let usageDirty = false; // a refresh was due while a read was in flight: read once more after it
 
   // ---- requests ----
 
@@ -262,6 +289,7 @@ export function mountApp(doc: Document, env: Env): App {
     samples = [];
     jobPending = false;
     resetConsole();
+    resetUsage();
     setText("login-message", kind === "login" ? message : "");
     setText("noaccess-error", "");
     setText("logout-error", "");
@@ -787,6 +815,12 @@ export function mountApp(doc: Document, env: Env): App {
   const modeGenerate = $<HTMLButtonElement>("mode-generate");
   const modeEdit = $<HTMLButtonElement>("mode-edit");
   const editBox = $("edit-box");
+  const modeUpscale = $<HTMLButtonElement>("mode-upscale");
+  const promptRow = $("prompt-box");
+  const samplingBox = $("sampling-box");
+  const resolutionBox = $("resolution-box");
+  const scaleBox = $("scale-box");
+  const scaleSelect = $<HTMLSelectElement>("scale");
   const sizeBox = $("size-box");
   const refInput = $<HTMLInputElement>("ref-input");
   const refList = $("ref-list");
@@ -801,9 +835,10 @@ export function mountApp(doc: Document, env: Env): App {
 
   function renderForm(s: ApiState): void {
     // Edit can disappear (server config) while it is selected: fall back to plain generate.
-    if (s.edit === null) mode = "generate";
+    if (s.edit === null && mode === "edit") mode = "generate";
+    if (s.upscale === null && mode === "upscale") mode = "generate";
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
-    const key = JSON.stringify([s.presets, s.sizes, s.edit]);
+    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale]);
     if (key !== formKey) {
       formKey = key;
       if (!s.presets.some((p) => p.name === selectedPreset)) selectedPreset = s.presets[0]?.name ?? "";
@@ -838,22 +873,43 @@ export function mountApp(doc: Document, env: Env): App {
         }),
       );
       if (s.edit?.resolutions.some((r) => r.name === keepResolution)) resolutionSelect.value = keepResolution;
-      if (s.edit !== null) {
-        refInput.accept = acceptTypes(s.edit);
-        $("ref-hint").textContent = referenceHint(s.edit);
-      }
+      const keepScale = scaleSelect.value;
+      scaleSelect.replaceChildren(
+        ...(s.upscale?.scales ?? []).map((name) => {
+          const o = make("option", name);
+          o.value = name;
+          return o;
+        }),
+      );
+      if (s.upscale?.scales.includes(keepScale)) scaleSelect.value = keepScale;
     }
+    // The picker follows the mode: edit takes several images, upscale exactly one.
+    const refRules = refLimits(s);
+    if (refRules !== null) {
+      refInput.accept = acceptTypes(refRules);
+      refInput.multiple = mode !== "upscale";
+      $("ref-hint").textContent = mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : s.edit ? referenceHint(s.edit) : "";
+    }
+    renderStyles(s);
     const editing = mode === "edit";
-    modeBox.hidden = s.edit === null;
-    modeGenerate.setAttribute("aria-pressed", String(!editing));
+    const upscaling = mode === "upscale";
+    modeBox.hidden = s.edit === null && s.upscale === null;
+    modeEdit.hidden = s.edit === null;
+    modeUpscale.hidden = s.upscale === null;
+    modeGenerate.setAttribute("aria-pressed", String(mode === "generate"));
     modeEdit.setAttribute("aria-pressed", String(editing));
-    editBox.hidden = !editing;
-    sizeBox.hidden = editing;
+    modeUpscale.setAttribute("aria-pressed", String(upscaling));
+    editBox.hidden = !editing && !upscaling;
+    resolutionBox.hidden = upscaling;
+    scaleBox.hidden = !upscaling;
+    promptRow.hidden = upscaling;
+    samplingBox.hidden = upscaling;
+    sizeBox.hidden = editing || upscaling;
     promptBox.placeholder = editing ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>" : "";
     const c = controls(s, busy, jobPending);
-    const allowed = editing ? c.canEdit : c.canGenerate;
+    const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : c.canGenerate;
     generateBtn.disabled = !allowed;
-    generateBtn.textContent = jobPending ? "Generating…" : editing ? "Edit" : "Generate";
+    generateBtn.textContent = jobPending ? "Generating…" : upscaling ? "Upscale" : editing ? "Edit" : "Generate";
     $("gen-hint").textContent = jobPending
       ? "A job is running. You can submit another when it finishes."
       : allowed
@@ -863,14 +919,110 @@ export function mountApp(doc: Document, env: Env): App {
           : "Generating is available when the instance is ready.";
   }
 
-  function setMode(next: "generate" | "edit"): void {
+  // ---- styles (a sub-menu per mode, with the panel of the chosen style) ----
+
+  const styleBox = $("style-box");
+  const stylesSeg = $("styles");
+  const styleParamsBox = $("style-params");
+  let styleKey = "";
+
+  /** The style chosen for the current mode, only if the server still lists it for that mode. */
+  function currentStyle(s: ApiState | null): StyleInfo | null {
+    if (mode === "upscale") return null;
+    const id = chosenStyle[mode];
+    return id === null || s === null ? null : stylesForMode(s.styles, mode).find((st) => st.id === id) ?? null;
+  }
+
+  function paramControl(style: StyleInfo, p: StyleParam): HTMLElement {
+    const values = (styleValues[style.id] ??= styleDefaults(style));
+    const wrap = make("div");
+    const inputId = `style-${style.id}-${p.id}`;
+    const label = make("label", p.title);
+    label.htmlFor = inputId;
+    if (p.type === "bool") {
+      const box = make("input");
+      box.type = "checkbox";
+      box.id = inputId;
+      box.checked = values[p.id] === true;
+      box.addEventListener("change", () => { values[p.id] = box.checked; });
+      wrap.append(box, label);
+    } else if (p.type === "choice") {
+      const sel = make("select");
+      sel.id = inputId;
+      for (const c of p.choices ?? []) {
+        const o = make("option", c);
+        o.value = c;
+        sel.append(o);
+      }
+      sel.value = String(values[p.id]);
+      sel.addEventListener("change", () => { values[p.id] = sel.value; });
+      wrap.append(label, sel);
+    } else {
+      const range = make("input");
+      range.type = "range";
+      range.id = inputId;
+      range.min = String(p.min);
+      range.max = String(p.max);
+      range.step = String(p.step);
+      const shown = make("span", "", "style-value");
+      const current = typeof values[p.id] === "number" ? (values[p.id] as number) : (p.default as number);
+      range.value = String(current);
+      shown.textContent = String(current);
+      range.addEventListener("input", () => {
+        const v = snapToStep(p, Number(range.value));
+        values[p.id] = v;
+        shown.textContent = String(v);
+      });
+      wrap.append(label, make("span", " "), shown, range);
+    }
+    return wrap;
+  }
+
+  function renderStyles(s: ApiState): void {
+    if (mode === "upscale") {
+      styleBox.hidden = true;
+      return;
+    }
+    const m: Mode = mode;
+    const list = stylesForMode(s.styles, m);
+    styleBox.hidden = list.length === 0;
+    if (list.length === 0) return;
+    if (chosenStyle[m] !== null && !list.some((st) => st.id === chosenStyle[m])) chosenStyle[m] = null;
+    const chosen = chosenStyle[m];
+    // Rebuild only when the list or the choice changes, so a poll never resets a slider.
+    const key = JSON.stringify([m, chosen, list.map((st) => st.id), s.styles]);
+    if (key === styleKey) return;
+    styleKey = key;
+    const buttons = [{ id: null as string | null, title: "Standard" }, ...list].map((st) => {
+      const b = make("button", st.title);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(st.id === chosen));
+      b.addEventListener("click", () => selectStyle(st.id));
+      return b;
+    });
+    stylesSeg.replaceChildren(...buttons);
+    const style = currentStyle(s);
+    styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
+  }
+
+  function selectStyle(id: string | null): void {
+    if (mode === "upscale") return;
+    chosenStyle[mode] = id;
+    styleKey = "";
+    if (state) renderForm(state);
+  }
+
+  function setMode(next: PageMode): void {
     if (next === "edit" && state?.edit == null) return;
+    if (next === "upscale" && state?.upscale == null) return;
+    showRefErrors([]);
     mode = next;
     formError.hidden = true;
     if (state) renderForm(state);
   }
   modeGenerate.addEventListener("click", () => setMode("generate"));
   modeEdit.addEventListener("click", () => setMode("edit"));
+  modeUpscale.addEventListener("click", () => setMode("upscale"));
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);
@@ -891,6 +1043,13 @@ export function mountApp(doc: Document, env: Env): App {
   function releaseUrl(url: string | null): void {
     const api = doc.defaultView?.URL;
     if (url !== null && api && typeof api.revokeObjectURL === "function") api.revokeObjectURL(url);
+  }
+
+  /** The attach rules of the current mode (upscale: one image), or null when the mode takes none. */
+  function refLimits(s: ApiState | null): EditInfo | null {
+    if (s === null) return null;
+    if (mode === "upscale") return s.upscale ? upscaleAsEdit(s.upscale) : null;
+    return s.edit;
   }
 
   function showRefErrors(errors: readonly string[]): void {
@@ -930,7 +1089,7 @@ export function mountApp(doc: Document, env: Env): App {
   refInput.addEventListener("change", () => {
     const files = Array.from(refInput.files ?? []);
     refInput.value = ""; // so the same file can be picked again after removing it
-    const edit = state?.edit ?? null;
+    const edit = refLimits(state);
     if (edit === null || files.length === 0) return;
     const result = pickReferences(references.length, files.map((f) => ({ name: f.name, type: f.type, size: f.size })), edit);
     for (const i of result.accepted) references.push({ id: ++refSeq, file: files[i]!, url: previewUrl(files[i]!) });
@@ -956,7 +1115,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   $("gen-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    void (mode === "edit" ? submitEdit() : submitGenerate());
+    void (mode === "upscale" ? submitUpscale() : mode === "edit" ? submitEdit() : submitGenerate());
   });
 
   async function submitGenerate(): Promise<void> {
@@ -969,6 +1128,9 @@ export function mountApp(doc: Document, env: Env): App {
     if (selectedPreset === "" || sizeSelect.value === "") return formFail("Choose a quality and a size.");
     const body: Record<string, unknown> = { prompt, preset: selectedPreset, size: sizeSelect.value };
     if (seed.value !== undefined) body["seed"] = seed.value;
+    const style = currentStyle(state);
+    const styleBody = styleRequest(style, style ? (styleValues[style.id] ??= styleDefaults(style)) : {});
+    if (styleBody) body["style"] = styleBody;
     jobPending = true;
     if (state) renderForm(state);
     try {
@@ -976,7 +1138,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}`);
+      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${style ? `, ${style.title}` : ""}`);
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -995,6 +1157,8 @@ export function mountApp(doc: Document, env: Env): App {
     if (!seed.ok) return formFail(seed.message);
     if (selectedPreset === "" || resolutionSelect.value === "") return formFail("Choose a quality and a resolution.");
     const files = references.map((r) => r.file);
+    const style = currentStyle(state);
+    const styleBody = styleRequest(style, style ? (styleValues[style.id] ??= styleDefaults(style)) : {});
     jobPending = true; // also blocks a second submit while the files are being read and sent
     if (state) renderForm(state);
     try {
@@ -1002,11 +1166,35 @@ export function mountApp(doc: Document, env: Env): App {
       for (const file of files) images.push(await readBase64(file));
       const body: Record<string, unknown> = { prompt, preset: selectedPreset, resolution: resolutionSelect.value, images };
       if (seed.value !== undefined) body["seed"] = seed.value;
+      if (styleBody) body["style"] = styleBody;
       const res = await call("POST", API.edit, body);
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length));
+      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
+      void pollJob(entry, 0);
+    } catch (err) {
+      jobPending = false;
+      formFail(err instanceof Error ? err.message : "Could not start the job.");
+      if (state) renderForm(state);
+    }
+  }
+
+  async function submitUpscale(): Promise<void> {
+    formError.hidden = true;
+    if (!controls(state, busy, jobPending).canUpscale) return;
+    if (references.length !== 1) return formFail("Attach exactly one image to upscale.");
+    if (scaleSelect.value === "") return formFail("Choose a scale.");
+    const file = references[0]!.file;
+    const scale = scaleSelect.value;
+    jobPending = true;
+    if (state) renderForm(state);
+    try {
+      const image = await readBase64(file);
+      const res = await call("POST", API.upscale, { image, scale });
+      const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
+      if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
+      const entry = addEntry(id, file.name, upscaleLabel(scale));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1025,6 +1213,56 @@ export function mountApp(doc: Document, env: Env): App {
     $("hist-empty").hidden = true;
     renderEntry(entry);
     return entry;
+  }
+
+  // ---- chaining: a result becomes the reference image of the next edit ----
+
+  /** One button per way to continue from a result; null when edit is not offered or the url is not ours. */
+  function chainButtons(src: string, jobId: string, index: number): HTMLElement | null {
+    const s = state;
+    if (s === null || (s.edit === null && s.upscale === null) || !isChainableUrl(src)) return null;
+    const row = make("div", undefined, "chain");
+    const targets: { mode: PageMode; id: string | null; title: string }[] = [
+      ...(s.edit ? [{ mode: "edit" as const, id: null, title: "Use as reference" }] : []),
+      ...(s.edit ? stylesForMode(s.styles, "edit") : []).map((st) => ({ mode: "edit" as const, id: st.id, title: `Use as reference: ${st.title}` })),
+      ...(s.upscale ? [{ mode: "upscale" as const, id: null, title: "Upscale" }] : []),
+    ];
+    for (const t of targets) {
+      const b = make("button", t.title);
+      b.type = "button";
+      b.addEventListener("click", () => void chainResult(src, `result-${jobId}-${index}`, t.mode, t.id));
+      row.append(b);
+    }
+    return row;
+  }
+
+  async function chainResult(src: string, name: string, target: PageMode, styleId: string | null): Promise<void> {
+    mode = target;
+    if (target === "edit") chosenStyle.edit = styleId;
+    styleKey = "";
+    formError.hidden = true;
+    // One image for an upscale, so a result replaces whatever was attached; edit adds to the list.
+    if (target === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    const rules = refLimits(state);
+    if (rules === null) return;
+    try {
+      const res = await env.fetch(src, { credentials: "same-origin" });
+      if (!res.ok) throw new ApiError("The result could not be loaded.");
+      const blob = await res.blob();
+      const result = pickReferences(references.length, [{ name, type: blob.type, size: blob.size }], rules);
+      if (result.accepted.length > 0) {
+        const FileCtor = doc.defaultView?.File;
+        if (FileCtor === undefined) throw new ApiError("This browser cannot attach the result.");
+        const file = new FileCtor([blob], `${name}.${blob.type.slice("image/".length)}`, { type: blob.type });
+        references.push({ id: ++refSeq, file, url: previewUrl(file) });
+        renderReferences();
+      }
+      showRefErrors(result.errors);
+    } catch (err) {
+      showRefErrors([err instanceof Error ? err.message : "The result could not be loaded."]);
+    }
+    if (state) renderForm(state);
+    refList.scrollIntoView?.({ block: "nearest" });
   }
 
   function renderEntry(e: HistoryEntry): void {
@@ -1061,6 +1299,8 @@ export function mountApp(doc: Document, env: Env): App {
             fig.append(note);
           }
         }
+        const chain = chainButtons(src, e.id, i);
+        if (chain !== null) fig.append(chain);
         grid.append(fig);
       });
       kids.push(grid);
@@ -1514,6 +1754,89 @@ export function mountApp(doc: Document, env: Env): App {
     }
   });
 
+  // ---- usage history (admin only) ----
+
+  const usageCard = $("usage-card");
+  const usageBody = $("usage-body");
+  const usageToggle = $<HTMLButtonElement>("usage-toggle");
+  const usageList = $("usage-list");
+  function setUsageCollapsed(collapsed: boolean, remember: boolean): void {
+    usageBody.hidden = collapsed;
+    usageToggle.setAttribute("aria-expanded", String(!collapsed));
+    usageToggle.textContent = collapsed ? "Show history" : "Hide history";
+    if (!remember) return;
+    try {
+      doc.defaultView?.localStorage.setItem(HISTORY_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+  try {
+    setUsageCollapsed(doc.defaultView?.localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1", false);
+  } catch {
+    // Storage unavailable: start expanded.
+  }
+  usageToggle.addEventListener("click", () => setUsageCollapsed(!usageBody.hidden, true));
+
+  function resetUsage(): void {
+    usageEpoch++;
+    usageSeenState = null;
+    usageBusy = false;
+    usageDirty = false;
+    usageList.replaceChildren();
+    $("usage-empty").hidden = false;
+    setText("usage-error", "");
+    usageCard.hidden = true;
+  }
+
+  function usageRow(e: UsageEntry): HTMLElement {
+    const li = make("li");
+    const head = make("div");
+    head.append(make("span", historyTime(e.started_at)), doc.createTextNode(" · "), make("span", formatDuration(e.duration_s)), doc.createTextNode(" · "), make("span", e.gpu_name ?? "—"));
+    const meta = make("div", undefined, "um");
+    meta.append(make("span", stopReasonText(e.reason, e.stop_by, e.active)), doc.createTextNode(" · "), make("span", `${formatCost(e.estimated_cost)} est.`));
+    if (e.started_by !== null) meta.append(doc.createTextNode(" · "), make("span", `started by ${e.started_by}`));
+    li.append(head, meta);
+    return li;
+  }
+
+  async function loadUsage(): Promise<void> {
+    if (usageBusy) {
+      usageDirty = true;
+      return;
+    }
+    usageBusy = true;
+    usageDirty = false;
+    const epoch = usageEpoch;
+    try {
+      const entries = parseHistory(await call("GET", API.history));
+      if (epoch !== usageEpoch) return;
+      if (entries === null) throw new ApiError("unreadable history");
+      usageList.replaceChildren(...entries.map(usageRow));
+      $("usage-empty").hidden = entries.length > 0;
+      setText("usage-error", "");
+    } catch (err) {
+      if (err instanceof AuthLostError || epoch !== usageEpoch) return;
+      // A short note in the card only: the history is never worth a page-wide banner.
+      setText("usage-error", "The history could not be loaded. It is tried again when the instance state changes.");
+    } finally {
+      if (epoch === usageEpoch) usageBusy = false;
+    }
+    if (epoch === usageEpoch && usageDirty) void loadUsage();
+  }
+
+  /** Admins only: read the history on the first state and when the state turns none or ready. */
+  function renderUsage(s: ApiState | null, isAdmin: boolean): void {
+    if (!isAdmin || s === null) {
+      if (!usageCard.hidden || usageSeenState !== null) resetUsage();
+      return;
+    }
+    usageCard.hidden = false;
+    const due = historyRefreshDue(usageSeenState, s.state);
+    usageSeenState = s.state;
+    if (due) void loadUsage();
+  }
+
   // ---- render + polling loop ----
 
   function render(): void {
@@ -1532,7 +1855,9 @@ export function mountApp(doc: Document, env: Env): App {
       $<HTMLButtonElement>("btn-destroy").disabled = !c.canDestroy;
       $<HTMLButtonElement>("btn-extend").disabled = !c.canExtend;
       renderUnknown(state?.unknown ?? []);
+      renderUsage(state, true);
     } else {
+      renderUsage(state, false);
       adminPanel.replaceChildren();
       adminPanel.hidden = true;
       adminBuilt = false;

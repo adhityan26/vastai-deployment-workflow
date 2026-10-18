@@ -202,7 +202,9 @@
           "presets",
           "sizes",
           "edit",
-          "gallery"
+          "gallery",
+          "styles",
+          "upscale"
         ],
         "properties": {
           "state": {
@@ -547,6 +549,139 @@
           "gallery": {
             "type": "boolean",
             "description": "Whether Save and the gallery are available (an object store is configured)"
+          },
+          "styles": {
+            "type": "array",
+            "description": "Enabled styles (LoRA variations with their own parameters) the page may offer under the modes they list",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "title",
+                "modes",
+                "params"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "modes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "generate",
+                      "edit"
+                    ]
+                  }
+                },
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "title",
+                      "type",
+                      "default"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "float",
+                          "int",
+                          "choice",
+                          "bool"
+                        ]
+                      },
+                      "min": {
+                        "type": "number"
+                      },
+                      "max": {
+                        "type": "number"
+                      },
+                      "step": {
+                        "type": "number"
+                      },
+                      "choices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "default": {
+                        "oneOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "boolean"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "upscale": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "scales",
+                  "max_bytes",
+                  "max_pixels",
+                  "types"
+                ],
+                "properties": {
+                  "scales": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "max_bytes": {
+                    "type": "integer"
+                  },
+                  "max_pixels": {
+                    "type": "integer"
+                  },
+                  "types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "png",
+                        "jpeg",
+                        "webp"
+                      ]
+                    }
+                  }
+                }
+              }
+            ],
+            "description": "Null when upscale is off on this server"
           }
         }
       },
@@ -752,6 +887,123 @@
               null
             ],
             "description": "The last Vast read for the console failed; the kept lines are still returned"
+          }
+        }
+      },
+      "UsageStopReason": {
+        "type": "string",
+        "enum": [
+          "destroy_button",
+          "idle_timeout",
+          "failsafe_deadline",
+          "hard_cap",
+          "boot_failed",
+          "agent_unreachable",
+          "gone"
+        ],
+        "description": "Why a session ended. destroy_button: the Destroy button in the web (stop_by names who; also when it was pressed while the create was still uncertain). idle_timeout: the instance agent destroyed it after the idle time. failsafe_deadline: the failsafe deadline passed (standalone failsafe or agent). hard_cap: the hard cap passed (web or instance side). boot_failed: Start failed, the create never appeared, the boot timed out (BOOT_TIMEOUT_MIN) or the instance destroyed itself because its boot failed. agent_unreachable: the web destroyed it because the agent stayed unreachable for UNREACHABLE_DESTROY_MIN. gone: the instance disappeared and the cause is unknown (e.g. Vast removed it). When the web itself stops the instance it records the reason before acting; when the instance disappears by itself the reason comes from the last agent status the web saw: the agent's own destroy state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by the moment the web noticed (plus USAGE_REASON_SLACK_S), else gone. Extending a deadline is never a stop reason."
+      },
+      "HistoryEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vast_instance_id",
+          "gpu_name",
+          "dph",
+          "started_at",
+          "ready_at",
+          "ended_at",
+          "duration_s",
+          "estimated_cost",
+          "started_by",
+          "reason",
+          "stop_by",
+          "active"
+        ],
+        "properties": {
+          "vast_instance_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Vast instance id; null when no instance was created (a Start that failed before the create)"
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "GPU model of the chosen offer (plain characters only)"
+          },
+          "dph": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "USD per hour: the offer's price, replaced by Vast's own price for the instance once listed"
+          },
+          "started_at": {
+            "type": "integer",
+            "description": "Epoch seconds when the Start was accepted"
+          },
+          "ready_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch seconds when the web first saw the instance ready; null if it never was"
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Epoch seconds of the end; null while active. When the web stopped the instance itself (or a Start failed): the moment it saw the stop complete. When the instance disappeared by itself: for a passed idle, failsafe or hard-cap deadline the deadline itself; for the agent's own destroy reason, the failsafe's pending destroy or an unknown cause (gone) the last time the web saw the agent (after a web restart the last saved sighting, at most about USAGE_REASON_SLACK_S older); always clamped between that last sighting and the moment the web noticed the instance gone; without any sighting the moment it noticed"
+          },
+          "duration_s": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "ended_at (or now while active) minus started_at"
+          },
+          "estimated_cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "duration_s x dph in USD: an ESTIMATE (disk and traffic are billed separately, and Vast bills by its own clock). Null without an instance or a price"
+          },
+          "started_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "User name of the admin who pressed Start (never an email address); null when unknown (a session from before the history existed)"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UsageStopReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why it stopped; null while active"
+          },
+          "stop_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "User name of the admin who pressed Destroy (reason destroy_button only)"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "True for the running session (ended_at and reason are null)"
           }
         }
       }
@@ -1429,7 +1681,8 @@
                             "type": "string",
                             "enum": [
                               "generate",
-                              "edit"
+                              "edit",
+                              "upscale"
                             ]
                           },
                           "prompt": {
@@ -2493,6 +2746,72 @@
         }
       }
     },
+    "/api/history": {
+      "get": {
+        "operationId": "history",
+        "summary": "Usage history (admin): one entry per instance session, newest first, at most USAGE_LOG_MAX_ENTRIES, kept across web restarts in USAGE_LOG_PATH. Shows when each instance started, became ready and stopped, why it stopped, who started it and who pressed Destroy, and an estimated cost. Open sessions whose registry record is gone are closed (with an inferred reason) before the list is returned.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "entries"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/HistoryEntry"
+                      },
+                      "description": "Newest first; at most one entry is active"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The history could not be built (code history_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/generate": {
       "post": {
         "operationId": "generate",
@@ -2534,6 +2853,35 @@
                     ],
                     "minimum": 0,
                     "maximum": 9007199254740991
+                  },
+                  "style": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id"
+                    ],
+                    "description": "Optional style from /api/state (styles). Params not sent take their default; unknown params, wrong types, values out of range or off the step are refused. One style per job.",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "params": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2580,7 +2928,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2702,6 +3050,35 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "style": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id"
+                    ],
+                    "description": "Optional style from /api/state (styles). Params not sent take their default; unknown params, wrong types, values out of range or off the step are refused. One style per job.",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "params": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2748,7 +3125,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3005,6 +3382,162 @@
           },
           "502": {
             "description": "Unsafe reference, non-image body, body over WEB_IMAGE_MAX_BYTES or ComfyUI unavailable (codes image_rejected, image_too_large, image_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/upscale": {
+      "post": {
+        "operationId": "upscale",
+        "summary": "Upscale one image with the profile's upscale model (member or admin; shares the generate rate limit). 404 upscale_unavailable when the profile has no enabled upscale section. The image is base64 in the JSON body, validated like a reference (magic bytes, size, pixels), and the result size is bounded by UPSCALE_MAX_OUTPUT_PIXELS before anything is sent. Poll the returned id with GET /api/generate/{id}.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "image",
+                  "scale"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "description": "Base64 PNG, JPEG or WebP"
+                  },
+                  "scale": {
+                    "type": "string",
+                    "description": "A scale name from upscale.scales in /api/state"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than the edit body limit derived from EDIT_MAX_REFERENCES and EDIT_REFERENCE_MAX_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The instance is not ready (code not_ready)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Generate rate limit reached (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Profile and workflow disagree (code profile_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ComfyUI unavailable (also while uploading a reference) or oversized response (codes comfy_unavailable, upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Edit is not available on this server (code edit_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
