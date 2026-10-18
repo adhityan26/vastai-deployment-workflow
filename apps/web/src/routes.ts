@@ -24,7 +24,7 @@ import {
   type StartFailReason,
   type StatusView,
 } from "@vast-comfy/core";
-import { JobStore, RateLimiter, type Job } from "./store.js";
+import { CreditCache, JobStore, RateLimiter, type Job } from "./store.js";
 import { sendError } from "./reply.js";
 import type { ServerDeps } from "./server.js";
 
@@ -208,6 +208,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     now,
   );
   const generateTimeoutMs = intCfg(cfg, "generateTimeoutS", "GENERATE_TIMEOUT_S") * 1000;
+  // Credit: only when a source is wired, so a deployment without one needs no VAST_CREDIT_CACHE_S.
+  const creditCache =
+    deps.credit === undefined
+      ? null
+      : new CreditCache(() => deps.credit!(), intCfg(cfg, "vastCreditCacheS", "VAST_CREDIT_CACHE_S") * 1000, now);
   const extendMax = intCfg(cfg, "webExtendMaxMinutes", "WEB_EXTEND_MAX_MINUTES");
   /** A scrubber that also knows the active record's token and hostname. */
   const activeScrubber = async (): Promise<(text: string) => string> => {
@@ -279,6 +284,18 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (refused) return refused;
       log("warn", `gpu list failed: ${errorName(err)}`);
       return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+    }
+  });
+
+  // The Vast account credit, for the admin status card. Only the number leaves: never the account record.
+  app.get("/api/credit", admin, async (_req, reply) => {
+    if (creditCache === null) return sendError(reply, 404, "credit_unavailable", "the Vast credit is not available on this server");
+    try {
+      const reading = await creditCache.get();
+      return { credit: reading.credit, as_of: Math.floor(reading.at / 1000) };
+    } catch (err) {
+      log("warn", `credit read failed: ${errorName(err)}`);
+      return sendError(reply, 502, "vast_unavailable", "could not read the Vast account credit");
     }
   });
 

@@ -82,3 +82,36 @@ export class JobStore {
     return this.jobs.size;
   }
 }
+
+/** The Vast account credit as last read: USD and the epoch milliseconds of the read. */
+export interface CreditReading {
+  readonly credit: number;
+  readonly at: number;
+}
+
+/**
+ * Reuses one Vast credit read for `ttlMs` and lets simultaneous callers share one read in flight, so
+ * any number of admin tabs cost at most one Vast API call per interval. A failed read is not cached.
+ */
+export class CreditCache {
+  private reading: CreditReading | null = null;
+  private inflight: Promise<CreditReading> | null = null;
+
+  constructor(
+    private readonly read: () => Promise<number>,
+    private readonly ttlMs: number,
+    private readonly now: () => number,
+  ) {}
+
+  get(): Promise<CreditReading> {
+    if (this.reading !== null && this.now() - this.reading.at < this.ttlMs) return Promise.resolve(this.reading);
+    if (this.inflight === null) {
+      this.inflight = this.read()
+        .then((credit) => (this.reading = { credit, at: this.now() }))
+        .finally(() => {
+          this.inflight = null;
+        });
+    }
+    return this.inflight;
+  }
+}

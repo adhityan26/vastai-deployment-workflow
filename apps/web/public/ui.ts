@@ -8,6 +8,9 @@ import {
   withoutLoginError,
   CLOCK_TICK_MS,
   DEFAULT_EXTEND_MINUTES,
+  creditDue,
+  formatCredit,
+  parseCredit,
   GPU_STORAGE_KEY,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
@@ -108,6 +111,8 @@ export function mountApp(doc: Document, env: Env): App {
   let unknownKey = "";
   let restoreFocus: HTMLElement | null = null;
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
+  let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
+  let creditRunning = false;
   const history: HistoryEntry[] = [];
 
   // ---- requests ----
@@ -867,6 +872,24 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  // ---- Vast credit (admin only) ----
+
+  /** Read the Vast credit and show it; any failure shows "unavailable" and the next interval retries. */
+  async function refreshCredit(): Promise<void> {
+    creditRunning = true;
+    creditAskedAt = env.now();
+    let text = "unavailable";
+    try {
+      const reading = parseCredit(await call("GET", API.credit));
+      if (reading !== null) text = formatCredit(reading.credit);
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+    } finally {
+      creditRunning = false;
+    }
+    $("f-credit").textContent = text;
+  }
+
   // ---- render + polling loop ----
 
   function render(): void {
@@ -875,7 +898,9 @@ export function mountApp(doc: Document, env: Env): App {
       renderStatus(state);
       renderForm(state);
     }
+    $("f-credit-box").hidden = !c.showAdmin;
     if (c.showAdmin) {
+      if (creditDue(creditAskedAt, env.now(), creditRunning)) void refreshCredit();
       if (!adminBuilt) buildAdmin();
       adminPanel.hidden = false;
       $<HTMLButtonElement>("btn-start").disabled = !c.canStart;
@@ -887,6 +912,7 @@ export function mountApp(doc: Document, env: Env): App {
       adminPanel.hidden = true;
       adminBuilt = false;
       unknownKey = "";
+      creditAskedAt = Number.NEGATIVE_INFINITY;
     }
   }
 

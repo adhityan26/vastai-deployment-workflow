@@ -682,3 +682,73 @@ describe("text from the api is inert", () => {
     expect(calls.filter((c) => c.path.startsWith("/api/generate/"))).toHaveLength(0);
   });
 });
+
+describe("Vast credit", () => {
+  const credit = (c: number) => ({ body: { credit: c, as_of: 1_800_000_000 } });
+  const creditCalls = () => calls.filter((c) => c.path === "/api/credit");
+
+  it("an admin sees the credit in the status card", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": credit(4.5377) });
+    await flush();
+    expect(q("#f-credit-box")!.hidden).toBe(false);
+    expect(q("#f-credit")!.textContent).toBe("$4.54");
+    expect(creditCalls()).toHaveLength(1);
+  });
+
+  it("a member never sees it and never asks for it", async () => {
+    await mount({ role: "member" }, { "GET /api/credit": credit(4.5) });
+    await flush();
+    expect(q("#f-credit-box")!.hidden).toBe(true);
+    expect(creditCalls()).toHaveLength(0);
+  });
+
+  it("asks once a minute, not on every status poll", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": credit(4.5) });
+    await flush();
+    nowMs += 5_000;
+    await app!.refresh();
+    nowMs += 40_000;
+    await app!.refresh();
+    await flush();
+    expect(creditCalls()).toHaveLength(1);
+    routes["GET /api/credit"] = credit(3.25);
+    nowMs += 20_000; // 65 s after the first read
+    await app!.refresh();
+    await flush();
+    expect(creditCalls()).toHaveLength(2);
+    expect(q("#f-credit")!.textContent).toBe("$3.25");
+  });
+
+  it("shows a used-up credit with a minus sign", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": credit(-0.8) });
+    await flush();
+    expect(q("#f-credit")!.textContent).toBe("-$0.80");
+  });
+
+  it("shows 'unavailable' when the server cannot read it, and retries after the interval", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": { status: 502, body: { error: { code: "vast_unavailable", message: "could not read the Vast account credit" } } } });
+    await flush();
+    expect(q("#f-credit")!.textContent).toBe("unavailable");
+    expect(q("#banner")!.hidden).toBe(true); // a credit problem is not a page-level alert
+    routes["GET /api/credit"] = credit(2);
+    nowMs += 61_000;
+    await app!.refresh();
+    await flush();
+    expect(q("#f-credit")!.textContent).toBe("$2.00");
+  });
+
+  it("shows 'unavailable' for an unusable answer and renders nothing the server did not send as a number", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": { body: { credit: "<b>lots</b>" } } });
+    await flush();
+    expect(q("#f-credit")!.textContent).toBe("unavailable");
+    expect(q("#f-credit b")).toBeNull();
+  });
+
+  it("hides the box when the account is no longer an admin", async () => {
+    await mount({ role: "admin" }, { "GET /api/credit": credit(4.5) });
+    await flush();
+    routes["GET /api/state"] = { body: apiState({ role: "member" }) };
+    await app!.refresh();
+    expect(q("#f-credit-box")!.hidden).toBe(true);
+  });
+});

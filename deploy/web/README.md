@@ -180,12 +180,23 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
 - Env keys: see `.env.example`. `COMFY_PORT` and `AGENT_PORT` are fixed (not sent to the
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_BOT_TOKEN`.
 
+## Vast credit (admin)
+
+Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a
+minute; the server reuses one read for `VAST_CREDIT_CACHE_S` (default 60) and shares a read in flight, so any
+number of tabs cost at most one Vast call per interval. The call is `GET users/current` with the main
+API key (the same `VAST_API_KEY`); only the `credit` number is passed on, never the account record
+(which holds the email and ssh keys). Members never see or request it. "unavailable" means Vast could not
+be read; it does not affect anything else on the page.
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
 
+- `GET /api/v0/users/current` against the live API: the path and the `credit` field come from the vastai
+  1.8.3 SDK source and from the T13 spike, which watched `credit` fall by the cost of a boot.
 - The `groups` claim in a real Authentik ID token (and RS256 signing).
 - The Cloudflare tunnel hostname `gen.` -> `192.168.88.113:3400`.
 - Container-to-tailnet reachability from the homelab host, and bare MagicDNS names resolving

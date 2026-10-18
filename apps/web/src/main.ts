@@ -117,6 +117,7 @@ async function main(): Promise<void> {
     comfyFor: (hostname) => new ComfyClient(hostname, cfg),
     profile,
     template,
+    credit: () => vast.accountCredit(),
     login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,
     secrets: () => [...seenSecrets],

@@ -203,6 +203,7 @@ interface Harness {
   clock: { ms: number };
   sessions: Sessions | null;
   logs: string[];
+  creditReads: { n: number };
 }
 
 let h: Harness;
@@ -213,6 +214,8 @@ async function harness(
     cfg?: Record<string, unknown>;
     extraRoutes?: (app: FastifyInstance) => void;
     authKey?: () => Promise<string>;
+    /** The Vast credit source; null leaves it unconfigured. Defaults to a counting fake. */
+    credit?: (() => Promise<number>) | null;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -276,6 +279,7 @@ async function harness(
     webJobTtlS: 3600,
     webExtendMaxMinutes: 120,
     webGenerateRateLimitPerHour: 50,
+    vastCreditCacheS: 60,
     secretNames: ["VAST_API_KEY", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...opts.cfg,
   } as unknown as AppsConfig;
@@ -302,6 +306,8 @@ async function harness(
     vast.instances.push({ id: VAST_ID, label: `vastcomfy:${HOST}`, actual_status: "running", start_date: NOW_S, dph_total: 0.3 });
   }
   const logs: string[] = [];
+  const creditReads = { n: 0 };
+  const credit = opts.credit === undefined ? async () => (creditReads.n++, 4.5377) : (opts.credit ?? undefined);
   const { auth, oidc, sessions } = createAuthStack(cfg, { onMisconfigured: (m) => logs.push(`error ${m}`), now: () => clock.ms });
   const app = buildServer({
     cfg,
@@ -312,6 +318,7 @@ async function harness(
     comfyFor: () => new ComfyClient("127.0.0.1", cfg),
     profile,
     template,
+    credit,
     publicDir,
     secrets: () => [VAST_KEY, AUTH_KEY, CLIENT_SECRET, SESSION_SECRET],
     now: () => clock.ms,
@@ -321,7 +328,7 @@ async function harness(
   opts.extraRoutes?.(app);
   await app.ready();
   return {
-    app, vast, registry, dir, publicDir, clock, sessions, logs,
+    app, vast, registry, dir, publicDir, clock, sessions, logs, creditReads,
     agentSeen: agent.seen,
     comfySeen: comfy.seen,
     setAgent: (fn) => (agentHandler = fn),
@@ -824,6 +831,80 @@ describe("generate", () => {
 const location = (res: Res) => String(res.headers.location ?? "");
 const loginError = (res: Res) => new URL(location(res), PUBLIC_ORIGIN).searchParams.get("login_error");
 
+// ---- Vast account credit ----
+
+describe("GET /api/credit", () => {
+  it("returns the credit and when it was read, for an admin only", async () => {
+    const res = await call("GET", "/api/credit", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ credit: 4.5377, as_of: NOW_S });
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const denied = await call("GET", "/api/credit", await member());
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("forbidden");
+    expect((await call("GET", "/api/credit")).statusCode).toBe(401);
+    expect(h.creditReads.n).toBe(1);
+  });
+
+  it("reads Vast once per VAST_CREDIT_CACHE_S, however many admins and tabs ask", async () => {
+    const a = await admin();
+    for (let i = 0; i < 5; i++) expect((await call("GET", "/api/credit", a)).statusCode).toBe(200);
+    expect(h.creditReads.n).toBe(1);
+    h.clock.ms += 59_000;
+    await call("GET", "/api/credit", a);
+    expect(h.creditReads.n).toBe(1);
+    h.clock.ms += 2_000;
+    const later = await call("GET", "/api/credit", a);
+    expect(h.creditReads.n).toBe(2);
+    expect(later.json().as_of).toBe(NOW_S + 61);
+  });
+
+  it("shares one in-flight read between simultaneous requests", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reads = 0;
+    h = await harness({ credit: async () => (reads++, await gate, 7) });
+    const a = await admin();
+    const pending = [call("GET", "/api/credit", a), call("GET", "/api/credit", a), call("GET", "/api/credit", a)];
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    for (const res of await Promise.all(pending)) expect(res.json().credit).toBe(7);
+    expect(reads).toBe(1);
+  });
+
+  it("502 vast_unavailable when Vast fails, nothing leaks, and the failure is not cached", async () => {
+    let fail = true;
+    h = await harness({ credit: async () => { if (fail) throw new Error(`401 for ${VAST_KEY} owner@example.test`); return 3; } });
+    const a = await admin();
+    const bad = await call("GET", "/api/credit", a);
+    expect(bad.statusCode).toBe(502);
+    expect(bad.json().error.code).toBe("vast_unavailable");
+    for (const text of [bad.body, h.logs.join("\n")]) {
+      expect(text).not.toContain(VAST_KEY);
+      expect(text).not.toContain("owner@example.test");
+    }
+    fail = false;
+    expect((await call("GET", "/api/credit", a)).json().credit).toBe(3);
+  });
+
+  it("zero and negative credit are reported as they are", async () => {
+    h = await harness({ credit: async () => -1.25 });
+    expect((await call("GET", "/api/credit", await admin())).json().credit).toBe(-1.25);
+  });
+
+  it("404 credit_unavailable when no credit source is wired", async () => {
+    h = await harness({ credit: null });
+    const res = await call("GET", "/api/credit", await admin());
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("credit_unavailable");
+  });
+
+  it("is not part of /api/state", async () => {
+    const body = (await call("GET", "/api/state", await admin())).body;
+    expect(body).not.toContain("credit");
+    expect(h.creditReads.n).toBe(0);
+  });
+});
 describe("login flow", () => {
   it("login -> callback -> cookie -> /api/state 200 with role; /api/me shows only name, username and role", async () => {
     expect((await call("GET", "/api/state")).statusCode).toBe(401);
