@@ -217,6 +217,15 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
 - Env keys: see `.env.example`. `COMFY_PORT` and `AGENT_PORT` are fixed (not sent to the
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL` (superseded by the two
   `TS_OAUTH_CLIENT_*` keys), `DISCORD_BOT_TOKEN`.
+- Stuck start: sometimes Vast pulls the image but the host never starts the container (the
+  instance stays `created`/`stopped` while storage is billed). After `VAST_START_STUCK_MIN`
+  (default 5) the reconcile loop releases such an instance (usage reason "Boot failed", console
+  "the rented machine did not start", a `lifecycle: start stuck` warning in the log with the
+  instance and machine ids) and the page says "The rented machine did not start. It was released;
+  try Start again." It does not retry by itself. The next Starts, estimates and the GPU list skip
+  that machine for `VAST_BAD_MACHINE_TTL_MIN` (default 60; kept in the registry, so a restart
+  keeps it). An image that is still loading is not stuck: it only meets `BOOT_TIMEOUT_MIN` (25),
+  and neither is a running container whose agent does not answer yet.
 
 ## Boot console
 

@@ -190,6 +190,7 @@
           "agent_unreachable",
           "failed",
           "destroy_failed",
+          "start_failure",
           "dph",
           "uptime_s",
           "cost_so_far",
@@ -333,6 +334,26 @@
             "properties": {
               "error": {
                 "type": "string"
+              }
+            }
+          },
+          "start_failure": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code and its fixed plain text only: no machine or instance ids.",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/StartFailureCode"
+              },
+              "message": {
+                "type": "string",
+                "description": "e.g. 'The rented machine did not start. It was released; try Start again.'"
               }
             }
           },
@@ -842,6 +863,7 @@
                   "start_failed",
                   "hard_cap",
                   "boot_timeout",
+                  "start_stuck",
                   "unreachable",
                   "destroy_retry",
                   "destroy_requested",
@@ -901,7 +923,7 @@
           "agent_unreachable",
           "gone"
         ],
-        "description": "Why a session ended. destroy_button: the Destroy button in the web (stop_by names who; also when it was pressed while the create was still uncertain). idle_timeout: the instance agent destroyed it after the idle time. failsafe_deadline: the failsafe deadline passed (standalone failsafe or agent). hard_cap: the hard cap passed (web or instance side). boot_failed: Start failed, the create never appeared, the boot timed out (BOOT_TIMEOUT_MIN) or the instance destroyed itself because its boot failed. agent_unreachable: the web destroyed it because the agent stayed unreachable for UNREACHABLE_DESTROY_MIN. gone: the instance disappeared and the cause is unknown (e.g. Vast removed it). When the web itself stops the instance it records the reason before acting; when the instance disappears by itself the reason comes from the last agent status the web saw: the agent's own destroy state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by the moment the web noticed (plus USAGE_REASON_SLACK_S), else gone. Extending a deadline is never a stop reason."
+        "description": "Why a session ended. destroy_button: the Destroy button in the web (stop_by names who; also when it was pressed while the create was still uncertain). idle_timeout: the instance agent destroyed it after the idle time. failsafe_deadline: the failsafe deadline passed (standalone failsafe or agent). hard_cap: the hard cap passed (web or instance side). boot_failed: Start failed, the create never appeared, the boot timed out (BOOT_TIMEOUT_MIN), the container never started (VAST_START_STUCK_MIN) or the instance destroyed itself because its boot failed. agent_unreachable: the web destroyed it because the agent stayed unreachable for UNREACHABLE_DESTROY_MIN. gone: the instance disappeared and the cause is unknown (e.g. Vast removed it). When the web itself stops the instance it records the reason before acting; when the instance disappears by itself the reason comes from the last agent status the web saw: the agent's own destroy state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by the moment the web noticed (plus USAGE_REASON_SLACK_S), else gone. Extending a deadline is never a stop reason."
       },
       "HistoryEntry": {
         "type": "object",
@@ -1006,6 +1028,12 @@
             "description": "True for the running session (ended_at and reason are null)"
           }
         }
+      },
+      "StartFailureCode": {
+        "enum": [
+          "start_stuck"
+        ],
+        "description": "Fixed code of a start that failed after POST /api/start returned. start_stuck: Vast had the instance but its container never started within VAST_START_STUCK_MIN (actual_status created, exited or stopped, or meant to be stopped without ever having started; an image still loading is not stuck); the web released it (usage reason boot_failed) and the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN."
       }
     }
   },

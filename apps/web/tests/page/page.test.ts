@@ -487,6 +487,19 @@ describe("failures", () => {
     expect(q("#state-line")!.textContent).toBe("Failed");
   });
 
+  it("says plainly that the rented machine did not start and was released", async () => {
+    await mount({ state: "none", start_failure: { code: "start_stuck", message: "server text" } });
+    const box = q("#alert-start-failure")!;
+    expect(box.hidden).toBe(false);
+    expect(box.getAttribute("role")).toBe("alert");
+    expect(box.textContent).toContain("The rented machine did not start. It was released; try Start again.");
+  });
+
+  it("shows the server message for a start failure code the page does not know", async () => {
+    await mount({ state: "none", start_failure: { code: "new_code", message: "Something else went wrong." } });
+    expect(q("#alert-start-failure")!.textContent).toContain("Something else went wrong.");
+  });
+
   it("warns when the agent is unreachable", async () => {
     await mount({ state: "ready", agent: null, agent_unreachable: true });
     expect(q("#alert-agent")!.hidden).toBe(false);
@@ -495,7 +508,7 @@ describe("failures", () => {
 
   it("hides the failure boxes when all is well", async () => {
     await mount();
-    for (const id of ["#alert-failed", "#alert-destroy-failed", "#alert-agent", "#banner"]) expect(q(id)!.hidden).toBe(true);
+    for (const id of ["#alert-failed", "#alert-destroy-failed", "#alert-agent", "#alert-start-failure", "#banner"]) expect(q(id)!.hidden).toBe(true);
   });
 
   it("shows a banner when the status request fails and clears it on recovery", async () => {

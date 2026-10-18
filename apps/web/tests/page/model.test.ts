@@ -191,6 +191,12 @@ describe("form helpers", () => {
     expect(errorText(500, "<html>")).toContain("500");
     expect(errorText(401, null)).toContain("sign in");
   });
+  it("parses a start failure and drops a broken one", () => {
+    expect(parseState({ ...base })!.start_failure).toBeNull();
+    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m" });
+    expect(parseState({ ...base, start_failure: { code: 5 } })!.start_failure).toBeNull();
+    expect(parseState({ ...base, start_failure: "start_stuck" })!.start_failure).toBeNull();
+  });
   it("rejects unusable state payloads", () => {
     expect(parseState(null)).toBeNull();
     expect(parseState({ state: "ready" })).toBeNull();
@@ -547,6 +553,7 @@ describe("boot console model", () => {
     expect(endedText("destroyed")).toContain("destroyed");
     expect(endedText("<b>x</b>")).toBe("Instance ended.");
     expect(endedText(null)).toBe("Instance ended.");
+    expect(endedText("start_stuck")).toBe("Instance ended: the rented machine did not start.");
   });
 
   it("bootSentence follows the running phase and is null otherwise", () => {

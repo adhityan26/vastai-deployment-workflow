@@ -35,6 +35,8 @@ const cfg = {
   startFailsafeHours: 3,
   startHardCapHours: 6,
   bootTimeoutMin: 25,
+  vastStartStuckMin: 5,
+  vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
   webDestroyRetries: 1,

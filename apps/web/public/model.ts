@@ -91,6 +91,8 @@ export interface ApiState {
   agent_unreachable: boolean;
   failed: { reason: string | null } | null;
   destroy_failed: { error: string } | null;
+  /** The newest start failed after Start returned (fixed code plus the server's plain text). */
+  start_failure: { code: string; message: string } | null;
   dph: number | null;
   uptime_s: number | null;
   cost_so_far: number | null;
@@ -203,6 +205,7 @@ export function parseState(json: unknown): ApiState | null {
   const prog = isObj(json["progress"]) ? json["progress"] : null;
   const failed = isObj(json["failed"]) ? json["failed"] : null;
   const df = isObj(json["destroy_failed"]) ? json["destroy_failed"] : null;
+  const sf = isObj(json["start_failure"]) ? json["start_failure"] : null;
   const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
   return {
     state: json["state"],
@@ -218,6 +221,10 @@ export function parseState(json: unknown): ApiState | null {
     agent_unreachable: json["agent_unreachable"] === true,
     failed: failed ? { reason: typeof failed["reason"] === "string" ? failed["reason"] : null } : null,
     destroy_failed: df ? { error: typeof df["error"] === "string" ? df["error"] : "" } : null,
+    start_failure:
+      sf && typeof sf["code"] === "string"
+        ? { code: sf["code"], message: typeof sf["message"] === "string" ? sf["message"] : "" }
+        : null,
     dph: num(json["dph"]),
     uptime_s: num(json["uptime_s"]),
     cost_so_far: num(json["cost_so_far"]),
@@ -862,6 +869,7 @@ const END_REASON_TEXT: Record<string, string> = {
   start_failed: "the start failed",
   hard_cap: "reached the hard cap",
   boot_timeout: "the boot took too long",
+  start_stuck: "the rented machine did not start",
   unreachable: "the agent stayed unreachable",
   destroy_retry: "destroyed after a retry",
   destroy_requested: "destroy requested",
@@ -869,6 +877,15 @@ const END_REASON_TEXT: Record<string, string> = {
   never_created: "it was never created on Vast",
   gone: "it is gone",
 };
+
+// Page text per start failure code; an unknown code shows the server's message.
+const START_FAILURE_TEXT: Record<string, string> = {
+  start_stuck: "The rented machine did not start. It was released; try Start again.",
+};
+
+export function startFailureText(f: { code: string; message: string }): string {
+  return START_FAILURE_TEXT[f.code] ?? (f.message !== "" ? f.message : "The start failed; try Start again.");
+}
 
 export function endedText(reason: string | null): string {
   const why = reason === null ? undefined : END_REASON_TEXT[reason];

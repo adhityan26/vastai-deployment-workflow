@@ -286,6 +286,8 @@ async function harness(
     startFailsafeHours: 3,
     startHardCapHours: 6,
     bootTimeoutMin: 25,
+    vastStartStuckMin: 5,
+    vastBadMachineTtlMin: 60,
     unreachableDestroyMin: 15,
     reconcileGraceMin: 10,
     webDestroyRetries: 1,
@@ -594,6 +596,26 @@ describe("GET /api/state", () => {
     const memberBody = (await call("GET", "/api/state", await member())).json();
     expect(memberBody.role).toBe("member");
     expect(memberBody.unknown).toEqual([]);
+  });
+
+  it("shows a stuck start as a fixed code and plain message, for admins and members", async () => {
+    expect((await call("GET", "/api/state", await member())).json().start_failure).toBeNull();
+    h = await harness({ ready: false });
+    await h.registry.begin({ created_at: NOW_S, profile: "image", agent_token: TOKEN, tailnet_hostname: HOST });
+    await h.registry.update(HOST, { status: "booting", vast_instance_id: VAST_ID, start_stuck_at: NOW_S + 300, stuck_machine_id: 45608 });
+    await h.registry.markGone(HOST);
+    for (const who of [await admin(), await member()]) {
+      const res = await call("GET", "/api/state", who);
+      expect(res.json().state).toBe("none");
+      expect(res.json().start_failure).toEqual({
+        code: "start_stuck",
+        message: "The rented machine did not start. It was released; try Start again.",
+      });
+      expect(res.body).not.toContain("45608");
+    }
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    expect(doc.components.schemas.State.required).toContain("start_failure");
+    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck"]);
   });
 
   it("redacts a Vast error that echoes the key", async () => {

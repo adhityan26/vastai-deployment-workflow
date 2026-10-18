@@ -25,7 +25,7 @@ export interface ConsoleLine {
 /**
  * Why the console's instance ended, as a fixed identifier: destroyed (Destroy button),
  * start_failed (the Start that created the console failed), the reconcile reasons hard_cap,
- * boot_timeout, unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
+ * boot_timeout, start_stuck (the container never started), unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
  * (the record disappeared some other way). A restored state with any other value is refused.
  */
 export const CONSOLE_END_REASONS = [
@@ -33,6 +33,7 @@ export const CONSOLE_END_REASONS = [
   "start_failed",
   "hard_cap",
   "boot_timeout",
+  "start_stuck",
   "unreachable",
   "destroy_retry",
   "destroy_requested",

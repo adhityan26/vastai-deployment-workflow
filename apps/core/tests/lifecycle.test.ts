@@ -56,6 +56,8 @@ const cfg = {
   startFailsafeHours: 3,
   startHardCapHours: 6,
   bootTimeoutMin: 25,
+  vastStartStuckMin: 5,
+  vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
   webDestroyRetries: 3,
@@ -183,8 +185,10 @@ function setup(
   const vast = new FakeVast(calls, clock);
   const agent = new FakeAgent(calls);
   const sleeps: number[] = [];
+  const logs: string[] = [];
   let hostCounter = 0;
   const life = new Lifecycle({
+    log: (level, text) => void logs.push(`${level} ${text}`),
     cfg: { ...cfg, ...(over.cfg ?? {}) } as unknown as AppsConfig,
     vast,
     registry,
@@ -198,7 +202,7 @@ function setup(
       sleeps.push(s);
     },
   });
-  return { calls, time, registry, vast, agent, life, file, sleeps };
+  return { calls, time, registry, vast, agent, life, file, sleeps, logs };
 }
 
 async function errorOf(p: Promise<unknown>): Promise<Error> {
@@ -1229,5 +1233,213 @@ describe("overall download progress", () => {
     expect((await life.view()).download).toBeNull();
     agent.statusImpl = async () => status("ready");
     expect((await life.view()).download).toBeNull();
+  });
+});
+
+describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
+  const BAD = 45608;
+  const GOOD = 777;
+  // The row seen live on 2026-10-19: the image was pulled but the container never started.
+  const stuckRow = {
+    actual_status: "created",
+    cur_state: "stopped",
+    next_state: "stopped",
+    intended_status: "stopped",
+    last_started: null,
+    status_msg: "Successfully loaded vastai/comfy:v0.41.0-cuda-12.9-py312",
+    machine_id: BAD,
+  };
+
+  function stuckSetup(over: Parameters<typeof setup>[0] = {}) {
+    const s = setup(over);
+    s.vast.offers = [
+      { id: 11, dph_total: 0.2, gpu_name: "RTX 3090", gpu_ram: 24576, machine_id: BAD },
+      { id: 12, dph_total: 0.3, gpu_name: "RTX 3090", gpu_ram: 24576, machine_id: GOOD },
+    ];
+    s.agent.statusImpl = async () => {
+      throw new Unreachable("agent not reachable");
+    };
+    return s;
+  }
+
+  it("destroys an instance that is still not started after the stuck limit, with a fixed failure", async () => {
+    const { life, vast, registry, time, agent, logs } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 4 * 60 + 59;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    expect((await life.view()).start_failure).toBeNull();
+    time.now = T0 + 5 * 60;
+    const report = await life.reconcile();
+    expect(report.destroyed).toEqual([
+      { tailnet_hostname: HOST, vast_instance_id: 900, reason: "start_stuck", outcome: "destroyed" },
+    ]);
+    expect(agent.destroyCalls).toEqual(["watchdog"]);
+    expect(vast.calls).toContain("vast.destroy:900");
+    expect(await registry.active()).toBeNull();
+    const view = await life.view();
+    expect(view.state).toBe("none");
+    expect(view.start_failure).toEqual({ code: "start_stuck" });
+    const line = logs.find((l) => l.includes("start stuck"));
+    expect(line).toBeDefined();
+    expect(line).toContain("900");
+    expect(line).toContain(String(BAD));
+    for (const l of logs) {
+      expect(l).not.toContain(HOST);
+      expect(l).not.toContain(TOKEN);
+      expect(l).not.toContain(AUTH_KEY);
+    }
+  });
+
+  it("counts created, exited, stopped and a never-started stopped intent as stuck", async () => {
+    const rows: Record<string, unknown>[] = [
+      { actual_status: "created" },
+      { actual_status: "exited" },
+      { actual_status: "stopped" },
+      { actual_status: null, intended_status: "stopped", last_started: null },
+    ];
+    for (const row of rows) {
+      const { life, vast, time } = stuckSetup();
+      await life.start();
+      Object.assign(vast.instances[0]!, row);
+      time.now = T0 + 5 * 60;
+      expect((await life.reconcile()).destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
+    }
+  });
+
+  it("an image still loading is not stuck; it only hits the boot timeout", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, { actual_status: "loading", intended_status: "running", last_started: null });
+    time.now = T0 + 24 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    time.now = T0 + 25 * 60;
+    expect((await life.reconcile()).destroyed.map((d) => d.reason)).toEqual(["boot_timeout"]);
+    expect((await life.view()).start_failure).toBeNull();
+  });
+
+  it("loading with a stopped intent is still loading, not stuck", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, { actual_status: "loading", intended_status: "stopped", last_started: null });
+    time.now = T0 + 10 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+  });
+
+  it("running with the agent not answering yet is booting, not stuck", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, { actual_status: "running", intended_status: "running", last_started: T0 + 60 });
+    time.now = T0 + 10 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+  });
+
+  it("a stopped intent after the container once started is not a stuck start", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, { actual_status: null, intended_status: "stopped", last_started: T0 + 60 });
+    time.now = T0 + 10 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+  });
+
+  it("a ready instance is never a stuck start", async () => {
+    const { life, vast, time, agent } = stuckSetup();
+    await life.start();
+    agent.statusImpl = async () => status("ready");
+    time.now = T0 + 60;
+    await life.reconcile();
+    Object.assign(vast.instances[0]!, { actual_status: "exited" });
+    agent.statusImpl = async () => {
+      throw new Unreachable("down");
+    };
+    time.now = T0 + 10 * 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+  });
+
+  it("the next Start does not pick the stuck machine even when it is the cheapest, until the TTL passes", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    expect(vast.createdOffers).toEqual([11]);
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 5 * 60;
+    await life.reconcile();
+    expect((await life.estimate()).offer_id).toBe(12);
+    const second = await life.start();
+    expect(vast.createdOffers).toEqual([11, 12]);
+    expect(second.estimate.dph).toBe(0.3);
+    expect((await life.view()).start_failure).toBeNull(); // a new Start clears the failure
+    await life.destroy();
+    time.now = T0 + 5 * 60 + 60 * 60;
+    expect((await life.estimate()).offer_id).toBe(11);
+  });
+
+  it("gpuOptions skips the stuck machine too", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 5 * 60;
+    await life.reconcile();
+    const option = (await life.gpuOptions()).find((o) => o.name === "RTX 3090");
+    expect(option?.dph).toBe(0.3);
+  });
+
+  it("uses the chosen offer's machine when Vast's row does not name one", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, { actual_status: "created" });
+    time.now = T0 + 5 * 60;
+    await life.reconcile();
+    await life.start();
+    expect(vast.createdOffers).toEqual([11, 12]);
+  });
+
+  it("the bad machine and the failure survive a web restart (kept in the registry)", async () => {
+    const { life, vast, time, registry, agent } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 5 * 60;
+    await life.reconcile();
+    const life2 = new Lifecycle({
+      cfg,
+      vast,
+      registry,
+      agentFor: () => agent,
+      clock: () => time.now,
+      tsAuthKey: async () => AUTH_KEY,
+      newToken: () => TOKEN,
+      newHostname: () => "vast-other",
+      sleep: async () => undefined,
+    });
+    expect((await life2.view()).start_failure).toEqual({ code: "start_stuck" });
+    await life2.start();
+    expect(vast.createdOffers).toEqual([11, 12]);
+  });
+
+  it("a stuck detection racing with a new Start never destroys the new instance", async () => {
+    const { life, vast, time, registry } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 5 * 60;
+    // Both are queued at once: the reconcile releases the stuck one, then the Start rents anew.
+    const [report, second] = await Promise.all([life.reconcile(), life.start()]);
+    expect(report.destroyed.map((d) => d.vast_instance_id)).toEqual([900]);
+    expect(second.record.vast_instance_id).toBe(901);
+    // The new instance looks just like the old one did, but it is fresh: not stuck yet.
+    Object.assign(vast.instances.find((i) => i.id === 901)!, { ...stuckRow, machine_id: GOOD });
+    time.now = T0 + 5 * 60 + 60;
+    expect((await life.reconcile()).destroyed).toEqual([]);
+    expect(vast.calls).not.toContain("vast.destroy:901");
+    expect((await registry.active())?.vast_instance_id).toBe(901);
+    expect((await life.view()).start_failure).toBeNull();
+  });
+
+  it("a Start queued before the detection is refused while the stuck one is still active", async () => {
+    const { life, vast, time } = stuckSetup();
+    await life.start();
+    Object.assign(vast.instances[0]!, stuckRow);
+    time.now = T0 + 5 * 60;
+    const [startErr, report] = await Promise.all([errorOf(life.start()), life.reconcile()]);
+    expect(startErr.name).toBe("AlreadyActiveError");
+    expect(report.destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
   });
 });

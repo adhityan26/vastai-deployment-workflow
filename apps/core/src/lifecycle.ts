@@ -50,6 +50,12 @@ const MB_PER_GIB = 1024; // Vast reports gpu_ram in MiB; shown as whole GiB (245
 const DOWNLOAD_STATE = "downloading";
 const MODELS_PHASE = "models";
 const VAST_LOADING = "loading";
+const VAST_RUNNING = "running";
+// Vast statuses of a container that is not starting: the image is there (or was never needed)
+// but nothing runs. "loading" (image pull) is progress and only meets the boot timeout.
+const VAST_NOT_STARTING = new Set(["created", "exited", "stopped"]);
+const VAST_STOPPED_INTENT = "stopped";
+const STATUS_WORD = /^[a-z_]{1,32}$/; // a Vast status fit for a log line
 const PERCENT = 100;
 const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
 const HOST_PLACEHOLDER = "[host]";
@@ -58,6 +64,7 @@ const HOST_PLACEHOLDER = "[host]";
 const WATCHDOG_STOPS: Readonly<Record<string, { reason: StopReason }>> = {
   hard_cap: { reason: "hard_cap" },
   boot_timeout: { reason: "boot_failed" },
+  start_stuck: { reason: "boot_failed" },
   unreachable: { reason: "agent_unreachable" },
 };
 
@@ -152,6 +159,9 @@ export interface VastLike {
   instanceLogs?(id: number, tail: number): Promise<string>;
 }
 
+/** Why a start failed after Start returned, as a fixed code (GET /api/state start_failure). */
+export type StartFailureCode = "start_stuck";
+
 export interface LifecycleDeps {
   cfg: AppsConfig;
   vast: VastLike;
@@ -171,6 +181,8 @@ export interface LifecycleDeps {
   consoleStore?: ConsoleStoreLike;
   /** The usage history (USAGE_LOG_PATH); without it nothing is recorded and history() is empty. */
   usage?: UsageHistory;
+  /** Operational log lines (fixed text plus ids; never a hostname, token or key). */
+  log?(level: "info" | "warn" | "error", message: string): void;
 }
 
 /** GET /api/console: the boot console after `after`. Every text is masked; no hostname or token. */
@@ -246,6 +258,8 @@ export interface StatusView {
   progress: AgentStatus["progress"];
   /** GPU model of the active instance: Vast's row, else the offer chosen at start. */
   gpu_name: string | null;
+  /** The newest start failed after Start returned (e.g. it was released as stuck); cleared by the next Start. */
+  start_failure: { code: StartFailureCode } | null;
   download: DownloadView | null;
   remaining: { idle_s: number | null; failsafe_s: number | null; hard_cap_s: number | null };
   unknown: UnknownInstance[];
@@ -305,6 +319,22 @@ function unknownOf(inst: VastInstance): UnknownInstance {
     start_date: inst.start_date,
     dph: inst.dph_total,
   };
+}
+
+function positiveId(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+}
+
+/**
+ * Vast says the container is not starting: it is not running and not pulling the image, and it is
+ * created/exited/stopped, or it is meant to be stopped without ever having started. A running
+ * container whose agent does not answer yet is booting, not stuck.
+ */
+export function startStuck(inst: VastInstance): boolean {
+  const actual = inst.actual_status;
+  if (actual === VAST_RUNNING || actual === VAST_LOADING) return false;
+  if (actual !== null && VAST_NOT_STARTING.has(actual)) return true;
+  return inst["intended_status"] === VAST_STOPPED_INTENT && (inst["last_started"] ?? null) === null;
 }
 
 function message(err: unknown): string {
@@ -376,8 +406,11 @@ export class Lifecycle {
   private readonly destroyRequested = new Set<string>();
   // Consecutive successful Vast lists that omitted a record's instance, per hostname.
   private readonly vanishMisses = new Map<string, number>();
-  // GPU model of the offer the last start chose, until Vast's own row names it.
-  private startedGpu: { hostname: string; gpu_name: string | null } | null = null;
+  // GPU model and machine of the offer the last start chose, until Vast's own row names them.
+  private startedGpu: { hostname: string; gpu_name: string | null; machine_id: number | null } | null = null;
+  // Machines of stuck starts (machine id -> when it was found stuck). The registry keeps the
+  // same facts per record (start_stuck_at, stuck_machine_id) so they survive a restart.
+  private readonly stuckMachines = new Map<number, number>();
   // Boot console: the buffer (created on first use), when an admin last called console(), when
   // Vast was last read for it, the outcome of that read and the read in flight (single-flight).
   private consoleBuf: ConsoleBuffer | null = null;
@@ -470,11 +503,19 @@ export class Lifecycle {
    * of these models, has a finite positive price within VAST_MAX_DPH and reports at least
    * VAST_MIN_VRAM_GB (same MB unit as the query); a missing price or VRAM drops it.
    */
-  private async offersFor(models: readonly string[], base: OfferFilters = this.baseFilters()): Promise<Offer[]> {
+  private async offersFor(
+    models: readonly string[],
+    base: OfferFilters = this.baseFilters(),
+    avoid: ReadonlySet<number> = new Set(),
+  ): Promise<Offer[]> {
     const filters: OfferFilters = { ...base, allowedGpus: models };
     const minRamMb = filters.minVramGb * MB_PER_GB;
     const offers = await this.deps.vast.searchOffers(filters);
     return offers
+      .filter((o) => {
+        const machine = positiveId(o["machine_id"]);
+        return machine === null || !avoid.has(machine);
+      })
       .filter((o) => typeof o.gpu_name === "string" && models.includes(normalizeGpuName(o.gpu_name)))
       .filter((o) => typeof o.dph_total === "number" && Number.isFinite(o.dph_total) && o.dph_total > 0)
       .filter((o) => o.dph_total <= filters.maxDph)
@@ -482,10 +523,37 @@ export class Lifecycle {
       .sort((a, b) => a.dph_total - b.dph_total);
   }
 
+  private badMachineTtl(): number {
+    return intCfg(this.cfg, "vastBadMachineTtlMin", "VAST_BAD_MACHINE_TTL_MIN", 1) * SECONDS_PER_MINUTE;
+  }
+
+  /**
+   * Machines a Start must not rent: those of a stuck start within VAST_BAD_MACHINE_TTL_MIN, from
+   * memory and from the registry (so a restart keeps them). An unreadable registry leaves memory.
+   */
+  private async badMachines(): Promise<Set<number>> {
+    const ttl = this.badMachineTtl();
+    const now = this.now();
+    const out = new Set<number>();
+    for (const [machine, at] of this.stuckMachines) {
+      if (now - at < ttl) out.add(machine);
+      else this.stuckMachines.delete(machine);
+    }
+    try {
+      for (const r of await this.deps.registry.all()) {
+        const machine = positiveId(r.stuck_machine_id);
+        if (machine !== null && typeof r.start_stuck_at === "number" && now - r.start_stuck_at < ttl) out.add(machine);
+      }
+    } catch {
+      // the registry cannot be read: memory only
+    }
+    return out;
+  }
+
   /** Every allowed model in config order with its cheapest matching offer (one Vast search). */
   async gpuOptions(): Promise<GpuOption[]> {
     const models = this.allowedModels();
-    const offers = await this.offersFor(models);
+    const offers = await this.offersFor(models, this.baseFilters(), await this.badMachines());
     return models.map((name) => {
       const best = offers.find((o) => normalizeGpuName(o.gpu_name as string) === name);
       if (best === undefined) return { name, dph: null, vram_gb: null, available: false };
@@ -504,7 +572,8 @@ export class Lifecycle {
    * `gpu` restricts the search to that allowed model; without it every allowed model counts.
    */
   async estimate(gpu?: string): Promise<CostEstimate> {
-    const offer = (await this.offersFor(this.modelsFor(gpu)))[0];
+    const models = this.modelsFor(gpu);
+    const offer = (await this.offersFor(models, this.baseFilters(), await this.badMachines()))[0];
     if (offer === undefined) throw new NoOffersError();
     return this.estimateFor(offer);
   }
@@ -595,15 +664,17 @@ export class Lifecycle {
     if (authKey === "") return failBeforeCreate(new Error("the Tailscale auth key is empty"), "ts_key_missing");
 
     let filters: OfferFilters;
+    let avoid: Set<number>;
     try {
       filters = this.baseFilters();
+      avoid = await this.badMachines();
     } catch (err) {
       return failBeforeCreate(err, "config_invalid");
     }
 
     let offer: Offer | undefined;
     try {
-      offer = (await this.offersFor(models, filters))[0];
+      offer = (await this.offersFor(models, filters, avoid))[0];
     } catch (err) {
       return failBeforeCreate(err, "vast_unavailable");
     }
@@ -621,7 +692,11 @@ export class Lifecycle {
     } catch (err) {
       return failBeforeCreate(err, "config_invalid");
     }
-    this.startedGpu = { hostname, gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null };
+    this.startedGpu = {
+      hostname,
+      gpu_name: typeof offer.gpu_name === "string" ? offer.gpu_name : null,
+      machine_id: positiveId(offer["machine_id"]),
+    };
     this.withUsage((u) => u.noteOffer(hostname, offer.gpu_name, offer.dph_total));
 
     let created: { id: number };
@@ -800,6 +875,9 @@ export class Lifecycle {
     // the console update at its end (see feedConsole).
     const consoleEpoch = this.consoleEpoch();
     const record = await this.deps.registry.active();
+    // The newest record (the active one, else the last one written) says whether its start got stuck.
+    const latest = record ?? (await this.deps.registry.all().then((rs) => rs.at(-1) ?? null, () => null));
+    const startFailure: StatusView["start_failure"] = latest?.start_stuck_at != null ? { code: "start_stuck" } : null;
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
     try {
@@ -886,6 +964,7 @@ export class Lifecycle {
       cost_so_far: cost,
       progress,
       gpu_name: record === null ? null : (rowGpu ?? startGpu),
+      start_failure: startFailure,
       download: overallDownload(state, progress, this.deps.profileModels ?? []),
       remaining: {
         idle_s: left(agent?.idle_destroy_at),
@@ -1223,6 +1302,7 @@ export class Lifecycle {
     const now = this.now();
     const grace = intCfg(this.cfg, "reconcileGraceMin", "RECONCILE_GRACE_MIN", 1) * SECONDS_PER_MINUTE;
     const bootTimeout = intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1) * SECONDS_PER_MINUTE;
+    const stuckLimit = intCfg(this.cfg, "vastStartStuckMin", "VAST_START_STUCK_MIN", 1) * SECONDS_PER_MINUTE;
     const unreachableLimit = intCfg(this.cfg, "unreachableDestroyMin", "UNREACHABLE_DESTROY_MIN", 1) * SECONDS_PER_MINUTE;
     const hardCap = intCfg(this.cfg, "startHardCapHours", "START_HARD_CAP_HOURS", 1) * SECONDS_PER_HOUR;
 
@@ -1342,7 +1422,14 @@ export class Lifecycle {
     let reason: string | null = null;
     if (record.status === "stopping") reason = "destroy_retry";
     else if (now - startedAt >= hardCap) reason = "hard_cap";
-    else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
+    else if (
+      record.status === "booting" &&
+      agent === null &&
+      now - record.created_at >= stuckLimit &&
+      startStuck(inst)
+    ) {
+      reason = "start_stuck";
+    } else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
     else if (
       agent === null &&
       inst.actual_status === "running" &&
@@ -1352,6 +1439,7 @@ export class Lifecycle {
       reason = "unreachable";
     }
     if (reason === null) return report;
+    if (reason === "start_stuck") record = await this.noteStuck(record, inst, now);
     try {
       const result = await this.destroyRecord(record, id, "watchdog", WATCHDOG_STOPS[reason] ?? null);
       this.endConsole(hostname, reason as ConsoleEndReason);
@@ -1365,6 +1453,34 @@ export class Lifecycle {
       report.destroy_failed.push({ tailnet_hostname: hostname, vast_instance_id: id, reason, error: this.scrub(message(err)) });
     }
     return report;
+  }
+
+  /**
+   * Remember a stuck start before its instance is released: the machine is avoided for
+   * VAST_BAD_MACHINE_TTL_MIN (memory, and the record so a restart keeps it) and the page learns
+   * why. Called inside reconcile (exclusive): the record is the active one, never a newer Start's.
+   */
+  private async noteStuck(record: InstanceRecord, inst: VastInstance, now: number): Promise<InstanceRecord> {
+    const hostname = record.tailnet_hostname;
+    const offerMachine = this.startedGpu?.hostname === hostname ? this.startedGpu.machine_id : null;
+    const machine = positiveId(inst["machine_id"]) ?? offerMachine;
+    if (machine !== null) this.stuckMachines.set(machine, now);
+    const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
+    const ttlMin = Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE);
+    try {
+      this.deps.log?.(
+        "warn",
+        `lifecycle: start stuck: instance ${inst.id} on machine ${machine ?? "unknown"} did not start ` +
+          `(actual_status=${status}); releasing it and avoiding the machine for ${ttlMin} min`,
+      );
+    } catch {
+      // logging never stops the release
+    }
+    try {
+      return await this.deps.registry.update(hostname, { start_stuck_at: now, stuck_machine_id: machine });
+    } catch {
+      return record; // memory still avoids the machine; the release goes on
+    }
   }
 }
 

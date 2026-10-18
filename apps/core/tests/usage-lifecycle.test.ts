@@ -34,6 +34,8 @@ const cfg = {
   startFailsafeHours: 3,
   startHardCapHours: 6,
   bootTimeoutMin: 25,
+  vastStartStuckMin: 5,
+  vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
   webDestroyRetries: 1,
@@ -191,6 +193,17 @@ describe("usage history through the lifecycle", () => {
     await expect(h.lc.start(undefined, "root")).rejects.toThrow();
     const [e] = await h.lc.history();
     expect(e).toMatchObject({ reason: "boot_failed", active: false, instance_id: null, estimated_cost: null, started_by: "root" });
+  });
+
+  it("a stuck start (the container never started) is boot_failed, stopped by the web", async () => {
+    const h = await harness();
+    await h.lc.start(undefined, "root");
+    h.agent.status = async () => Promise.reject(new Error("unreachable"));
+    Object.assign(h.vast.instances[0]!, { actual_status: "created", intended_status: "stopped", last_started: null });
+    h.clock.t = T0 + 5 * 60;
+    expect((await h.lc.reconcile()).destroyed.map((d) => d.reason)).toEqual(["start_stuck"]);
+    expect((await h.lc.history())[0]).toMatchObject({ reason: "boot_failed", active: false, ended_at: T0 + 5 * 60, stop_by: null });
+    expect(h.logs).toContain("info usage: stop reason=boot_failed duration_s=300");
   });
 
   it("an ambiguous create that never shows up is boot_failed (never created)", async () => {

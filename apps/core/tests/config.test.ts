@@ -29,6 +29,14 @@ describe("loadConfig", () => {
     expect(cfg.secretNames).toContain("VAST_API_KEY");
   });
 
+  it("stuck start keys default to 5 and 60 minutes and refuse 0", () => {
+    const cfg = loadConfig(base, schema);
+    expect(cfg["vastStartStuckMin"]).toBe(5);
+    expect(cfg["vastBadMachineTtlMin"]).toBe(60);
+    expect(() => loadConfig({ ...base, VAST_START_STUCK_MIN: "0" }, schema)).toThrow(/VAST_START_STUCK_MIN: below the minimum 1/);
+    expect(() => loadConfig({ ...base, VAST_BAD_MACHINE_TTL_MIN: "0" }, schema)).toThrow(/VAST_BAD_MACHINE_TTL_MIN: below the minimum 1/);
+  });
+
   it("rejects a failsafe longer than the hard cap", () => {
     expect(() => loadConfig({ ...base, START_FAILSAFE_HOURS: "7", START_HARD_CAP_HOURS: "6" }, schema)).toThrow(
       /START_FAILSAFE_HOURS: must not be greater than START_HARD_CAP_HOURS/,

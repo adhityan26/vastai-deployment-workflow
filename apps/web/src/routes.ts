@@ -36,6 +36,7 @@ import {
   type ReferenceLimits,
   type Viewer,
   type StartFailReason,
+  type StartFailureCode,
   type StatusView,
   type UsageItem,
 } from "@vast-comfy/core";
@@ -74,6 +75,11 @@ const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
   create_uncertain: "instance creation is uncertain; reconcile will resolve it",
   registry_failed: "the instance could not be recorded and was destroyed",
   unexpected: "the instance could not be started",
+};
+
+// Plain text per fixed code of a start that failed after Start returned (GET /api/state start_failure).
+const START_FAILURE_MESSAGES: Record<StartFailureCode, string> = {
+  start_stuck: "The rented machine did not start. It was released; try Start again.",
 };
 
 /** An error's class name for a log line, or a fixed word when it is not a plain identifier. */
@@ -177,6 +183,10 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
     cost_so_far: view.cost_so_far,
     progress: view.progress,
     gpu_name: view.gpu_name === null ? null : scrub(view.gpu_name).slice(0, GPU_NAME_MAX),
+    // A fixed code and its fixed text only: no machine or instance ids.
+    start_failure: view.start_failure
+      ? { code: view.start_failure.code, message: START_FAILURE_MESSAGES[view.start_failure.code] }
+      : null,
     // Numbers plus a profile file name: no instance internals.
     download: view.download,
     remaining: view.remaining,

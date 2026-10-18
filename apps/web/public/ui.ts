@@ -17,6 +17,7 @@ import {
   consoleExport,
   consoleKeepsPolling,
   endedText,
+  startFailureText,
   isNearBottom,
   lineTime,
   mergeConsole,
@@ -792,6 +793,8 @@ export function mountApp(doc: Document, env: Env): App {
     const failed = $("alert-failed");
     failed.hidden = !(s.state === "failed" || s.failed !== null);
     $("failed-reason").textContent = s.failed?.reason ?? "";
+    $("alert-start-failure").hidden = s.start_failure === null;
+    $("start-failure-text").textContent = s.start_failure === null ? "" : startFailureText(s.start_failure);
     const df = $("alert-destroy-failed");
     df.hidden = !(s.state === "destroy_failed" || s.destroy_failed !== null);
     $("destroy-failed-error").textContent = s.destroy_failed?.error ?? "";

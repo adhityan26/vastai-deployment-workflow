@@ -15,6 +15,10 @@ export interface InstanceRecord {
   tailnet_hostname: string;
   status: InstanceStatus;
   unreachable_since?: number | null;
+  /** When the web found the start stuck (the container never started) and released the instance. */
+  start_stuck_at?: number | null;
+  /** Vast machine of that stuck start; later Starts avoid it for VAST_BAD_MACHINE_TTL_MIN. */
+  stuck_machine_id?: number | null;
 }
 
 export type NewRecord = Omit<InstanceRecord, "status" | "vast_instance_id"> &

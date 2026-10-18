@@ -144,6 +144,7 @@ async function main(): Promise<void> {
     profileModels: profile.models,
     consoleStore,
     usage,
+    log,
     newToken: () => randomBytes(TOKEN_BYTES).toString("hex"),
     newHostname: () => `${HOSTNAME_PREFIX}${randomBytes(HOSTNAME_ID_BYTES).toString("hex")}`,
   });
