@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
 import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./styles.js";
+import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
@@ -73,6 +74,8 @@ export interface Profile {
   readonly edit: EditSpec | null;
   /** The enabled styles (LoRA variations with their own parameters); empty when the profile has none. */
   readonly styles: readonly StyleSpec[];
+  /** The upscale mode when the profile enables it; null otherwise. */
+  readonly upscale: UpscaleSpec | null;
   readonly models: readonly ModelSpec[];
 }
 
@@ -237,6 +240,7 @@ export function loadProfile(path: string): Profile {
       generate: parseGenerate(raw["generate"]),
       edit: raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]),
       styles: parseStyles(raw["styles"], models.map((m) => m.file)),
+      upscale: parseUpscale(raw["upscale"], models.map((m) => m.file)),
       models,
     };
   } catch (e) {

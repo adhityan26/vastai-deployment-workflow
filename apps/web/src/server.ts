@@ -47,6 +47,8 @@ export interface ServerDeps {
   template: unknown;
   /** The edit workflow template named by the profile's edit section; absent or null turns edit off. */
   editTemplate?: unknown;
+  /** The upscale workflow template; null/absent when the profile has no enabled upscale section. */
+  upscaleTemplate?: unknown;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
   /** Directory of the static page (apps/web/public); may be empty or missing. */

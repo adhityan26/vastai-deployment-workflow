@@ -61,6 +61,9 @@ import {
   referenceHint,
   type EditInfo,
   isChainableUrl,
+  upscaleAsEdit,
+  upscaleHint,
+  upscaleLabel,
   snapToStep,
   styleDefaults,
   styleRequest,
@@ -606,5 +609,30 @@ describe("styles from the state", () => {
     for (const u of ["https://evil.example/api/image/a/0", "//evil.example/x", "/api/image/a/../0", "/api/image/a/0?x=1", "/api/other/a/0", "data:image/png;base64,AA"]) {
       expect(isChainableUrl(u), u).toBe(false);
     }
+  });
+});
+
+describe("upscale info from the state", () => {
+  const up = { scales: ["2x", "4x"], max_bytes: 8_388_608, max_pixels: 16_777_216, types: ["png", "jpeg"] };
+
+  it("is null when absent or unusable, kept when valid", () => {
+    expect(parseState(base)!.upscale).toBeNull();
+    const bad: unknown[] = ["yes", { ...up, scales: [] }, { ...up, scales: [""] }, { ...up, scales: "2x" }, { ...up, max_bytes: 0 }, { ...up, max_pixels: 1.5 }, { ...up, types: ["gif"] }, { ...up, types: [] }];
+    for (const b of bad) expect(parseState({ ...base, upscale: b })!.upscale, JSON.stringify(b)).toBeNull();
+    expect(parseState({ ...base, upscale: up })!.upscale).toEqual(up);
+  });
+
+  it("canUpscale needs a ready instance, the section and no pending job", () => {
+    const s = (state: string) => parseState({ ...base, state, upscale: up })!;
+    expect(controls(s("ready"), false, false).canUpscale).toBe(true);
+    expect(controls(s("booting"), false, false).canUpscale).toBe(false);
+    expect(controls(s("ready"), false, true).canUpscale).toBe(false);
+    expect(controls(parseState({ ...base, state: "ready" })!, false, false).canUpscale).toBe(false);
+  });
+
+  it("takes one image under the server limits", () => {
+    expect(upscaleAsEdit(up)).toMatchObject({ max_references: 1, max_bytes: 8_388_608, types: ["png", "jpeg"] });
+    expect(upscaleHint(up)).toBe("One image (PNG, JPEG), 8.0 MB at most. The result size is limited by the server.");
+    expect(upscaleLabel("2x")).toBe("Upscale: 2x");
   });
 });

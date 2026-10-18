@@ -13,6 +13,7 @@ const profile: Profile = {
   name: "t",
   edit: null,
   styles: [],
+  upscale: null,
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",

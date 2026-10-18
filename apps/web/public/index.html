@@ -126,11 +126,14 @@
     <div id="mode-box" class="seg" role="group" aria-label="Mode" hidden>
       <button id="mode-generate" type="button" aria-pressed="true">Generate</button>
       <button id="mode-edit" type="button" aria-pressed="false">Edit images</button>
+      <button id="mode-upscale" type="button" aria-pressed="false" hidden>Upscale</button>
     </div>
     <form id="gen-form" novalidate>
-      <label for="prompt">Prompt</label>
-      <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
-      <p id="prompt-count" class="muted">0 characters</p>
+      <div id="prompt-box">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
+        <p id="prompt-count" class="muted">0 characters</p>
+      </div>
 
       <div id="edit-box" hidden>
         <label for="ref-input">Reference images</label>
@@ -138,8 +141,14 @@
         <input id="ref-input" name="references" type="file" multiple>
         <p id="ref-error" class="alert bad" role="alert" hidden></p>
         <ul id="ref-list" class="refs" aria-label="Attached images"></ul>
-        <label for="resolution">Resolution</label>
-        <select id="resolution" name="resolution"></select>
+        <div id="resolution-box">
+          <label for="resolution">Resolution</label>
+          <select id="resolution" name="resolution"></select>
+        </div>
+        <div id="scale-box" hidden>
+          <label for="scale">Scale</label>
+          <select id="scale" name="scale"></select>
+        </div>
       </div>
 
       <fieldset id="style-box" hidden>
@@ -148,6 +157,7 @@
         <div id="style-params" class="style-params"></div>
       </fieldset>
 
+      <div id="sampling-box">
       <fieldset>
         <legend>Quality</legend>
         <div id="presets" class="seg"></div>
@@ -160,6 +170,7 @@
 
       <label for="seed">Seed (optional)</label>
       <input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="random">
+      </div>
 
       <p id="form-error" class="alert bad" role="alert" hidden></p>
       <button id="btn-generate" type="submit" class="primary" disabled>Generate</button>

@@ -1133,3 +1133,127 @@ describe("styles and chaining", () => {
     });
   });
 });
+
+describe("upscale", () => {
+  const up = { scales: ["2x", "4x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"] };
+  const editInfo = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }] };
+  const chooseUp = () => q<HTMLButtonElement>("#mode-upscale")!.click();
+  const pickOne = (name = "a.png", content = "UPBYTES") => {
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File([content], name, { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+  };
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("offers the mode only when the server offers upscale, and shows just the image and the scale", async () => {
+    await mount({ edit: editInfo });
+    expect(q("#mode-upscale")!.hidden).toBe(true);
+    await mount({ upscale: up });
+    expect(q("#mode-box")!.hidden).toBe(false); // upscale alone is enough for the switch
+    expect(q("#mode-edit")!.hidden).toBe(true);
+    chooseUp();
+    expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+    expect(q("#prompt-box")!.hidden).toBe(true);
+    expect(q("#sampling-box")!.hidden).toBe(true);
+    expect(q("#size-box")!.hidden).toBe(true);
+    expect(q("#style-box")!.hidden).toBe(true);
+    expect(q("#resolution-box")!.hidden).toBe(true);
+    expect(q("#scale-box")!.hidden).toBe(false);
+    expect(q("#edit-box")!.hidden).toBe(false);
+    expect([...document.querySelectorAll("#scale option")].map((o) => o.textContent)).toEqual(["2x", "4x"]);
+    expect(q<HTMLInputElement>("#ref-input")!.multiple).toBe(false);
+    expect(q("#ref-hint")!.textContent).toContain("One image");
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Upscale");
+  });
+
+  it("goes back to the generate form when the server stops offering upscale", async () => {
+    await mount({ upscale: up });
+    chooseUp();
+    routes["GET /api/state"] = { body: apiState({ upscale: null }) };
+    await app!.refresh();
+    expect(q("#prompt-box")!.hidden).toBe(false);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
+  });
+
+  it("accepts one image only and posts the image as base64 with the scale, then polls the job", async () => {
+    await mount({ upscale: up }, { "POST /api/upscale": { status: 202, body: { id: "up-1" } }, "GET /api/generate/up-1": { body: { status: "pending" } } });
+    chooseUp();
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("Attach exactly one image to upscale.");
+    pickOne("a.png", "UPBYTES");
+    pickOne("b.png");
+    expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    expect(q("#ref-error")!.textContent).toBe("At most 1 images can be attached.");
+    q<HTMLSelectElement>("#scale")!.value = "4x";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/upscale")).toHaveLength(1);
+    expect(posts("/api/upscale")[0]!.body).toEqual({ image: Buffer.from("UPBYTES").toString("base64"), scale: "4x" });
+    expect(q(".job .muted")!.textContent).toBe("Upscale: 4x");
+    expect(calls.some((c) => c.path === "/api/generate/up-1")).toBe(true);
+  });
+
+  it("shows the api refusal and frees the form", async () => {
+    await mount({ upscale: up }, { "POST /api/upscale": { status: 400, body: { error: { code: "upscale_too_large", message: "the result would be too big" } } } });
+    chooseUp();
+    pickOne();
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("the result would be too big");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  describe("from a result", () => {
+    async function withResult(over: Record<string, unknown>) {
+      await mount({ upscale: up, ...over }, {
+        "POST /api/generate": { status: 202, body: { id: "g-1" } },
+        "GET /api/generate/g-1": { body: { status: "done", images: [{ index: 0, url: "/api/image/g-1/0" }] } },
+        "GET /api/image/g-1/0": { body: null, raw: "RESULT", type: "image/png" },
+      });
+      q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+      q<HTMLFormElement>("#gen-form")!.requestSubmit();
+      await flush();
+      await flush();
+    }
+    const labels = () => [...document.querySelectorAll(".chain button")].map((b) => b.textContent);
+
+    it("adds an Upscale button, also when edit is off, that switches mode and attaches the result", async () => {
+      await withResult({});
+      expect(labels()).toEqual(["Upscale"]);
+      [...document.querySelectorAll<HTMLButtonElement>(".chain button")][0]!.click();
+      await flush();
+      expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+      expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
+    });
+
+    it("replaces a previously attached image, because an upscale takes one", async () => {
+      await withResult({ edit: editInfo });
+      expect(labels()).toEqual(["Use as reference", "Upscale"]);
+      q<HTMLButtonElement>(".chain button")!.click(); // into edit
+      await flush();
+      chooseUp();
+      [...document.querySelectorAll<HTMLButtonElement>(".chain button")][1]!.click();
+      await flush();
+      expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+      expect(q("#ref-error")!.hidden).toBe(true);
+    });
+  });
+
+  it("refuses to upscale when several images were attached in edit mode", async () => {
+    await mount({ upscale: up, edit: editInfo });
+    q<HTMLButtonElement>("#mode-edit")!.click();
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["A"], "a.png", { type: "image/png" }), new File(["B"], "b.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+    chooseUp();
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("Attach exactly one image to upscale.");
+    expect(posts("/api/upscale")).toHaveLength(0);
+  });
+});

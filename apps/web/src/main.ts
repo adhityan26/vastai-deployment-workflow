@@ -70,6 +70,11 @@ async function main(): Promise<void> {
     ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.edit.workflow), "utf8"))
     : null;
 
+  // Upscale likewise: only with an enabled upscale section, and its workflow must load.
+  const upscaleTemplate: unknown = profile.upscale
+    ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.upscale.workflow), "utf8"))
+    : null;
+
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
     // Fail closed: an empty allow-list no longer means "any GPU".
@@ -148,6 +153,7 @@ async function main(): Promise<void> {
     profile,
     template,
     editTemplate,
+    upscaleTemplate,
     credit: () => vast.accountCredit(),
     login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,

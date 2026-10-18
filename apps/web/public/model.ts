@@ -22,6 +22,7 @@ export const API = {
   destroyUnknown: "/api/destroy-unknown",
   generate: "/api/generate",
   edit: "/api/edit",
+  upscale: "/api/upscale",
   credit: "/api/credit",
   history: "/api/history",
   me: "/api/me",
@@ -62,6 +63,8 @@ export interface Resolution { name: string; value: number }
 /** What the server offers for edit with reference images (null in the state when edit is off). */
 export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[] }
 export type Mode = "generate" | "edit";
+/** The page's modes: the two that take styles, and upscale (one image in, a bigger one out). */
+export type PageMode = Mode | "upscale";
 export type StyleValue = number | string | boolean;
 /** One parameter of a style, as the server lists it (limits only; where it goes stays on the server). */
 export interface StyleParam {
@@ -75,6 +78,8 @@ export interface StyleParam {
   default: StyleValue;
 }
 export interface StyleInfo { id: string; title: string; modes: Mode[]; params: StyleParam[] }
+/** What the server offers for upscale (null in the state when upscale is off). */
+export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -96,6 +101,7 @@ export interface ApiState {
   sizes: Size[];
   edit: EditInfo | null;
   styles: StyleInfo[];
+  upscale: UpscaleInfo | null;
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
@@ -156,6 +162,14 @@ function parseStyles(v: unknown): StyleInfo[] {
     if (modes.length === 0 || params.some((p) => p === null)) return [];
     return [{ id: st["id"], title: st["title"], modes, params: params as StyleParam[] }];
   });
+}
+
+function parseUpscale(v: unknown): UpscaleInfo | null {
+  if (!isObj(v) || !posInt(v["max_bytes"]) || !posInt(v["max_pixels"])) return null;
+  const { scales, types } = v;
+  if (!Array.isArray(scales) || scales.length === 0 || !scales.every((x) => typeof x === "string" && x !== "")) return null;
+  if (!Array.isArray(types) || types.length === 0 || !types.every((t) => typeof t === "string" && EDIT_TYPES.includes(t))) return null;
+  return { scales: scales as string[], max_bytes: v["max_bytes"], max_pixels: v["max_pixels"], types: types as string[] };
 }
 
 function parseDownload(v: unknown): Download | null {
@@ -230,6 +244,7 @@ export function parseState(json: unknown): ApiState | null {
     ),
     edit: parseEdit(json["edit"]),
     styles: parseStyles(json["styles"]),
+    upscale: parseUpscale(json["upscale"]),
   };
 }
 
@@ -481,6 +496,8 @@ export interface Controls {
   canGenerate: boolean;
   /** Generating is possible and the server offers edit with reference images. */
   canEdit: boolean;
+  /** Generating is possible and the server offers upscale. */
+  canUpscale: boolean;
 }
 
 export function controls(s: ApiState | null, busy: boolean, jobPending: boolean): Controls {
@@ -493,6 +510,7 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canDestroy: admin && state !== "none" && state !== "stopping" && !busy,
     canGenerate: s !== null && GENERATE_STATES.has(state) && !jobPending,
     canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
+    canUpscale: s !== null && s.upscale !== null && GENERATE_STATES.has(state) && !jobPending,
   };
 }
 
@@ -627,6 +645,21 @@ export function styleRequest(style: StyleInfo | null, values: Record<string, Sty
 /** A result may be chained only when it is one of our own same-origin result paths. */
 export function isChainableUrl(url: string): boolean {
   return /^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url);
+}
+
+// ---- upscale ----
+
+/** The reference rules for the one image of an upscale, in the shape pickReferences takes. */
+export function upscaleAsEdit(u: UpscaleInfo): EditInfo {
+  return { max_references: 1, max_bytes: u.max_bytes, max_pixels: u.max_pixels, types: u.types, resolutions: [] };
+}
+
+export function upscaleHint(u: UpscaleInfo): string {
+  return `One image (${u.types.map((t) => t.toUpperCase()).join(", ")}), ${formatMegabytes(u.max_bytes)} at most. The result size is limited by the server.`;
+}
+
+export function upscaleLabel(scale: string): string {
+  return `Upscale: ${scale}`;
 }
 
 export function characterCount(text: string): string {

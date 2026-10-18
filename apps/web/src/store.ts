@@ -35,7 +35,7 @@ export type JobState =
   | { kind: "failed"; message: string };
 
 /** Which workflow a job ran: its SaveImage node is looked up in that template when polling. */
-export type JobKind = "generate" | "edit";
+export type JobKind = "generate" | "edit" | "upscale";
 
 export interface Job {
   readonly id: string;

@@ -396,7 +396,7 @@ def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     profile = load_profile(instance / "profiles" / "image.yaml")
     # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
     assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
-    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json")
+    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json")
 
 
 def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_another_model(tmp_path):
@@ -426,3 +426,17 @@ def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_anothe
     assert [m.file for m in after.models][-1] == "Qwen2.1_Anything2RealCharacters.safetensors"
     assert after.models[-1].dest == "models/loras/"
     assert len(after.models) == len(before.models) + 1
+
+
+def test_the_upscale_section_is_the_webs_business_and_its_workflow_ships_with_the_profile(tmp_path):
+    """The agent ignores `upscale:`; the model is downloaded because it is listed in `models`."""
+    import json
+    import yaml
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    raw = yaml.safe_load((root / "profiles" / "image.yaml").read_text())
+    assert raw["upscale"]["enabled"] is False  # off until a licensed model is pinned
+    assert "image-upscale.json" in raw["workflows"]
+    graph = json.loads((root / "workflows" / "image-upscale.json").read_text())
+    assert {n["class_type"] for n in graph.values()} >= {"LoadImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "SaveImage"}
