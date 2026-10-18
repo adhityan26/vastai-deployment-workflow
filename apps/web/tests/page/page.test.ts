@@ -1300,6 +1300,20 @@ describe("styles and chaining", () => {
       expect(q(".chain")).toBeNull();
     });
 
+    it("follows the server: buttons appear when edit or upscale becomes available after the result, and go when it stops", async () => {
+      await withResult({ edit: null });
+      expect(q(".chain")).toBeNull();
+      routes["GET /api/state"] = { body: apiState({ edit: editInfo, styles: [a2r] }) };
+      await app!.refresh();
+      expect(chainBtns()).toEqual(["Use as reference", "Use as reference: Anything to Real"]);
+      routes["GET /api/state"] = { body: apiState({ edit: null, upscale: { scales: ["2x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png"] } }) };
+      await app!.refresh();
+      expect(chainBtns()).toEqual(["Upscale"]);
+      routes["GET /api/state"] = { body: apiState({ edit: null }) };
+      await app!.refresh();
+      expect(q(".chain")).toBeNull();
+    });
+
     it("lists a plain button and one per edit style", async () => {
       await withResult();
       expect(chainBtns()).toEqual(["Use as reference", "Use as reference: Anything to Real"]);

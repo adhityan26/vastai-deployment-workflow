@@ -1308,6 +1308,18 @@ export function mountApp(doc: Document, env: Env): App {
     e.node.replaceChildren(...kids);
   }
 
+  /**
+   * The per-result buttons (Save, Use as reference, Upscale) depend on what the server offers now, not when
+   * the job finished: when that changes, the finished entries are drawn again from the current state.
+   */
+  let resultActionsKey = "";
+  function renderResultActions(s: ApiState): void {
+    const key = JSON.stringify([s.gallery, s.edit !== null, s.upscale !== null, s.edit ? stylesForMode(s.styles, "edit").map((st) => [st.id, st.title]) : []]);
+    if (key === resultActionsKey) return;
+    resultActionsKey = key;
+    for (const e of history) if (e.status === "done") renderEntry(e);
+  }
+
   function finishEntry(e: HistoryEntry, status: "done" | "failed", message = ""): void {
     e.status = status;
     e.message = message;
@@ -1845,6 +1857,7 @@ export function mountApp(doc: Document, env: Env): App {
       renderStatus(state);
       renderForm(state);
       renderGallery(state);
+      renderResultActions(state);
     }
     $("f-credit-box").hidden = !c.showAdmin;
     if (c.showAdmin) {
