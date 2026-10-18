@@ -218,6 +218,25 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL` (superseded by the two
   `TS_OAUTH_CLIENT_*` keys), `DISCORD_BOT_TOKEN`.
 
+## Boot console
+
+Admins see a live console of the instance boot (`GET /api/console`; members get 403). It merges
+Vast's `status_msg` (docker pull progress while the instance is `loading`), the container log
+(PID 1 stdout, read through Vast's log-request API and a pre-signed https file fetched without the
+API key) and a one-line summary of the agent's `/status`. Every line is masked before it is stored
+or sent (known secrets, `tskey-*`, Bearer and Authorization values, `*key`/`token`/`secret`/`password`
+values, long hex/base64 strings, URL credentials); the instance hostname shows as `[host]`.
+
+- Bounds: `BOOT_LOG_MAX_LINES` lines of at most `BOOT_LOG_MAX_LINE_CHARS` characters; a log download
+  stops at `BOOT_LOG_MAX_BYTES`; `BOOT_LOG_TAIL_LINES` lines are requested per read.
+- Cost: Vast is read for the console at most once per `BOOT_LOG_POLL_MIN_S`, and only while an admin
+  has called the console within `BOOT_LOG_WATCH_S`; an idle page costs nothing.
+- The lines survive a restart in `BOOT_LOG_PATH`; compose puts it on the data volume next to
+  `REGISTRY_PATH` (`/data/boot-console.json`). A corrupt file is ignored (the console starts empty).
+- After an instance ends its last lines stay visible (with the reason) until the next Start.
+- The phases come only from the instance's marker lines `[boot] step <n>/<m>: <id>` and
+  `[boot] FAILED: <code>` (the fixed step list is defined once in `apps/core/src/console.ts`).
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.

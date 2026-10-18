@@ -528,6 +528,171 @@
             ]
           }
         }
+      },
+      "ConsoleLine": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seq",
+          "t",
+          "source",
+          "text"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Increases by one per line and keeps counting across a new Start (persisted with the lines)"
+          },
+          "t": {
+            "type": "number",
+            "description": "Epoch UTC seconds when the web process first saw the line"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "vast_status",
+              "vast_logs",
+              "agent"
+            ],
+            "description": "vast_status: Vast status_msg (docker pull progress); vast_logs: the container's PID 1 stdout; agent: a summary of the agent's /status"
+          },
+          "text": {
+            "type": "string",
+            "description": "Masked (known secrets, tskey-*, Bearer, Authorization, *key/token/secret/password values, long hex/base64, URL credentials) and cut to BOOT_LOG_MAX_LINE_CHARS; the instance hostname is shown as [host]. Render as text only"
+          }
+        }
+      },
+      "ConsolePhase": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "image_pull",
+              "install_tools",
+              "failsafe",
+              "tailscale",
+              "agent",
+              "nodes",
+              "models",
+              "comfyui",
+              "ready"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Short English display name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ]
+          }
+        }
+      },
+      "Console": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "generation",
+          "instance",
+          "phases",
+          "lines",
+          "last_seq",
+          "truncated",
+          "source_error"
+        ],
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Changes when a new Start clears the console; the page then drops its lines (also when last_seq is below the after it sent)"
+          },
+          "instance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "ended",
+              "ended_reason"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "description": "Registry status of the console's instance (creating, booting, ready, stopping), or none once it ended"
+              },
+              "ended": {
+                "type": "boolean",
+                "description": "The instance is gone; the last lines are kept until the next Start"
+              },
+              "ended_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "destroyed",
+                  "start_failed",
+                  "hard_cap",
+                  "boot_timeout",
+                  "unreachable",
+                  "destroy_retry",
+                  "destroy_requested",
+                  "vanished",
+                  "never_created",
+                  "gone",
+                  null
+                ]
+              }
+            }
+          },
+          "phases": {
+            "type": "array",
+            "description": "Always every phase in this fixed order: image_pull, install_tools, failsafe, tailscale, agent, nodes, models, comfyui, ready",
+            "items": {
+              "$ref": "#/components/schemas/ConsolePhase"
+            }
+          },
+          "lines": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": {
+              "$ref": "#/components/schemas/ConsoleLine"
+            },
+            "description": "Lines with seq > after, oldest first (at most BOOT_LOG_MAX_LINES are kept)"
+          },
+          "last_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Send as the next after"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Lines after the requested seq were already dropped from the ring"
+          },
+          "source_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "vast_logs_unavailable",
+              null
+            ],
+            "description": "The last Vast read for the console failed; the kept lines are still returned"
+          }
+        }
       }
     }
   },
@@ -1559,6 +1724,81 @@
           },
           "502": {
             "description": "Vast failed (codes destroy_failed, vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/console": {
+      "get": {
+        "operationId": "console",
+        "summary": "Boot console of the current (or last ended) instance: masked lines after a sequence number and the boot phases (admin). Reads Vast at most once per BOOT_LOG_POLL_MIN_S, and only while an admin calls this route",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,15})$",
+              "description": "Return lines with seq greater than this (integer 0..9007199254740991, default 0)"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Console"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown query parameter or after not a decimal integer (code invalid_body), or above 2^53-1 (code invalid_query)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route (members too) (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The console could not be built, e.g. BOOT_LOG_* invalid (code console_unavailable)",
             "content": {
               "application/json": {
                 "schema": {

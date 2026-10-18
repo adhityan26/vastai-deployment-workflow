@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import {
   AgentClient,
   ComfyClient,
+  ConsoleStore,
   Lifecycle,
   Registry,
   VastClient,
   camelCase,
+  consoleFileCap,
   createTsAuthKeyProvider,
   loadConfigFromProcess,
   loadProfile,
@@ -96,6 +98,16 @@ async function main(): Promise<void> {
     readKeyFile: (path) => readFile(path, "utf8"),
   });
 
+  // Boot console lines (masked) survive a restart on the data volume (BOOT_LOG_PATH).
+  const consoleStore = new ConsoleStore(
+    str(cfg, "bootLogPath"),
+    consoleFileCap({
+      maxLines: int(cfg, "bootLogMaxLines"),
+      maxLineChars: int(cfg, "bootLogMaxLineChars"),
+      tailLines: int(cfg, "bootLogTailLines"),
+    }),
+  );
+
   const lifecycle = new Lifecycle({
     cfg,
     vast,
@@ -104,6 +116,7 @@ async function main(): Promise<void> {
     clock: () => Date.now() / 1000,
     tsAuthKey,
     profileModels: profile.models,
+    consoleStore,
     newToken: () => randomBytes(TOKEN_BYTES).toString("hex"),
     newHostname: () => `${HOSTNAME_PREFIX}${randomBytes(HOSTNAME_ID_BYTES).toString("hex")}`,
   });

@@ -84,6 +84,18 @@ describe("deploy files", () => {
       expect(env).not.toHaveProperty(k);
   });
 
+  it("the boot console file sits on the data volume next to the registry", () => {
+    const env = (svc["environment"] ?? {}) as Record<string, string>;
+    expect(env["REGISTRY_PATH"]).toBe("/data/registry.json");
+    expect(env["BOOT_LOG_PATH"]).toBe("/data/boot-console.json");
+    expect(svc["volumes"] as string[]).toContain("vast-comfy-registry:/data");
+    const example = read(".env.example");
+    for (const n of ["BOOT_LOG_MAX_LINES", "BOOT_LOG_MAX_LINE_CHARS", "BOOT_LOG_POLL_MIN_S", "BOOT_LOG_WATCH_S", "BOOT_LOG_MAX_BYTES", "BOOT_LOG_TAIL_LINES"]) {
+      expect(example).toMatch(new RegExp(`^# ${n}=`, "m"));
+      expect(schemaKeys.has(n)).toBe(true);
+    }
+  });
+
   it("the Tailscale OAuth keys exist in the schema and in .env.example (secrets empty, tunables commented)", () => {
     const keys = schema.keys as { name: string; secret?: boolean; components?: string[] }[];
     const byName = new Map(keys.map((k) => [k.name, k]));

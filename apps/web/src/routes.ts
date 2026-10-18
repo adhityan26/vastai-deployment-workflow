@@ -185,6 +185,12 @@ const IMAGE_PARAMS = {
   required: ["id", "index"],
   properties: { id: { type: "string", pattern: PROMPT_ID.source }, index: { type: "string", pattern: "^[0-9]{1,3}$" } },
 } as const;
+// `after` is a decimal integer 0..2^53-1 (the range is checked again after parsing).
+const CONSOLE_QUERY = {
+  type: "object",
+  additionalProperties: false,
+  properties: { after: { type: "string", pattern: "^(0|[1-9][0-9]{0,15})$" } },
+} as const;
 // Field values are validated by the generate service so its error codes reach the client.
 const GENERATE_BODY = {
   type: "object",
@@ -396,6 +402,22 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
     },
   );
+
+  // Boot console (admin only: the logs can reveal infrastructure details). Lines are masked by
+  // the lifecycle; the server's onSend guard still removes any configured secret.
+  app.get("/api/console", { ...admin, schema: { querystring: CONSOLE_QUERY } }, async (req, reply) => {
+    const raw = (req.query as { after?: string }).after;
+    const after = raw === undefined ? 0 : Number(raw);
+    if (!Number.isSafeInteger(after) || after < 0) {
+      return sendError(reply, 400, "invalid_query", "after must be an integer between 0 and 9007199254740991");
+    }
+    try {
+      return await deps.lifecycle.console(after);
+    } catch (err) {
+      log("warn", `console failed: ${errorName(err)}`);
+      return sendError(reply, 500, "console_unavailable", "the boot console is unavailable");
+    }
+  });
 
   app.post("/api/generate", { ...member, schema: { body: GENERATE_BODY } }, async (req, reply) => {
     const identity = req.identity!;

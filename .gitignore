@@ -22,3 +22,6 @@ apps/web/public/app.js.map
 
 # macOS
 .DS_Store
+
+# boot console lines written by a local web run (BOOT_LOG_PATH default)
+boot-console.json

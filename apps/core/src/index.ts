@@ -3,6 +3,7 @@
 export * from "./config.js";
 export * from "./agent.js";
 export * from "./comfy.js";
+export * from "./console.js";
 export * from "./generate.js";
 export * from "./lifecycle.js";
 export * from "./profile.js";
