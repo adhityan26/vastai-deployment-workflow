@@ -69,8 +69,10 @@ describe("loadProfile", () => {
       "qwen-image-2.1-UC-Q4_K_M.gguf",
       "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
       "vae/qwen_image_2.1_vae_bf16.safetensors",
+      "Qwen2.1_Anything2RealCharacters.safetensors",
+      "RealESRGAN_x4plus.safetensors",
     ]);
-    expect(loadProfile(writeProfile((d) => delete d.models)).models).toEqual([]);
+    expect(loadProfile(writeProfile((d) => { delete d.models; d.styles[0].enabled = false; d.upscale.enabled = false; })).models).toEqual([]);
     // Fields the web does not need are not copied.
     expect(Object.keys(loadProfile(shipped).models[0]!)).toEqual(["file", "size_bytes"]);
   });
@@ -227,18 +229,25 @@ describe("buildEditPrompt", () => {
 describe("styles in the profile", () => {
   const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
   const loraModel = { file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 123456 };
+  const withoutLora = (doc: Doc) => (doc.models = doc.models.filter((m: Doc) => m.file !== LORA));
   const enable = (doc: Doc) => {
+    withoutLora(doc);
     doc.models.push(loraModel);
     doc.styles[0].enabled = true;
   };
 
-  it("the shipped profile declares Anything to Real but keeps it off until its LoRA is pinned", () => {
+  it("the shipped profile turns Anything to Real on with its LoRA pinned into models/loras/", () => {
     const doc = parse(readFileSync(shipped, "utf8")) as Doc;
     expect(doc.styles[0].id).toBe("anything2real");
-    expect(doc.styles[0].enabled).toBe(false);
-    expect(loadProfile(shipped).styles).toEqual([]);
-    // no LoRA among the models: nothing for the agent to download
-    expect(loadProfile(shipped).models.map((m) => m.file)).not.toContain(LORA);
+    expect(doc.styles[0].enabled).toBe(true);
+    expect(loadProfile(shipped).styles.map((s) => s.id)).toEqual(["anything2real"]);
+    const entry = doc.models.find((m: Doc) => m.file === LORA);
+    expect(entry).toMatchObject({ repo: "WarmBloodAban/Qwen-Image-2.1-LoRAs", dest: "models/loras/", size_bytes: 318820200 });
+    expect(entry.revision).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("with the style off, its LoRA is not required among the models", () => {
+    expect(loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = false; })).styles).toEqual([]);
   });
 
   it("turning the style on (model entry added, enabled true) offers it and counts its download", () => {
@@ -248,7 +257,7 @@ describe("styles in the profile", () => {
   });
 
   it("enabling it without the model entry is refused at load", () => {
-    expect(() => loadProfile(writeProfile((d) => (d.styles[0].enabled = true)))).toThrow(ProfileError);
+    expect(() => loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = true; }))).toThrow(ProfileError);
   });
 
   it("the shipped lora placement fits both shipped workflows", () => {

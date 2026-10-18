@@ -1174,7 +1174,8 @@ describe("overall download progress", () => {
   const shipped = fileURLToPath(new URL("../../../instance/profiles/image.yaml", import.meta.url));
   const models = loadProfile(shipped).models;
   const [s1, s2, s3] = models.map((m) => m.size_bytes) as [number, number, number];
-  const total = s1 + s2 + s3;
+  const total = models.reduce((n, m) => n + m.size_bytes, 0);
+  const files = models.length;
   const prog = (file: string, bytes_done: number, phase = "models") => ({ phase, file, bytes_done, bytes_total: 1 });
 
   it("the TS profile loader reads models from the shipped profile", () => {
@@ -1182,22 +1183,27 @@ describe("overall download progress", () => {
       { file: "qwen-image-2.1-UC-Q4_K_M.gguf", size_bytes: 4604558112 },
       { file: "text_encoders/qwen3vl_8b_int8_convrot.safetensors", size_bytes: 9350798360 },
       { file: "vae/qwen_image_2.1_vae_bf16.safetensors", size_bytes: 675509688 },
+      { file: "Qwen2.1_Anything2RealCharacters.safetensors", size_bytes: 318820200 },
+      { file: "RealESRGAN_x4plus.safetensors", size_bytes: 66857836 },
     ]);
   });
 
   it("sums earlier files, the current file's bytes (clamped) and nothing after it", () => {
     const at = (file: string, done: number) => overallDownload("downloading", prog(file, done), models);
     expect(at("qwen-image-2.1-UC-Q4_K_M.gguf", 1_000_000_000)).toEqual({
-      files_total: 3, files_done: 0, bytes_done: 1_000_000_000, bytes_total: total, current_file: "qwen-image-2.1-UC-Q4_K_M.gguf",
+      files_total: files, files_done: 0, bytes_done: 1_000_000_000, bytes_total: total, current_file: "qwen-image-2.1-UC-Q4_K_M.gguf",
     });
     // Between files: the second file just started (basename as the agent reports it).
     expect(at("qwen3vl_8b_int8_convrot.safetensors", 0)).toMatchObject({ files_done: 1, bytes_done: s1 });
     // The profile's own subpath form matches too.
     expect(at("text_encoders/qwen3vl_8b_int8_convrot.safetensors", 5)).toMatchObject({ files_done: 1, bytes_done: s1 + 5 });
-    // Last file, with an agent counter past the file size: clamped.
+    // An agent counter past the file size is clamped to it.
     expect(at("qwen_image_2.1_vae_bf16.safetensors", s3 + 999)).toEqual({
-      files_total: 3, files_done: 2, bytes_done: total, bytes_total: total, current_file: "qwen_image_2.1_vae_bf16.safetensors",
+      files_total: files, files_done: 2, bytes_done: s1 + s2 + s3, bytes_total: total, current_file: "qwen_image_2.1_vae_bf16.safetensors",
     });
+    // The last file, done: everything is counted.
+    const last = models[files - 1]!;
+    expect(at(last.file, last.size_bytes)).toMatchObject({ files_done: files - 1, bytes_done: total });
     expect(at("qwen_image_2.1_vae_bf16.safetensors", -5)).toMatchObject({ bytes_done: s1 + s2 });
   });
 

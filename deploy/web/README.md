@@ -296,12 +296,14 @@ Styles come from the `styles:` section of `instance/profiles/image.yaml`. The pa
 `style: {id, params}`; the server validates every value against the profile and takes the LoRA file, nodes and targets
 from the profile, never from the request. A style with `enabled: false` is not listed and is refused.
 
-Enable Anything to Real (needs network access to huggingface.co, so on the laptop, not in a cloud session):
+Anything to Real is ON (edit only, strength 0.4 to 1.0, default 0.7). Its LoRA
+`WarmBloodAban/Qwen-Image-2.1-LoRAs` / `Qwen2.1_Anything2RealCharacters.safetensors` is pinned in `models:` at
+revision `c4ab5473bfdf585fc19cfd1e280f79d2b0c79947` (318 820 200 bytes, dest `models/loras/`); license Apache-2.0
+(model card and HF tag, checked 2026-10-18). It downloads at boot with the other models; boot fails closed if the size
+does not match. The loader refuses an enabled style whose models entry is missing or not in `models/loras/`. To pin
+another style's LoRA (needs huggingface.co, so on the laptop): `python3 scripts/pin_model.py <owner/repo> <file>`.
 
-1. `python3 scripts/pin_model.py WarmBloodAban/Qwen-Image-2.1-LoRAs Qwen2.1_Anything2RealCharacters.safetensors`
-2. Paste the printed line into `models:` of `instance/profiles/image.yaml` (the LoRA downloads at boot with the other
-   models; the agent needs no change) and set `enabled: true` on the style. Boot fails closed if the file is missing.
-3. Live test (UNVERIFIED): edit an anime image with and without the style at strength 0.6 / 0.7 / 0.8. The LoRA node is
+Live test (UNVERIFIED): edit an anime image with and without the style at strength 0.6 / 0.7 / 0.8. The LoRA node is
    inserted as `style_lora` between `lora.model_from` and `lora.model_to`; whether that is right relative to
    `QwenImage21Cache` and the GGUF base is unknown. If the result is wrong, change those two profile lines.
 
@@ -311,12 +313,13 @@ in Edit (optionally with an edit style chosen). It goes through the same checks 
 ## Upscale
 
 A third mode, "Upscale": one image in, a bigger one out (`ImageUpscaleWithModel`, then `ImageScaleBy` to trim 4x to
-2x). It is OFF (`upscale.enabled: false` in `instance/profiles/image.yaml`) because no model is pinned yet. To turn it on:
-
-1. Pick an upscale model and CHECK ITS LICENSE (not done; Real-ESRGAN and 4x-UltraSharp differ).
-2. On the laptop: `python3 scripts/pin_model.py <owner/repo> <file> models/upscale_models/` and add the printed line
-   to `models:`.
-3. Set `upscale.model` to that file name and `enabled: true`. Deploy; the model downloads at boot like the others.
+2x). It is ON with Real-ESRGAN x4plus: `Comfy-Org/Real-ESRGAN_repackaged` / `RealESRGAN_x4plus.safetensors` (ComfyUI's
+own safetensors repackaging, so no pickle), revision `5fd49b7b278836f48af63ecd314d0f98ab336105`, 66 857 836 bytes,
+dest `models/upscale_models/`, `model_factor: 4`, scales 2x and 4x. License BSD-3-Clause (repo card; upstream
+xinntao/Real-ESRGAN is BSD-3-Clause), checked 2026-10-18. To change the model: check its license, run
+`python3 scripts/pin_model.py <owner/repo> <file> models/upscale_models/` on the laptop, replace the models line and
+set `upscale.model` and `model_factor` to match. Setting `enabled: false` turns the mode off (keep or drop the models
+line: listed models are always downloaded).
 
 Two sizes are bounded before anything is sent. `ImageUpscaleWithModel` always makes the model's own factor
 (`upscale.model_factor`, 4 for an x4 model) before `ImageScaleBy` trims it, so input width x height x model_factor

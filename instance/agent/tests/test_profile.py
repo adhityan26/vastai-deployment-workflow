@@ -242,7 +242,12 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
     instance = Path(__file__).resolve().parents[2]
     profile = load_profile(instance / "profiles" / "image.yaml")
     assert profile.name == "image" and profile.requires_vram_gb == 24
-    assert [m.dest for m in profile.models] == ["models/diffusion_models/", "models/text_encoders/", "models/vae/"]
+    assert [m.dest for m in profile.models] == [
+        "models/diffusion_models/", "models/text_encoders/", "models/vae/", "models/loras/", "models/upscale_models/",
+    ]
+    # The boot disk check counts these; the style LoRA and the upscale model add about 0.39 GB to the 14.6 GB base.
+    assert sum(m.size_bytes for m in profile.models) == 4604558112 + 9350798360 + 675509688 + 318820200 + 66857836
+    assert sum(m.size_bytes for m in profile.models) < profile.requires_disk_gb * 1024**3 // 2
     assert all(len(m.revision) == 40 for m in profile.models) and all(len(n.commit) == 40 for n in profile.nodes)
     for name in profile.workflows:
         assert (instance / "workflows" / name).is_file()
@@ -406,26 +411,22 @@ def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_anothe
 
     shipped = Path(__file__).resolve().parents[2] / "profiles" / "image.yaml"
     raw = yaml.safe_load(shipped.read_text())
-    assert raw["styles"][0]["enabled"] is False  # off until the LoRA is pinned
-    before = load_profile(shipped)
-    assert all(m.dest != "models/loras/" for m in before.models)  # nothing to download for a disabled style
+    lora = raw["styles"][0]["lora"]["file"]
+    assert raw["styles"][0]["enabled"] is True  # on for the live test, its LoRA pinned below
+    shipped_profile = load_profile(shipped)
+    entry = next(m for m in shipped_profile.models if m.file == lora)
+    assert entry.dest == "models/loras/"
+    assert entry.repo == "WarmBloodAban/Qwen-Image-2.1-LoRAs"
+    assert len(entry.revision) == 40 and entry.size_bytes == 318820200
 
-    raw["models"].append(
-        {
-            "file": raw["styles"][0]["lora"]["file"],
-            "repo": "org/loras",
-            "revision": "a" * 40,
-            "dest": "models/loras/",
-            "size_bytes": 1234,
-        }
-    )
-    raw["styles"][0]["enabled"] = True
+    # Dropping the style's model entry is all it takes for the agent to download nothing for it.
+    raw["models"] = [m for m in raw["models"] if m["file"] != lora]
+    raw["styles"][0]["enabled"] = False
     path = tmp_path / "image.yaml"
     path.write_text(yaml.safe_dump(raw))
-    after = load_profile(path)
-    assert [m.file for m in after.models][-1] == "Qwen2.1_Anything2RealCharacters.safetensors"
-    assert after.models[-1].dest == "models/loras/"
-    assert len(after.models) == len(before.models) + 1
+    without = load_profile(path)
+    assert all(m.dest != "models/loras/" for m in without.models)
+    assert len(without.models) == len(shipped_profile.models) - 1
 
 
 def test_the_upscale_section_is_the_webs_business_and_its_workflow_ships_with_the_profile(tmp_path):
@@ -436,7 +437,10 @@ def test_the_upscale_section_is_the_webs_business_and_its_workflow_ships_with_th
 
     root = Path(__file__).resolve().parents[2]
     raw = yaml.safe_load((root / "profiles" / "image.yaml").read_text())
-    assert raw["upscale"]["enabled"] is False  # off until a licensed model is pinned
+    assert raw["upscale"]["enabled"] is True  # on for the live test with a pinned, BSD-3-Clause model
     assert "image-upscale.json" in raw["workflows"]
+    model = next(m for m in load_profile(root / "profiles" / "image.yaml").models if m.file == raw["upscale"]["model"])
+    assert model.dest == "models/upscale_models/"
+    assert model.repo == "Comfy-Org/Real-ESRGAN_repackaged" and model.size_bytes == 66857836
     graph = json.loads((root / "workflows" / "image-upscale.json").read_text())
     assert {n["class_type"] for n in graph.values()} >= {"LoadImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "SaveImage"}

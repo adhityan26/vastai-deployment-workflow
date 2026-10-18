@@ -12,6 +12,14 @@ models:
   - {file: qwen-image-2.1-UC-Q4_K_M.gguf, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/diffusion_models/, size_bytes: 4604558112}
   - {file: text_encoders/qwen3vl_8b_int8_convrot.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/text_encoders/, size_bytes: 9350798360}
   - {file: vae/qwen_image_2.1_vae_bf16.safetensors, repo: 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, revision: d94be5d7a09b47b0211b03d0f23d20bc18203358, dest: models/vae/, size_bytes: 675509688}
+  # Style "Anything to Real" (styles: below). License Apache-2.0 (model card front matter and HF license tag,
+  # checked 2026-10-18 at this revision). Pinned with scripts/pin_model.py; HF LFS sha256
+  # 5db4dd2376e6017812bf1189b2fc46e52aaa2c0b7e688faac75e83e1c4dce849.
+  - {file: "Qwen2.1_Anything2RealCharacters.safetensors", repo: "WarmBloodAban/Qwen-Image-2.1-LoRAs", revision: "c4ab5473bfdf585fc19cfd1e280f79d2b0c79947", dest: "models/loras/", size_bytes: 318820200}
+  # Upscale model (upscale: below): Real-ESRGAN x4plus as safetensors, repackaged for ComfyUI by Comfy-Org (no
+  # pickle). License BSD-3-Clause (repo card; upstream xinntao/Real-ESRGAN is BSD-3-Clause), checked 2026-10-18.
+  # HF LFS sha256 37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb.
+  - {file: "RealESRGAN_x4plus.safetensors", repo: "Comfy-Org/Real-ESRGAN_repackaged", revision: "5fd49b7b278836f48af63ecd314d0f98ab336105", dest: "models/upscale_models/", size_bytes: 66857836}
 workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
@@ -51,18 +59,16 @@ edit:
     - {name: "1024", value: 1024}
 
 # Styles: a LoRA with its own parameters, offered as a sub-menu of a mode (design:
-# docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md). A style is OFF until `enabled: true`.
-# To turn "Anything to Real" on: (1) on a machine with internet run
-#   python3 scripts/pin_model.py WarmBloodAban/Qwen-Image-2.1-LoRAs Qwen2.1_Anything2RealCharacters.safetensors
-# (2) add the `models:` line it prints (dest models/loras/) to the models list above, (3) set enabled: true.
-# The agent then downloads the LoRA at boot with the other models. `lora.model_from` is the node whose MODEL
+# docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md). A style is OFF until `enabled: true`, and an
+# enabled style needs its LoRA in `models:` with dest models/loras/ (pin it with scripts/pin_model.py).
+# "Anything to Real" is ON for the live test: its LoRA is pinned above and the agent downloads it at boot. `lora.model_from` is the node whose MODEL
 # output the loader takes and `model_to` the input that is rewired to the loader; where it sits relative to
 # QwenImage21Cache is UNVERIFIED (live test): change these two lines if the test shows another placement.
 styles:
   - id: anything2real
     title: Anything to Real
     modes: [edit]
-    enabled: false
+    enabled: true
     lora:
       file: Qwen2.1_Anything2RealCharacters.safetensors
       model_from: "1"
@@ -71,18 +77,17 @@ styles:
       - {id: strength, title: LoRA strength, type: float, min: 0.4, max: 1.0, step: 0.05, default: 0.7, target: lora_strength}
 
 # Upscale mode (design: docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md, section 6): one image in,
-# a bigger one out through an upscale model (ImageUpscaleWithModel). OFF until `enabled: true`. To turn it on:
-# (1) CHECK THE LICENSE of the upscale model you pick (not done yet; Real-ESRGAN and 4x-UltraSharp differ),
-# (2) on a machine with internet run scripts/pin_model.py <repo> <file> models/upscale_models/ and add the line it
-# prints to `models:` above, (3) set `model:` to that file's name and `enabled: true`.
+# a bigger one out through an upscale model (ImageUpscaleWithModel). ON for the live test with Real-ESRGAN x4plus
+# (BSD-3-Clause, pinned above with dest models/upscale_models/). To change the model: check its license, pin it with
+# scripts/pin_model.py <repo> <file> models/upscale_models/, set `model:` and `model_factor` to match.
 # The model upscales by its own fixed factor (`model_factor`, 4 for x4 models) and `scales` trims that with
 # ImageScaleBy: value 0.5 gives 2x, 1.0 gives 4x. `factor` is the final enlargement; it must equal
 # model_factor x value (the loader refuses the profile otherwise). The web app bounds both the model's
 # intermediate image (UPSCALE_MAX_INTERMEDIATE_PIXELS) and the result (UPSCALE_MAX_OUTPUT_PIXELS).
 upscale:
-  enabled: false
+  enabled: true
   workflow: image-upscale.json
-  model: REPLACE_WITH_PINNED_UPSCALE_MODEL.pth
+  model: RealESRGAN_x4plus.safetensors
   model_factor: 4
   model_loader: {node: "2", input: model_name}
   image: {node: "1", input: image}

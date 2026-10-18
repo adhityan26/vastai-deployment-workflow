@@ -225,9 +225,9 @@ describe("edit with a style", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("the shipped profile (style off) refuses it as unknown", async () => {
+  it("a profile with the style off refuses it as unknown", async () => {
     const { deps, seen } = await fake(comfy());
-    await expect(edit(deps, request({ style: { id: "anything2real" } }))).rejects.toMatchObject({ code: "unknown_style" });
+    await expect(edit({ ...deps, profile: { ...deps.profile, styles: [] } }, request({ style: { id: "anything2real" } }))).rejects.toMatchObject({ code: "unknown_style" });
     expect(seen).toHaveLength(0);
   });
 

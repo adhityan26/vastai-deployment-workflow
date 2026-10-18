@@ -1977,7 +1977,7 @@ describe("GPU choice", () => {
       const body = (await call("GET", "/api/state", who)).json();
       expect(body.gpu_name).toBe("RTX A5000");
       expect(body.download).toEqual({
-        files_total: 3, files_done: 1, bytes_done: s1 + 1000, bytes_total: total, current_file: "qwen3vl_8b_int8_convrot.safetensors",
+        files_total: profile.models.length, files_done: 1, bytes_done: s1 + 1000, bytes_total: total, current_file: "qwen3vl_8b_int8_convrot.safetensors",
       });
     }
     h.setAgent((s, res) => json(res, 200, agentStatus("ready")));
@@ -2203,6 +2203,7 @@ describe("styles", () => {
   /** The shipped profile with the Anything to Real style switched on (its LoRA among the models). */
   function styledProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
     const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.models = doc.models.filter((m: { file: string }) => m.file !== LORA);
     doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
     doc.styles[0].enabled = true;
     mutate?.(doc);
@@ -2230,7 +2231,12 @@ describe("styles", () => {
     for (const secret of [LORA, "model_from", "model_to", "lora", "target", "\"4\""]) expect(text).not.toContain(secret);
   });
 
-  it("the shipped profile has the style off, so state.styles is empty and the style is refused as unknown", async () => {
+  it("the shipped profile offers the style", async () => {
+    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real"]);
+  });
+
+  it("with the style off, state.styles is empty and the style is refused as unknown", async () => {
+    h = await harness({ profile: styledProfile((doc) => (doc.styles[0].enabled = false)) });
     const m = await member();
     expect((await call("GET", "/api/state", m)).json().styles).toEqual([]);
     h.setComfy(comfyEdit());
@@ -2315,7 +2321,7 @@ describe("upscale", () => {
     return (s, res) => (s.url.startsWith("/history/") && images ? json(res, 200, { [s.url.split("/")[2]!]: { outputs: { "5": { images } }, status: { completed: true, status_str: "success" } } }) : base(s, res));
   };
 
-  it("is off by default: state.upscale is null and POST /api/upscale is 404 with nothing sent", async () => {
+  it("is off without its workflow template: state.upscale is null and POST /api/upscale is 404 with nothing sent", async () => {
     const m = await member();
     expect((await call("GET", "/api/state", m)).json().upscale).toBeNull();
     h.setComfy(comfyUp());

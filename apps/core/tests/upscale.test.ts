@@ -39,7 +39,15 @@ function png(width: number, height: number): Buffer {
 describe("parseUpscale", () => {
   it("is null when absent or disabled, even with a model that is not pinned yet", () => {
     expect(parseUpscale(undefined, [])).toBeNull();
-    expect(parseUpscale(parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8")).upscale, [])).toBeNull();
+    expect(parseUpscale(section((s) => { s.enabled = false; s.model = "NOT_PINNED_YET.pth"; }), [])).toBeNull();
+  });
+
+  it("the shipped profile turns upscale on with the pinned Real-ESRGAN x4 model", () => {
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    const s = parseUpscale(doc.upscale, doc.models)!;
+    expect(s).toMatchObject({ model: "RealESRGAN_x4plus.safetensors", modelFactor: 4 });
+    expect(s.scales.map((x) => [x.name, x.factor])).toEqual([["2x", 2], ["4x", 4]]);
+    expect(doc.models.find((m: Doc) => m.file === s.model)).toMatchObject({ repo: "Comfy-Org/Real-ESRGAN_repackaged", dest: "models/upscale_models/", size_bytes: 66857836 });
   });
 
   it("reads an enabled section", () => {
