@@ -1060,6 +1060,35 @@ describe("gallery: save, auto-save and the gallery card", () => {
   });
 
   describe("the gallery card", () => {
+    it("continues from a saved image: attaches it as a reference or into upscale, and offers nothing without edit or upscale", async () => {
+      const editOffer = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }] };
+      const upOffer = { scales: ["2x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png"] };
+      window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
+      await mount({ gallery: true, edit: editOffer, upscale: upOffer }, {
+        "GET /api/gallery": { body: { items: [item(1)], next: null } },
+        [`GET /api/gallery/${GID(1)}/image`]: { body: null, raw: "SAVED", type: "image/png" },
+      });
+      q("#gal-open")!.click();
+      await flush();
+      const buttons = () => [...document.querySelectorAll<HTMLButtonElement>("#gal-list .chain button")];
+      expect(buttons().map((b) => b.textContent)).toEqual(["Use as reference", "Upscale"]);
+      buttons()[0]!.click();
+      await flush();
+      expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+      expect(q("#ref-list .ref-name")!.textContent).toBe(`saved-${GID(1).slice(0, 8)}.png`);
+      buttons()[1]!.click();
+      await flush();
+      expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+      expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    });
+
+    it("shows no continue buttons when the server offers neither edit nor upscale", async () => {
+      await mount({ gallery: true }, { "GET /api/gallery": { body: { items: [item(1)], next: null } } });
+      q("#gal-open")!.click();
+      await flush();
+      expect(q("#gal-list .chain")).toBeNull();
+    });
+
     it("loads nothing until it is opened, then lists the images with urls rebuilt from the ids", async () => {
       await mount({ gallery: true }, { "GET /api/gallery": { body: { items: [item(1, { url: "https://evil.example/x.png" }), item(2)], next: null } } });
       expect(calls.filter((c) => c.path.startsWith("/api/gallery"))).toHaveLength(0);

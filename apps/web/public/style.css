@@ -166,5 +166,5 @@ ul { padding: 0; margin: 0; list-style: none; }
 .style-params label { margin: 0; }
 .style-params input[type="range"] { width: 100%; min-height: 44px; }
 .style-params .style-value { font-weight: 600; }
-.grid .chain { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-.grid .chain button { min-height: 44px; }
+.chain { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.chain button { min-height: 44px; }

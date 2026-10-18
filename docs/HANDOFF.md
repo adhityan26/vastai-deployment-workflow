@@ -40,8 +40,8 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
    Still open: (a) the live test on a real instance: an anime/comic edit with and without the style at 0.6/0.7/0.8 (the
    LoRA placement relative to `QwenImage21Cache` on the GGUF base is UNVERIFIED; change `lora.model_from`/`model_to` if
    wrong), one upscale at 2x and 4x (the workflow has never run; VRAM use of a large upscale is unknown), and a Save of
-   each result; (b) "Use as reference" from the gallery (the gallery is now on this line: add the button there, reusing
-   `chainResult` in `apps/web/public/ui.ts`); (c) Camera angle (AnyAngle): its mechanism is not documented in this repo
+   each result; (b) DONE: saved gallery images also have "Use as reference" and Upscale buttons; 
+    (c) Camera angle (AnyAngle): its mechanism is not documented in this repo
    (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the Anything to Real live test comes
    first, so guessing a workflow would be fiction.
 3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to

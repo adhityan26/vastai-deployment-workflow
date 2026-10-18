@@ -665,6 +665,11 @@ describe("styles from the state", () => {
 
   it("chains only our own result paths", () => {
     expect(isChainableUrl("/api/image/abc_1-2/0")).toBe(true);
+    const gid = `${"a".repeat(32)}.8199999999000.job-1_x.0`;
+    expect(isChainableUrl(`/api/gallery/${gid}/image`)).toBe(true);
+    for (const u of [`/api/gallery/${gid}/delete`, "/api/gallery/x/image", `/api/gallery/${gid}/../image`, `//evil.example/api/gallery/${gid}/image`]) {
+      expect(isChainableUrl(u), u).toBe(false);
+    }
     for (const u of ["https://evil.example/api/image/a/0", "//evil.example/x", "/api/image/a/../0", "/api/image/a/0?x=1", "/api/other/a/0", "data:image/png;base64,AA"]) {
       expect(isChainableUrl(u), u).toBe(false);
     }

@@ -1218,7 +1218,7 @@ export function mountApp(doc: Document, env: Env): App {
   // ---- chaining: a result becomes the reference image of the next edit ----
 
   /** One button per way to continue from a result; null when edit is not offered or the url is not ours. */
-  function chainButtons(src: string, jobId: string, index: number): HTMLElement | null {
+  function chainButtons(src: string, name: string): HTMLElement | null {
     const s = state;
     if (s === null || (s.edit === null && s.upscale === null) || !isChainableUrl(src)) return null;
     const row = make("div", undefined, "chain");
@@ -1230,7 +1230,7 @@ export function mountApp(doc: Document, env: Env): App {
     for (const t of targets) {
       const b = make("button", t.title);
       b.type = "button";
-      b.addEventListener("click", () => void chainResult(src, `result-${jobId}-${index}`, t.mode, t.id));
+      b.addEventListener("click", () => void chainResult(src, name, t.mode, t.id));
       row.append(b);
     }
     return row;
@@ -1299,7 +1299,7 @@ export function mountApp(doc: Document, env: Env): App {
             fig.append(note);
           }
         }
-        const chain = chainButtons(src, e.id, i);
+        const chain = chainButtons(src, `result-${e.id}-${i}`);
         if (chain !== null) fig.append(chain);
         grid.append(fig);
       });
@@ -1401,7 +1401,10 @@ export function mountApp(doc: Document, env: Env): App {
     const del = make("button", "Delete");
     del.type = "button";
     del.addEventListener("click", () => void deleteGalleryItem(item, fig));
-    fig.append(img, make("p", item.prompt, "gal-prompt"), make("p", caption.filter((c) => c !== "").join(" · "), "gal-caption"), dl, del);
+    fig.append(img, make("p", item.prompt, "gal-prompt"), make("p", caption.filter((c) => c !== "").join(" · "), "gal-caption"));
+    const chain = chainButtons(item.url, `saved-${item.id.slice(0, 8)}`);
+    if (chain !== null) fig.append(chain);
+    fig.append(dl, del);
     return fig;
   }
 

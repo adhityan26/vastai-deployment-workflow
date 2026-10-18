@@ -647,9 +647,11 @@ export function styleRequest(style: StyleInfo | null, values: Record<string, Sty
   return { id: style.id, params };
 }
 
-/** A result may be chained only when it is one of our own same-origin result paths. */
+/** A result may be chained only when it is one of our own same-origin image paths (a job result or a saved image). */
 export function isChainableUrl(url: string): boolean {
-  return /^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url);
+  if (/^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url)) return true;
+  const saved = /^\/api\/gallery\/([^/]+)\/image$/.exec(url);
+  return saved !== null && isGalleryId(saved[1]);
 }
 
 // ---- upscale ----
