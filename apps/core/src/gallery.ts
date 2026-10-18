@@ -149,7 +149,33 @@ function idOfKey(key: string): ParsedId | null {
 
 const idOf = (p: ParsedId): string => `${p.owner}.${p.rts}.${p.jobId}.${p.index}`;
 
+/** At most `slots` tasks at a time; the others wait in order (they hold no image while waiting). */
+export class Semaphore {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+
+  constructor(private readonly slots: number) {
+    if (!Number.isInteger(slots) || slots < 1) throw new Error("a semaphore needs at least one slot");
+  }
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.slots) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    else this.active++;
+    try {
+      return await task();
+    } finally {
+      const next = this.waiting.shift();
+      if (next !== undefined) next(); // the slot passes straight to the next task
+      else this.active--;
+    }
+  }
+}
+
 export class Gallery {
+  // Per-owner lock: the quota check and the write of one owner's saves never interleave (in this
+  // process; the web service is the only writer of the bucket).
+  private readonly ownerLocks = new Map<string, Promise<unknown>>();
+
   constructor(
     private readonly store: ObjectStore,
     private readonly limits: GalleryLimits,
@@ -178,6 +204,22 @@ export class Gallery {
     const owner = this.ownerKey(input.owner);
     const rts = String(RTS_BASE - input.createdMs).padStart(RTS_DIGITS, "0");
     const parsed = parseId(`${owner}.${rts}.${input.jobId}.${input.index}`);
+    return this.locked(owner, () => this.store_(input, owner, parsed));
+  }
+
+  /** Run `fn` after every earlier task of the same owner has finished. */
+  private locked<T>(owner: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.ownerLocks.get(owner) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this.ownerLocks.set(owner, tail);
+    void tail.then(() => {
+      if (this.ownerLocks.get(owner) === tail) this.ownerLocks.delete(owner);
+    });
+    return run;
+  }
+
+  private async store_(input: SaveInput, owner: string, parsed: ParsedId): Promise<{ id: string; created: boolean }> {
     if ((await this.store.head(parsed.key)) !== null) return { id: idOf(parsed), created: false };
 
     // Quota: what this owner already keeps (listing stops as soon as a limit is reached).

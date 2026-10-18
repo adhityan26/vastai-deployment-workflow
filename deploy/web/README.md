@@ -331,9 +331,15 @@ checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2
   `GALLERY_ADMIN_SCAN_MAX` keys.
 - **What is stored:** the image with its own content type, plus prompt, settings label, owner name and kind
   as (URL-encoded, trimmed) object metadata. There is no database; deleting in the page deletes the object.
-- **Memory:** a Save holds the image (up to `WEB_IMAGE_MAX_BYTES`) twice at the same time; compose limits the
-  container to 256M. If the container is ever killed while saving large images, raise `memory` in
-  `docker-compose.yml` (and the matching assertion in `apps/web/tests/deploy.test.ts`).
+- **Abuse limits:** `GALLERY_SAVE_RATE_LIMIT_PER_HOUR` (120) saves per member per hour (`rate_limited`).
+  One member's saves run one after the other (the quota check and the write cannot interleave), so a burst
+  of saves never passes the quota; this holds for one web process, which is the only writer of the bucket.
+- **Memory:** at most `GALLERY_MAX_CONCURRENT` (3) saves and image reads run at once (the others wait), and
+  each holds one copy of an image of at most `WEB_IMAGE_MAX_BYTES`: a body with a Content-Length is read
+  straight into one buffer, and every read stops as soon as it passes the cap (Content-Length or not). The
+  object-store deadline (`WEB_IMAGE_TIMEOUT_S`) covers the body as well as the request. Compose limits the
+  container to 256M; with the 32 MiB default cap, 3 slots stay below 100M. Raising the cap or the slots
+  needs a matching `memory` in `docker-compose.yml` (and its assertion in `apps/web/tests/deploy.test.ts`).
 - **No thumbnails yet:** the gallery loads the stored images themselves, lazily and a page at a time.
 
 ## Already verified

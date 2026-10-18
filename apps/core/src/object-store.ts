@@ -166,26 +166,51 @@ export class S3ObjectStore implements ObjectStore {
     }
   }
 
+  /**
+   * The object, read with one deadline for the request AND its body, and a running byte cap: the
+   * read stops (and the connection is dropped) as soon as the cap is passed, whether or not the server
+   * sent a Content-Length. With a known length the bytes go straight into one buffer of that size.
+   */
   async get(key: string, maxBytes: number): Promise<{ bytes: Buffer; contentType: string } | null> {
+    const signal = AbortSignal.timeout(this.timeoutMs);
     let reply;
     try {
-      reply = await this.send((o) => this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), o));
+      reply = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal });
     } catch (err) {
       if (isMissing(err)) return null;
       return this.fail("read");
     }
-    if ((reply.ContentLength ?? 0) > maxBytes) {
-      (reply.Body as { destroy?: () => void } | undefined)?.destroy?.();
+    const body = reply.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
+    const declared = reply.ContentLength;
+    if (typeof declared === "number" && declared > maxBytes) {
+      body?.destroy?.();
       throw new ObjectStoreError("object is larger than allowed");
     }
-    let bytes: Buffer;
+    if (body === undefined || typeof body[Symbol.asyncIterator] !== "function") return this.fail("read");
+    const onAbort = () => body.destroy?.(new Error("deadline"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const exact = typeof declared === "number" ? Buffer.allocUnsafe(declared) : null;
+    const chunks: Buffer[] = [];
+    let used = 0;
     try {
-      bytes = Buffer.from(await reply.Body!.transformToByteArray());
-    } catch {
+      for await (const chunk of body) {
+        if (signal.aborted) return this.fail("read");
+        used += chunk.length;
+        if (used > maxBytes || (exact !== null && used > exact.length)) {
+          body.destroy?.();
+          throw new ObjectStoreError("object is larger than allowed");
+        }
+        if (exact !== null) exact.set(chunk, used - chunk.length);
+        else chunks.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length));
+      }
+    } catch (err) {
+      if (err instanceof ObjectStoreError) throw err;
       return this.fail("read");
+    } finally {
+      signal.removeEventListener("abort", onAbort);
     }
-    if (bytes.length > maxBytes) throw new ObjectStoreError("object is larger than allowed");
-    return { bytes, contentType: reply.ContentType ?? "" };
+    if (signal.aborted || (exact !== null && used !== exact.length)) return this.fail("read");
+    return { bytes: exact ?? Buffer.concat(chunks, used), contentType: reply.ContentType ?? "" };
   }
 
   async delete(key: string): Promise<void> {
