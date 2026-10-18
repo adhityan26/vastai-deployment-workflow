@@ -15,6 +15,7 @@ export const DEFAULT_EXTEND_MINUTES = 30;
 export const API = {
   state: "/api/state",
   estimate: "/api/estimate",
+  gpus: "/api/gpus",
   start: "/api/start",
   destroy: "/api/destroy",
   extend: "/api/extend",
@@ -35,12 +36,23 @@ const SEED_TEXT = /^[0-9]{1,16}$/;
 const MAX_IMAGE_INDEX = 999;
 const SECONDS_PER_HOUR = 3600;
 const MB_PER_GB = 1024;
+const BYTES_PER_GB = 1e9; // download sizes are shown in decimal units
+const BYTES_PER_MB = 1e6;
+const BYTES_PER_KB = 1e3;
+const MAX_GPU_NAME = 64; // the API refuses longer names
+// Where the last GPU choice is remembered in the browser (only a model name, no secret).
+export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
+// Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
+export const SPEED_WINDOW_SAMPLES = 6;
+export const SPEED_MAX_GAP_MS = 120_000;
+const MAX_ETA_SECONDS = 99 * SECONDS_PER_HOUR;
 const DASH = "—";
 
 export type Role = "admin" | "member";
 export interface Preset { name: string; steps: number }
 export interface Size { name: string; width: number; height: number }
 export interface Progress { phase: string; file: string; bytes_done: number; bytes_total: number }
+export interface Download { files_total: number; files_done: number; bytes_done: number; bytes_total: number; current_file: string }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -54,6 +66,8 @@ export interface ApiState {
   uptime_s: number | null;
   cost_so_far: number | null;
   progress: Progress | null;
+  gpu_name: string | null;
+  download: Download | null;
   remaining: { idle_s: number | null; failsafe_s: number | null; hard_cap_s: number | null };
   unknown: UnknownInstance[];
   presets: Preset[];
@@ -64,6 +78,22 @@ export interface Estimate { gpu_name: string | null; dph: number; horizon_hours:
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+function parseDownload(v: unknown): Download | null {
+  if (!isObj(v)) return null;
+  const done = num(v["bytes_done"]);
+  const total = num(v["bytes_total"]);
+  const filesTotal = num(v["files_total"]);
+  const filesDone = num(v["files_done"]);
+  if (done === null || total === null || filesTotal === null || filesDone === null || done < 0 || total < 0 || filesTotal < 1 || filesDone < 0) return null;
+  return {
+    files_total: Math.floor(filesTotal),
+    files_done: Math.floor(filesDone),
+    bytes_done: total > 0 ? Math.min(done, total) : done,
+    bytes_total: total,
+    current_file: typeof v["current_file"] === "string" ? v["current_file"] : "",
+  };
+}
 
 /** Check the parts of GET /api/state the page relies on; null when the payload is unusable. */
 export function parseState(json: unknown): ApiState | null {
@@ -102,6 +132,8 @@ export function parseState(json: unknown): ApiState | null {
           bytes_total: num(prog["bytes_total"]) ?? 0,
         }
       : null,
+    gpu_name: typeof json["gpu_name"] === "string" && json["gpu_name"] !== "" ? json["gpu_name"] : null,
+    download: parseDownload(json["download"]),
     remaining: { idle_s: num(rem["idle_s"]), failsafe_s: num(rem["failsafe_s"]), hard_cap_s: num(rem["hard_cap_s"]) },
     unknown: list(json["unknown"]).flatMap((u) => {
       if (!isObj(u)) return [];
@@ -129,6 +161,52 @@ export function parseEstimate(json: unknown): Estimate | null {
   return { gpu_name: typeof json["gpu_name"] === "string" ? json["gpu_name"] : null, dph, horizon_hours: hours, max_cost: max };
 }
 
+// ---- GPU choice ----
+
+export interface GpuOption { name: string; dph: number | null; vram_gb: number | null; available: boolean }
+
+/** Check GET /api/gpus; null when the payload is unusable. An entry without a price is unavailable. */
+export function parseGpus(json: unknown): GpuOption[] | null {
+  if (!isObj(json) || !Array.isArray(json["gpus"])) return null;
+  const out: GpuOption[] = [];
+  for (const g of json["gpus"]) {
+    if (!isObj(g) || typeof g["name"] !== "string" || g["name"] === "" || g["name"].length > MAX_GPU_NAME) continue;
+    const dph = num(g["dph"]);
+    out.push({ name: g["name"], dph, vram_gb: num(g["vram_gb"]), available: g["available"] === true && dph !== null && dph > 0 });
+  }
+  return out;
+}
+
+/** Option text: "RTX A5000 - $0.24/h", or "RTX 3090 - no offers now". */
+export function gpuOptionLabel(g: GpuOption): string {
+  return g.available && g.dph !== null ? `${g.name} - $${g.dph.toFixed(2)}/h` : `${g.name} - no offers now`;
+}
+
+/** The remembered model if it is listed and available, else the cheapest available one, else null. */
+export function chooseGpu(remembered: string | null, list: readonly GpuOption[]): string | null {
+  if (remembered !== null) {
+    const hit = list.find((g) => g.name === remembered && g.available);
+    if (hit) return hit.name;
+  }
+  let best: GpuOption | null = null;
+  for (const g of list) {
+    if (g.available && g.dph !== null && (best === null || g.dph < (best.dph ?? Infinity))) best = g;
+  }
+  return best === null ? null : best.name;
+}
+
+/** GET /api/estimate path for a model name (encoded); the bare path when no model is chosen. */
+export function estimatePath(gpu: string | null): string {
+  return gpu === null ? API.estimate : `${API.estimate}?gpu=${encodeURIComponent(gpu)}`;
+}
+
+/** The `reason` of an API error body, only when it is a short plain string. */
+export function errorReason(body: unknown): string | null {
+  if (!isObj(body) || !isObj(body["error"])) return null;
+  const r = body["error"]["reason"];
+  return typeof r === "string" && r !== "" && r.length <= 200 ? r : null;
+}
+
 // ---- formatting ----
 
 /** "45s", "12m 05s", "2h 05m"; a dash when unknown. */
@@ -153,6 +231,87 @@ export function formatPrice(dph: number | null): string {
 export function progressPercent(p: Progress | null): number | null {
   if (p === null || !(p.bytes_total > 0)) return null;
   return Math.min(100, Math.max(0, Math.floor((p.bytes_done / p.bytes_total) * 100)));
+}
+
+/** Whole percent 0-100 of the overall download, or null when the total is unknown. */
+export function downloadPercent(d: Download | null): number | null {
+  if (d === null || !(d.bytes_total > 0)) return null;
+  return Math.min(100, Math.max(0, Math.floor((d.bytes_done / d.bytes_total) * 100)));
+}
+
+export interface Sample { t: number; bytes: number }
+
+/**
+ * The speed window after a new poll. It is only kept while downloading; it restarts when the
+ * overall counter goes down (a new instance), the clock goes back or the gap is too long.
+ */
+export function nextSamples(prev: readonly Sample[], t: number, state: string, d: Download | null): Sample[] {
+  if (state !== "downloading" || d === null || !Number.isFinite(t)) return [];
+  const sample = { t, bytes: d.bytes_done };
+  const last = prev[prev.length - 1];
+  if (last === undefined || t < last.t || t - last.t > SPEED_MAX_GAP_MS || d.bytes_done < last.bytes) return [sample];
+  const kept = t === last.t ? prev.slice(0, -1) : prev.slice();
+  kept.push(sample);
+  return kept.slice(-SPEED_WINDOW_SAMPLES);
+}
+
+/** Bytes per second over the window; null until two samples exist or when nothing moved. */
+export function windowSpeed(samples: readonly Sample[]): number | null {
+  if (samples.length < 2) return null;
+  const first = samples[0]!;
+  const last = samples[samples.length - 1]!;
+  const seconds = (last.t - first.t) / 1000;
+  const delta = last.bytes - first.bytes;
+  if (!(seconds > 0) || !(delta > 0)) return null;
+  const speed = delta / seconds;
+  return Number.isFinite(speed) && speed > 0 ? speed : null;
+}
+
+/** Seconds until the download ends at this speed; null when it cannot be told. */
+export function etaSeconds(d: Download, speed: number | null): number | null {
+  if (speed === null || !(speed > 0) || !(d.bytes_total > d.bytes_done)) return null;
+  const eta = (d.bytes_total - d.bytes_done) / speed;
+  return Number.isFinite(eta) && eta >= 0 ? eta : null;
+}
+
+export function formatSpeed(bytesPerSecond: number): string {
+  if (bytesPerSecond >= BYTES_PER_GB) return `${(bytesPerSecond / BYTES_PER_GB).toFixed(1)} GB/s`;
+  if (bytesPerSecond >= BYTES_PER_MB) {
+    const mb = bytesPerSecond / BYTES_PER_MB;
+    return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB/s`;
+  }
+  return `${Math.max(1, Math.round(bytesPerSecond / BYTES_PER_KB))} KB/s`;
+}
+
+/** "about 40 s left", "about 5 min left", "about 1 h 05 min left". */
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds > MAX_ETA_SECONDS) return "more than 99 h left";
+  const s = Math.max(1, Math.round(seconds));
+  if (s < 60) return `about ${s} s left`;
+  const min = Math.round(s / 60);
+  if (min < 60) return `about ${min} min left`;
+  return `about ${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min left`;
+}
+
+function formatSize(bytes: number, asGb: boolean): string {
+  return asGb ? (bytes / BYTES_PER_GB).toFixed(1) : (bytes / BYTES_PER_MB).toFixed(1);
+}
+
+/** "2.1 / 14.6 GB (14%) - file 1 of 3 - 38 MB/s - about 5 min left"; speed and ETA only when known. */
+export function downloadText(d: Download, speed: number | null): string {
+  const known = d.bytes_total > 0;
+  const gb = (known ? d.bytes_total : d.bytes_done) >= BYTES_PER_GB;
+  const unit = gb ? "GB" : "MB";
+  const pct = downloadPercent(d);
+  const size = known ? `${formatSize(d.bytes_done, gb)} / ${formatSize(d.bytes_total, gb)} ${unit}` : `${formatSize(d.bytes_done, gb)} ${unit}`;
+  const parts = [pct === null ? size : `${size} (${pct}%)`, `file ${Math.min(d.files_done + 1, d.files_total)} of ${d.files_total}`];
+  if (speed !== null) {
+    parts.push(formatSpeed(speed));
+    const eta = etaSeconds(d, speed);
+    if (eta !== null) parts.push(formatEta(eta));
+  }
+  return parts.join(" - ");
 }
 
 export function formatVram(used: number | null, total: number | null): string {

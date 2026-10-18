@@ -8,27 +8,40 @@ import {
   withoutLoginError,
   CLOCK_TICK_MS,
   DEFAULT_EXTEND_MINUTES,
+  GPU_STORAGE_KEY,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
   characterCount,
+  chooseGpu,
   clockView,
   controls,
+  downloadPercent,
+  downloadText,
+  errorReason,
   errorText,
+  estimatePath,
   formatCost,
   formatPrice,
   formatQueue,
   formatVram,
+  gpuOptionLabel,
   imageUrl,
   isJobId,
   parseEstimate,
+  parseGpus,
   parseSeed,
   parseState,
   pollIntervalMs,
   presetLabel,
   progressPercent,
   sizeLabel,
+  nextSamples,
   stateInfo,
+  windowSpeed,
   type ApiState,
+  type Estimate,
+  type GpuOption,
+  type Sample,
 } from "./model.js";
 
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
@@ -49,7 +62,11 @@ export interface App {
   stop(): void;
 }
 
-class ApiError extends Error {}
+class ApiError extends Error {
+  constructor(message: string, readonly reason: string | null = null) {
+    super(message);
+  }
+}
 /** The session is gone or the account lost access: the screen was already switched. */
 class AuthLostError extends ApiError {}
 
@@ -90,6 +107,7 @@ export function mountApp(doc: Document, env: Env): App {
   let adminBuilt = false;
   let unknownKey = "";
   let restoreFocus: HTMLElement | null = null;
+  let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   const history: HistoryEntry[] = [];
 
   // ---- requests ----
@@ -116,7 +134,7 @@ export function mountApp(doc: Document, env: Env): App {
       throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
     }
     if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
-    if (!res.ok) throw new ApiError(errorText(res.status, json));
+    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json));
     return json;
   }
 
@@ -167,9 +185,12 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function showAuthScreen(kind: "login" | "noaccess", message: string): void {
+    startSubmitting = false; // a Start request in flight must not keep the dialog over the login screen
+    closeModal?.(false);
     pauseTimers();
     clearMessages();
     state = null;
+    samples = [];
     jobPending = false;
     setText("login-message", kind === "login" ? message : "");
     setText("noaccess-error", "");
@@ -261,6 +282,7 @@ export function mountApp(doc: Document, env: Env): App {
   const modalOk = $<HTMLButtonElement>("modal-ok");
   const modalCancel = $<HTMLButtonElement>("modal-cancel");
   let closeModal: ((ok: boolean) => void) | null = null;
+  let okHandler: (() => void | Promise<void>) | null = null; // Start dialog confirms without closing
 
   function confirmDialog(title: string, lines: string[], okLabel: string, danger: boolean): Promise<boolean> {
     return new Promise((resolve) => {
@@ -280,7 +302,10 @@ export function mountApp(doc: Document, env: Env): App {
       modalCancel.focus();
     });
   }
-  modalOk.addEventListener("click", () => closeModal?.(true));
+  modalOk.addEventListener("click", () => {
+    if (okHandler !== null) void okHandler();
+    else closeModal?.(true);
+  });
   modalCancel.addEventListener("click", () => closeModal?.(false));
   modal.addEventListener("click", (e) => {
     if (e.target === modal) closeModal?.(false);
@@ -305,26 +330,190 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  // ---- Start dialog: GPU choice, live estimate, errors inside the dialog ----
+
+  // The remembered model is only a preference; storage can be missing or throw, so every access
+  // is guarded and the value is validated against the current list before use.
+  function readRemembered(): string | null {
+    try {
+      return doc.defaultView?.localStorage.getItem(GPU_STORAGE_KEY) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function writeRemembered(name: string): void {
+    try {
+      doc.defaultView?.localStorage.setItem(GPU_STORAGE_KEY, name);
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+
+  let startSubmitting = false;
+  let dialogToken = 0; // bumped whenever a Start dialog opens or closes
+  let estimateSeq = 0; // bumped for every estimate request; only the latest may answer
+
   function onStart(): Promise<void> {
-    return act(async () => {
-      const est = parseEstimate(await call("GET", API.estimate));
-      if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
-      const gpu = est.gpu_name === null ? "" : ` (${est.gpu_name})`;
-      const ok = await confirmDialog(
-        "Start an instance?",
-        [
-          `Price: ${formatPrice(est.dph)}${gpu}.`,
-          `Estimated cost if it runs for the full failsafe time (${est.horizon_hours} hours): up to ${formatCost(est.max_cost)}.`,
-          "This estimate covers the failsafe time only; the failsafe can be extended up to the hard cap, which costs more.",
-          "Disk storage is billed separately, per hour, for as long as the instance exists.",
-          "You pay while the instance exists, even if nobody generates anything.",
-        ],
-        "Start and pay",
-        false,
-      );
-      if (!ok) return;
-      await call("POST", API.start, { confirm: true });
-      showNotice("Starting. It can take several minutes to boot and download models.");
+    if (busy || startSubmitting || !modal.hidden) return Promise.resolve();
+    return new Promise((resolve) => {
+      const token = ++dialogToken;
+      restoreFocus = doc.activeElement instanceof HTMLElement ? doc.activeElement : null;
+      let gpus: GpuOption[] = [];
+      let estimate: Estimate | null = null;
+
+      $("modal-title").textContent = "Start an instance?";
+      const loading = make("p", "Loading GPU models…");
+      loading.setAttribute("role", "status");
+      const gpuLabel = make("label", "GPU");
+      gpuLabel.htmlFor = "start-gpu";
+      const select = make("select");
+      select.id = "start-gpu";
+      select.disabled = true;
+      const gpuNote = make("p", "", "muted");
+      gpuNote.hidden = true;
+      const estBox = make("div", undefined, "estimate");
+      estBox.setAttribute("aria-live", "polite");
+      const errBox = make("div", undefined, "alert bad");
+      errBox.setAttribute("role", "alert");
+      errBox.hidden = true;
+      const notes = [
+        "This estimate covers the failsafe time only; the failsafe can be extended up to the hard cap, which costs more.",
+        "Disk storage is billed separately, per hour, for as long as the instance exists.",
+        "You pay while the instance exists, even if nobody generates anything.",
+      ].map((t) => make("p", t));
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, estBox, errBox, ...notes);
+      modalOk.textContent = "Start and pay";
+      modalOk.className = "primary";
+      modalOk.disabled = true;
+
+      const showError = (err: unknown): void => {
+        const box = errBox;
+        box.replaceChildren(make("p", err instanceof Error ? err.message : "Something went wrong."));
+        if (err instanceof ApiError && err.reason !== null) box.append(make("p", `Reason: ${err.reason}`, "small"));
+        box.hidden = false;
+      };
+      const clearError = (): void => {
+        errBox.hidden = true;
+        errBox.replaceChildren();
+      };
+      const authLost = (err: unknown): boolean => err instanceof AuthLostError;
+
+      const showEstimate = (): void => {
+        if (estimate === null) {
+          estBox.replaceChildren();
+          return;
+        }
+        const name = estimate.gpu_name === null ? "" : ` (${estimate.gpu_name})`;
+        estBox.replaceChildren(
+          make("p", `Price: ${formatPrice(estimate.dph)}${name}.`),
+          make("p", `Estimated cost if it runs for the full failsafe time (${estimate.horizon_hours} hours): up to ${formatCost(estimate.max_cost)}.`),
+        );
+      };
+
+      const loadEstimate = async (): Promise<void> => {
+        const seq = ++estimateSeq;
+        estimate = null;
+        showEstimate();
+        clearError();
+        modalOk.disabled = true;
+        if (select.value === "") return;
+        try {
+          const est = parseEstimate(await call("GET", estimatePath(select.value)));
+          if (seq !== estimateSeq || token !== dialogToken) return;
+          if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
+          estimate = est;
+          showEstimate();
+          modalOk.disabled = false;
+        } catch (err) {
+          if (seq !== estimateSeq || token !== dialogToken || authLost(err)) return;
+          showError(err);
+        }
+      };
+
+      const finish = (): void => {
+        dialogToken++;
+        estimateSeq++;
+        closeModal = null;
+        okHandler = null;
+        modalOk.disabled = false;
+        modal.hidden = true;
+        restoreFocus?.focus();
+        resolve();
+      };
+      closeModal = (ok) => {
+        if (!ok && startSubmitting) return; // no cancelling while the request is in flight
+        finish();
+      };
+
+      okHandler = async () => {
+        if (startSubmitting || estimate === null || select.value === "") return;
+        const chosen = select.value;
+        startSubmitting = true;
+        busy = true;
+        modalOk.disabled = true;
+        select.disabled = true;
+        clearError();
+        clearMessages();
+        render();
+        try {
+          const res = await call("POST", API.start, { confirm: true, gpu: chosen });
+          writeRemembered(chosen);
+          // Start may share an attempt for another model: show what the server really rented.
+          const started = parseEstimate(res !== null && typeof res === "object" ? (res as Record<string, unknown>)["estimate"] : null);
+          startSubmitting = false;
+          finish();
+          showNotice(`Starting${started?.gpu_name ? ` on ${started.gpu_name}` : ""}. It can take several minutes to boot and download models.`);
+        } catch (err) {
+          startSubmitting = false;
+          if (authLost(err)) return;
+          showError(err);
+          showBanner(err instanceof Error ? err.message : "Something went wrong.");
+          select.disabled = false;
+          modalOk.disabled = estimate === null;
+          modalOk.focus();
+        } finally {
+          busy = false;
+          if (active) await refresh();
+        }
+      };
+
+      modal.hidden = false;
+      modalCancel.focus();
+
+      void (async () => {
+        try {
+          const list = parseGpus(await call("GET", API.gpus));
+          if (token !== dialogToken) return;
+          if (list === null) throw new ApiError("The GPU list was not understood. Nothing was started.");
+          gpus = list;
+        } catch (err) {
+          if (token !== dialogToken || authLost(err)) return;
+          loading.hidden = true;
+          showError(err);
+          return;
+        }
+        loading.hidden = true;
+        select.replaceChildren(
+          ...gpus.map((g) => {
+            const o = make("option", gpuOptionLabel(g));
+            o.value = g.name;
+            o.disabled = !g.available;
+            return o;
+          }),
+        );
+        const pick = chooseGpu(readRemembered(), gpus);
+        if (pick === null) {
+          select.value = "";
+          select.disabled = true;
+          gpuNote.textContent = gpus.length === 0 ? "No GPU model is configured." : "No GPU model has offers right now. Try again later.";
+          gpuNote.hidden = false;
+          return;
+        }
+        select.value = pick;
+        select.disabled = false;
+        select.addEventListener("change", () => void loadEstimate());
+        await loadEstimate();
+      })();
     });
   }
 
@@ -474,18 +663,22 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderStatus(s: ApiState): void {
-    const pct = progressPercent(s.progress);
+    const pct = s.download ? downloadPercent(s.download) : progressPercent(s.progress);
     const info = stateInfo(s.state, pct);
     const line = $("state-line");
     line.textContent = info.label;
     line.dataset["tone"] = info.tone;
-    const downloading = s.state === "downloading" && s.progress !== null;
+    const downloading = s.state === "downloading" && (s.progress !== null || s.download !== null);
     $("progress-box").hidden = !downloading;
-    if (downloading && s.progress) {
+    if (downloading) {
       const bar = $<HTMLProgressElement>("progress");
       if (pct === null) bar.removeAttribute("value");
       else bar.value = pct;
-      $("progress-file").textContent = s.progress.file;
+      // One overall bar and text when the server reports it; the per-file name stays as a second line.
+      const text = $("progress-text");
+      text.textContent = s.download ? downloadText(s.download, windowSpeed(samples)) : "";
+      text.hidden = s.download === null;
+      $("progress-file").textContent = s.progress?.file ?? s.download?.current_file ?? "";
     }
     $("alert-agent").hidden = !s.agent_unreachable;
     const failed = $("alert-failed");
@@ -495,6 +688,7 @@ export function mountApp(doc: Document, env: Env): App {
     df.hidden = !(s.state === "destroy_failed" || s.destroy_failed !== null);
     $("destroy-failed-error").textContent = s.destroy_failed?.error ?? "";
     $("f-price").textContent = formatPrice(s.dph);
+    $("f-gpu").textContent = s.gpu_name ?? "—";
     $("f-queue").textContent = formatQueue(s.agent?.queue ?? null);
     $("f-vram").textContent = formatVram(s.agent?.gpu.vram_used_mb ?? null, s.agent?.gpu.vram_total_mb ?? null);
     const role = $("role");
@@ -703,6 +897,7 @@ export function mountApp(doc: Document, env: Env): App {
       if (parsed === null) throw new ApiError("The server sent a status this page cannot read.");
       state = parsed;
       fetchedAt = env.now();
+      samples = nextSamples(samples, fetchedAt, parsed.state, parsed.download);
       failures = 0;
       if (banner.dataset["source"] === "poll") {
         banner.hidden = true;

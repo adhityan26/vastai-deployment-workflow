@@ -16,6 +16,19 @@ import {
   formatQueue,
   formatVram,
   imageUrl,
+  GPU_STORAGE_KEY,
+  chooseGpu,
+  downloadPercent,
+  downloadText,
+  errorReason,
+  estimatePath,
+  etaSeconds,
+  formatEta,
+  formatSpeed,
+  gpuOptionLabel,
+  nextSamples,
+  parseGpus,
+  windowSpeed,
   parseSeed,
   parseState,
   pollIntervalMs,
@@ -167,5 +180,116 @@ describe("login helpers", () => {
     expect(screenForMe(200, { name: "A", username: "a", role: "none" }).screen).toBe("noaccess");
     expect(screenForMe(200, { name: "A", username: "a", role: "admin" })).toEqual({ screen: "app", me: { name: "A", username: "a", role: "admin" } });
     expect(screenForMe(200, { name: null, username: "a", role: "member" }).me?.name).toBe("a");
+  });
+});
+
+
+describe("GPU choice", () => {
+  const list = [
+    { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true },
+    { name: "RTX 3090", dph: null, vram_gb: null, available: false },
+    { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+  ];
+  it("parses the list and treats a missing price as unavailable", () => {
+    expect(parseGpus({ gpus: list })).toEqual(list);
+    expect(parseGpus({ gpus: [{ name: "X", dph: null, vram_gb: 1, available: true }, { name: "", dph: 1 }, 5] })).toEqual([{ name: "X", dph: null, vram_gb: 1, available: false }]);
+    expect(parseGpus({})).toBeNull();
+    expect(parseGpus(null)).toBeNull();
+  });
+  it("labels options", () => {
+    expect(gpuOptionLabel(list[0]!)).toBe("RTX A5000 - $0.25/h");
+    expect(gpuOptionLabel(list[1]!)).toBe("RTX 3090 - no offers now");
+  });
+  it("chooses remembered, else cheapest available, else null", () => {
+    expect(chooseGpu("RTX 4090", list)).toBe("RTX 4090");
+    expect(chooseGpu("RTX 3090", list)).toBe("RTX A5000");
+    expect(chooseGpu("nope", list)).toBe("RTX A5000");
+    expect(chooseGpu(null, list)).toBe("RTX A5000");
+    expect(chooseGpu("RTX 4090", [{ ...list[0]!, available: false }, list[1]!])).toBeNull();
+    expect(chooseGpu(null, [])).toBeNull();
+  });
+  it("encodes the estimate path", () => {
+    expect(estimatePath("RTX 4090")).toBe("/api/estimate?gpu=RTX%204090");
+    expect(estimatePath("a&b=c#")).toBe("/api/estimate?gpu=a%26b%3Dc%23");
+    expect(estimatePath(null)).toBe("/api/estimate");
+    expect(GPU_STORAGE_KEY).toBeTruthy();
+  });
+  it("reads a plain reason only", () => {
+    expect(errorReason({ error: { reason: "ts_key_missing" } })).toBe("ts_key_missing");
+    expect(errorReason({ error: { reason: 5 } })).toBeNull();
+    expect(errorReason({ error: { reason: "" } })).toBeNull();
+    expect(errorReason(null)).toBeNull();
+  });
+});
+
+describe("download progress", () => {
+  const d = (over: Record<string, unknown> = {}) => ({ files_total: 3, files_done: 0, bytes_done: 2_100_000_000, bytes_total: 14_600_000_000, current_file: "a", ...over });
+  it("computes the percent, null for an unknown total", () => {
+    expect(downloadPercent(d())).toBe(14);
+    expect(downloadPercent(d({ bytes_total: 0 }))).toBeNull();
+    expect(downloadPercent(d({ bytes_done: 99e9 }))).toBe(100);
+    expect(downloadPercent(null)).toBeNull();
+  });
+  it("parseState keeps a valid download and drops a broken one", () => {
+    const ok = parseState({ ...base, gpu_name: "RTX 4090", download: d() })!;
+    expect(ok.gpu_name).toBe("RTX 4090");
+    expect(ok.download!.files_total).toBe(3);
+    expect(parseState({ ...base, download: { ...d(), bytes_done: -1 } })!.download).toBeNull();
+    expect(parseState({ ...base, download: { ...d(), bytes_total: "x" } })!.download).toBeNull();
+    expect(parseState({ ...base })!.gpu_name).toBeNull();
+    expect(parseState({ ...base, download: d({ bytes_done: 20e9 }) })!.download!.bytes_done).toBe(14_600_000_000);
+  });
+  it("needs two samples and a positive delta for a speed", () => {
+    expect(windowSpeed([])).toBeNull();
+    expect(windowSpeed([{ t: 0, bytes: 5 }])).toBeNull();
+    expect(windowSpeed([{ t: 0, bytes: 5 }, { t: 1000, bytes: 5 }])).toBeNull();
+    expect(windowSpeed([{ t: 0, bytes: 5 }, { t: 1000, bytes: 3 }])).toBeNull();
+    expect(windowSpeed([{ t: 1000, bytes: 5 }, { t: 1000, bytes: 9 }])).toBeNull();
+    expect(windowSpeed([{ t: 0, bytes: 0 }, { t: 2000, bytes: 100 }])).toBe(50);
+  });
+  it("keeps a moving window, replaces a same-time sample and resets on decrease, gap, clock back or state change", () => {
+    let s = nextSamples([], 0, "downloading", d({ bytes_done: 0 }));
+    for (let i = 1; i <= 10; i++) s = nextSamples(s, i * 1000, "downloading", d({ bytes_done: i * 100 }));
+    expect(s).toHaveLength(6);
+    expect(windowSpeed(s)).toBe(100);
+    expect(nextSamples(s, 10_000, "downloading", d({ bytes_done: 1000 }))).toHaveLength(6);
+    expect(nextSamples(s, 11_000, "downloading", d({ bytes_done: 5 }))).toEqual([{ t: 11_000, bytes: 5 }]);
+    expect(nextSamples(s, 10_000 + 200_000, "downloading", d({ bytes_done: 2000 }))).toHaveLength(1);
+    expect(nextSamples(s, 5_000, "downloading", d({ bytes_done: 2000 }))).toHaveLength(1);
+    expect(nextSamples(s, 11_000, "ready", d())).toEqual([]);
+    expect(nextSamples(s, 11_000, "downloading", null)).toEqual([]);
+    expect(nextSamples(s, Number.NaN, "downloading", d())).toEqual([]);
+  });
+  it("computes the ETA only with a speed and a known remaining size", () => {
+    expect(etaSeconds(d(), 12.5e6)).toBe(1000);
+    expect(etaSeconds(d(), null)).toBeNull();
+    expect(etaSeconds(d(), 0)).toBeNull();
+    expect(etaSeconds(d({ bytes_total: 0 }), 1e6)).toBeNull();
+    expect(etaSeconds(d({ bytes_done: 14_600_000_000 }), 1e6)).toBeNull();
+    expect(etaSeconds(d(), Number.NaN)).toBeNull();
+    expect(Number.isFinite(etaSeconds(d({ bytes_total: 1e300 }), 1e-300)!) || etaSeconds(d({ bytes_total: 1e300 }), 1e-300) === null).toBe(true);
+  });
+  it("formats speed and ETA", () => {
+    expect(formatSpeed(38e6)).toBe("38 MB/s");
+    expect(formatSpeed(2.1e6)).toBe("2.1 MB/s");
+    expect(formatSpeed(1.5e9)).toBe("1.5 GB/s");
+    expect(formatSpeed(500)).toBe("1 KB/s");
+    expect(formatSpeed(250e3)).toBe("250 KB/s");
+    expect(formatEta(0.2)).toBe("about 1 s left");
+    expect(formatEta(40)).toBe("about 40 s left");
+    expect(formatEta(300)).toBe("about 5 min left");
+    expect(formatEta(3900)).toBe("about 1 h 05 min left");
+    expect(formatEta(1e12)).toBe("more than 99 h left");
+    expect(formatEta(Number.POSITIVE_INFINITY)).toBe("");
+    expect(formatEta(Number.NaN)).toBe("");
+    expect(formatEta(-5)).toBe("");
+  });
+  it("builds the overall text", () => {
+    expect(downloadText(d(), null)).toBe("2.1 / 14.6 GB (14%) - file 1 of 3");
+    expect(downloadText(d({ files_done: 0, bytes_done: 2_100_000_000 }), 38e6)).toBe("2.1 / 14.6 GB (14%) - file 1 of 3 - 38 MB/s - about 5 min left");
+    expect(downloadText(d({ files_done: 3 }), null)).toContain("file 3 of 3");
+    expect(downloadText(d({ bytes_total: 0 }), 1e6)).toBe("2.1 GB - file 1 of 3 - 1.0 MB/s");
+    expect(downloadText(d({ bytes_done: 5e6, bytes_total: 50e6 }), null)).toBe("5.0 / 50.0 MB (10%) - file 1 of 3");
+    expect(downloadText(d({ bytes_done: 9e17, bytes_total: 1e18 }), 1e9)).not.toMatch(/NaN|Infinity/);
   });
 });

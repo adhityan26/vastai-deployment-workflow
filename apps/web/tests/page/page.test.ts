@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mountApp, type App } from "../../public/ui.js";
 
 const INDEX = readFileSync(join(import.meta.dirname, "../../public/index.html"), "utf8");
 
-interface Reply { status?: number; body: unknown }
+interface Reply { status?: number; body: unknown; gate?: Promise<void> }
 type Handler = Reply | ((body: unknown) => Reply);
 interface Call { method: string; path: string; body: unknown }
 
@@ -26,6 +26,8 @@ function apiState(over: Record<string, unknown> = {}) {
     uptime_s: 600,
     cost_so_far: 0.06,
     progress: null,
+    gpu_name: null,
+    download: null,
     remaining: { idle_s: 1500, failsafe_s: 9000, hard_cap_s: 20000 },
     unknown: [],
     presets: [{ name: "zz-turbo", steps: 7 }, { name: "zz-slow", steps: 99 }],
@@ -50,6 +52,7 @@ async function mount(state: Record<string, unknown> = {}, extra: Record<string, 
       const h = routes[`${method} ${path}`];
       if (h === undefined) return new Response(JSON.stringify({ error: { code: "not_found", message: "not found" } }), { status: 404 });
       const r = typeof h === "function" ? h(body) : h;
+      if (r.gate) await r.gate;
       return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
     }) as typeof fetch,
     now: () => nowMs,
@@ -68,8 +71,10 @@ beforeEach(() => {
   document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
   calls = [];
   nowMs = 1_000_000;
+  window.localStorage.clear();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   app?.stop();
   app = null;
 });
@@ -204,37 +209,6 @@ describe("confirmations", () => {
     expect(q("#notice")!.textContent).toBe(message);
   });
 
-  it("start shows the estimate and requires confirmation", async () => {
-    await mount({ role: "admin", state: "none" }, {
-      "GET /api/estimate": { body: { offer_id: 1, gpu_name: "RTX 4090", dph: 0.37, horizon_hours: 3, max_cost: 1.11 } },
-      "POST /api/start": { body: { status: "creating", vast_instance_id: 5, estimate: {} } },
-    });
-    q("#btn-start")!.click();
-    await flush();
-    const text = q("#modal")!.textContent!;
-    expect(q("#modal")!.hidden).toBe(false);
-    expect(text).toContain("$0.37/hour");
-    expect(text).toContain("$1.11");
-    expect(text).toContain("3 hours");
-    expect(text).toContain("RTX 4090");
-    expect(text).toContain("covers the failsafe time only");
-    expect(text).toContain("up to the hard cap");
-    expect(text).toContain("Disk storage is billed separately, per hour");
-    expect(posts("/api/start")).toHaveLength(0);
-    q("#modal-ok")!.click();
-    await flush();
-    expect(posts("/api/start")).toEqual([{ method: "POST", path: "/api/start", body: { confirm: true } }]);
-  });
-
-  it("start does nothing if the estimate fails", async () => {
-    await mount({ role: "admin", state: "none" }, { "GET /api/estimate": { status: 503, body: { error: { code: "no_offers", message: "no Vast offer matches the filters" } } } });
-    q("#btn-start")!.click();
-    await flush();
-    expect(q("#modal")!.hidden).toBe(true);
-    expect(q("#banner")!.textContent).toBe("no Vast offer matches the filters");
-    expect(posts("/api/start")).toHaveLength(0);
-  });
-
   it("extend confirms, then sends kind and minutes", async () => {
     await mount({ role: "admin" }, { "POST /api/extend": { body: { kind: "failsafe", deadline: 1 } } });
     q<HTMLSelectElement>("#extend-kind")!.value = "failsafe";
@@ -259,6 +233,237 @@ describe("confirmations", () => {
     q("#modal-ok")!.click();
     await flush();
     expect(posts("/api/destroy-unknown")[0]!.body).toEqual({ vast_id: 12 });
+  });
+});
+
+const GPUS = {
+  gpus: [
+    { name: "RTX A5000", dph: 0.25, vram_gb: 24, available: true },
+    { name: "RTX 3090", dph: null, vram_gb: null, available: false },
+    { name: "RTX 4090", dph: 0.45, vram_gb: 24, available: true },
+  ],
+};
+const est = (name: string, dph: number) => ({ body: { gpu_name: name, dph, horizon_hours: 3, max_cost: dph * 3 } });
+const START_ROUTES: Record<string, Handler> = {
+  "GET /api/gpus": { body: GPUS },
+  "GET /api/estimate?gpu=RTX%20A5000": est("RTX A5000", 0.25),
+  "GET /api/estimate?gpu=RTX%204090": est("RTX 4090", 0.45),
+  "POST /api/start": { body: { status: "booting", vast_instance_id: 5, estimate: { gpu_name: "RTX A5000", dph: 0.25, horizon_hours: 3, max_cost: 0.75 } } },
+};
+const adminNone = (extra: Record<string, Handler> = {}) => mount({ role: "admin", state: "none" }, { ...START_ROUTES, ...extra });
+const openStart = async () => { q("#btn-start")!.click(); await flush(); };
+const gpuSelect = () => q<HTMLSelectElement>("#start-gpu")!;
+const estimateCalls = () => calls.filter((c) => c.path.startsWith("/api/estimate")).map((c) => c.path);
+
+describe("start dialog", () => {
+  it("lists the GPUs with prices, disables unavailable ones, defaults to the cheapest and shows its estimate", async () => {
+    await adminNone();
+    await openStart();
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(document.querySelector('label[for="start-gpu"]')!.textContent).toBe("GPU");
+    const opts = [...gpuSelect().options];
+    expect(opts.map((o) => o.textContent)).toEqual(["RTX A5000 - $0.25/h", "RTX 3090 - no offers now", "RTX 4090 - $0.45/h"]);
+    expect(opts.map((o) => o.disabled)).toEqual([false, true, false]);
+    expect(gpuSelect().value).toBe("RTX A5000");
+    expect(estimateCalls()).toEqual(["/api/estimate?gpu=RTX%20A5000"]);
+    const text = q("#modal")!.textContent!;
+    expect(text).toContain("$0.25/hour");
+    expect(text).toContain("(RTX A5000)");
+    expect(text).toContain("3 hours");
+    expect(text).toContain("$0.75");
+    expect(text).toContain("covers the failsafe time only");
+    expect(text).toContain("up to the hard cap");
+    expect(text).toContain("Disk storage is billed separately, per hour");
+    expect(posts("/api/start")).toHaveLength(0);
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(false);
+  });
+
+  it("uses the remembered GPU when it is still available", async () => {
+    window.localStorage.setItem("vast-comfy.gpu", "RTX 4090");
+    await adminNone();
+    await openStart();
+    expect(gpuSelect().value).toBe("RTX 4090");
+    expect(estimateCalls()).toEqual(["/api/estimate?gpu=RTX%204090"]);
+  });
+
+  it.each(["RTX 3090", "GTX 1080", "<b>x</b>", ""])("falls back to the cheapest when the remembered value %j is unavailable or unlisted", async (stored) => {
+    window.localStorage.setItem("vast-comfy.gpu", stored);
+    await adminNone();
+    await openStart();
+    expect(gpuSelect().value).toBe("RTX A5000");
+  });
+
+  it("works when localStorage throws", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    await adminNone();
+    await openStart();
+    expect(gpuSelect().value).toBe("RTX A5000");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")).toHaveLength(1);
+    expect(q("#modal")!.hidden).toBe(true);
+    expect(q("#notice")!.hidden).toBe(false);
+  });
+
+  it("refetches the estimate with the encoded name when the selection changes", async () => {
+    await adminNone();
+    await openStart();
+    gpuSelect().value = "RTX 4090";
+    gpuSelect().dispatchEvent(new Event("change"));
+    await flush();
+    expect(estimateCalls()).toEqual(["/api/estimate?gpu=RTX%20A5000", "/api/estimate?gpu=RTX%204090"]);
+    expect(q("#modal")!.textContent).toContain("$0.45/hour");
+    expect(q("#modal")!.textContent).toContain("$1.35");
+  });
+
+  it("ignores a stale estimate answer", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    await adminNone();
+    routes["GET /api/estimate?gpu=RTX%20A5000"] = { ...est("RTX A5000", 0.25), gate };
+    q("#btn-start")!.click();
+    await flush();
+    // The A5000 estimate is still pending: switch to the 4090, which answers at once.
+    gpuSelect().value = "RTX 4090";
+    gpuSelect().dispatchEvent(new Event("change"));
+    await flush();
+    expect(q("#modal")!.textContent).toContain("$0.45/hour");
+    release();
+    await flush();
+    expect(q("#modal")!.textContent).toContain("$0.45/hour");
+    expect(q("#modal")!.textContent).not.toContain("$0.25/hour");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toEqual({ confirm: true, gpu: "RTX 4090" });
+  });
+
+  it("confirm posts the chosen GPU, remembers it and shows the GPU the server returned", async () => {
+    await adminNone();
+    await openStart();
+    gpuSelect().value = "RTX 4090";
+    gpuSelect().dispatchEvent(new Event("change"));
+    await flush();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")).toEqual([{ method: "POST", path: "/api/start", body: { confirm: true, gpu: "RTX 4090" } }]);
+    expect(window.localStorage.getItem("vast-comfy.gpu")).toBe("RTX 4090");
+    expect(q("#modal")!.hidden).toBe(true);
+    // The shared attempt rented an A5000: the notice names that, not the dropdown value.
+    expect(q("#notice")!.textContent).toContain("RTX A5000");
+    expect(q("#notice")!.textContent).not.toContain("4090");
+  });
+
+  it("double clicking confirm sends one request", async () => {
+    await adminNone();
+    await openStart();
+    q("#modal-ok")!.click();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")).toHaveLength(1);
+  });
+
+  it("cannot be cancelled while the start request is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    await adminNone({ "POST /api/start": { ...(START_ROUTES["POST /api/start"] as Reply), gate } });
+    await openStart();
+    q("#modal-ok")!.click();
+    await flush();
+    q("#modal-cancel")!.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(true);
+    release();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(true);
+    expect(posts("/api/start")).toHaveLength(1);
+  });
+
+  it("a failed start shows message and reason in the dialog, keeps it open and re-enables confirm", async () => {
+    await adminNone({ "POST /api/start": { status: 502, body: { error: { code: "start_failed", message: "the Tailscale auth key is missing or empty on the server", reason: "ts_key_missing" } } } });
+    await openStart();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    const alert = q('#modal-body [role="alert"]')!;
+    expect(alert.hidden).toBe(false);
+    expect(alert.textContent).toContain("the Tailscale auth key is missing or empty on the server");
+    expect(alert.textContent).toContain("ts_key_missing");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(false);
+    expect(gpuSelect().disabled).toBe(false);
+    expect(q("#banner")!.textContent).toBe("the Tailscale auth key is missing or empty on the server");
+    expect(window.localStorage.getItem("vast-comfy.gpu")).toBeNull();
+    // A retry works.
+    routes["POST /api/start"] = START_ROUTES["POST /api/start"]!;
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")).toHaveLength(2);
+    expect(q("#modal")!.hidden).toBe(true);
+  });
+
+  it("a failing GPU list shows the error inside the dialog and cannot start", async () => {
+    await adminNone({ "GET /api/gpus": { status: 503, body: { error: { code: "no_gpu_configured", message: "no GPU model is configured on the server" } } } });
+    await openStart();
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(q('#modal-body [role="alert"]')!.textContent).toContain("no GPU model is configured on the server");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(true);
+    expect(estimateCalls()).toHaveLength(0);
+    q("#modal-cancel")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(true);
+  });
+
+  it("a failing estimate shows the error in the dialog and disables confirm", async () => {
+    await adminNone({ "GET /api/estimate?gpu=RTX%20A5000": { status: 409, body: { error: { code: "no_offers", message: "no Vast offer matches for this GPU model right now" } } } });
+    await openStart();
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(q('#modal-body [role="alert"]')!.textContent).toContain("no Vast offer matches");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(true);
+    expect(posts("/api/start")).toHaveLength(0);
+  });
+
+  it("with no GPU available the select is disabled with a message and confirm is off", async () => {
+    await adminNone({ "GET /api/gpus": { body: { gpus: [{ name: "RTX 3090", dph: null, vram_gb: null, available: false }] } } });
+    await openStart();
+    expect(gpuSelect().disabled).toBe(true);
+    expect(q("#modal")!.textContent).toContain("No GPU model has offers right now");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(true);
+    expect(estimateCalls()).toHaveLength(0);
+  });
+
+  it("a hostile GPU name stays inert", async () => {
+    const evil = '<img src=x onerror="window.__pwned=1">';
+    await adminNone({
+      "GET /api/gpus": { body: { gpus: [{ name: evil, dph: 0.2, vram_gb: 24, available: true }] } },
+      [`GET /api/estimate?gpu=${encodeURIComponent(evil)}`]: est(evil, 0.2),
+      "POST /api/start": { body: { status: "booting", vast_instance_id: 1, estimate: { gpu_name: evil, dph: 0.2, horizon_hours: 3, max_cost: 0.6 } } },
+    });
+    await openStart();
+    expect(gpuSelect().options[0]!.textContent).toContain(evil);
+    expect(gpuSelect().value).toBe(evil);
+    expect(q("#modal")!.textContent).toContain(evil);
+    q("#modal-ok")!.click();
+    await flush();
+    expect(q("#notice")!.textContent).toContain(evil);
+    expect(document.querySelectorAll("img")).toHaveLength(0);
+    expect((window as unknown as Record<string, unknown>)["__pwned"]).toBeUndefined();
+  });
+
+  it("cancel closes without starting", async () => {
+    await adminNone();
+    await openStart();
+    q("#modal-cancel")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(true);
+    expect(posts("/api/start")).toHaveLength(0);
+  });
+
+  it("a member has no start button and never loads the GPU list", async () => {
+    await mount({ role: "member", state: "none" }, START_ROUTES);
+    expect(q("#btn-start")).toBeNull();
+    expect(calls.some((c) => c.path === "/api/gpus")).toBe(false);
   });
 });
 
@@ -312,6 +517,21 @@ describe("status card", () => {
     expect(q("#progress-file")!.textContent).toBe("model.safetensors");
   });
 
+  it("shows the GPU name from the state", async () => {
+    await mount({ gpu_name: "RTX 4090" });
+    expect(q("#f-gpu")!.textContent).toBe("RTX 4090");
+    expect(q("#f-price")!.textContent).toBe("$0.36/hour");
+    await mount({ gpu_name: null });
+    expect(q("#f-gpu")!.textContent).toBe("—");
+  });
+
+  it("renders a hostile GPU name in the status card as text", async () => {
+    const evil = '<img src=x onerror="window.__pwned=1">';
+    await mount({ gpu_name: evil });
+    expect(q("#f-gpu")!.textContent).toBe(evil);
+    expect(document.querySelectorAll("img")).toHaveLength(0);
+  });
+
   it("shows uptime, cost, queue, vram and remaining time", async () => {
     await mount();
     expect(q("#f-uptime")!.textContent).toBe("10m 00s");
@@ -328,6 +548,73 @@ describe("status card", () => {
     document.dispatchEvent(new Event("visibilitychange"));
     await flush();
     expect(calls.length).toBeGreaterThan(before);
+  });
+});
+
+describe("overall download progress", () => {
+  const dl = (over: Record<string, unknown> = {}) => ({
+    state: "downloading",
+    progress: { phase: "models", file: "a.safetensors", bytes_done: 500, bytes_total: 1000 },
+    download: { files_total: 3, files_done: 1, bytes_done: 2_100_000_000, bytes_total: 14_600_000_000, current_file: "a.safetensors", ...over },
+  });
+  const tick = async (state: Record<string, unknown>, at: number) => {
+    nowMs = at;
+    routes["GET /api/state"] = { body: apiState(state) };
+    await app!.refresh();
+  };
+
+  it("shows one overall bar, GB text, file n of m and the per-file name; no speed before two samples", async () => {
+    await mount(dl());
+    expect(q("#state-line")!.textContent).toBe("Downloading models: 14%");
+    expect(q<HTMLProgressElement>("#progress")!.value).toBe(14);
+    expect(q("#progress-text")!.hidden).toBe(false);
+    expect(q("#progress-text")!.textContent).toBe("2.1 / 14.6 GB (14%) - file 2 of 3");
+    expect(q("#progress-file")!.textContent).toBe("a.safetensors");
+  });
+
+  it("adds speed and ETA after a second sample", async () => {
+    await mount(dl());
+    await tick(dl({ bytes_done: 2_100_000_000 + 380_000_000 }), nowMs + 10_000);
+    const text = q("#progress-text")!.textContent!;
+    expect(text).toBe("2.5 / 14.6 GB (16%) - file 2 of 3 - 38 MB/s - about 5 min left");
+    expect(text).not.toMatch(/NaN|Infinity/);
+  });
+
+  it("shows no speed when nothing moved, and never NaN", async () => {
+    await mount(dl());
+    await tick(dl(), nowMs + 10_000);
+    expect(q("#progress-text")!.textContent).toBe("2.1 / 14.6 GB (14%) - file 2 of 3");
+  });
+
+  it("does not jump back when the current file changes", async () => {
+    await mount(dl({ files_done: 0, bytes_done: 4_000_000_000, current_file: "a" }));
+    const before = q<HTMLProgressElement>("#progress")!.value;
+    await tick(dl({ files_done: 1, bytes_done: 4_600_000_000, current_file: "b" }), nowMs + 10_000);
+    expect(q<HTMLProgressElement>("#progress")!.value).toBeGreaterThanOrEqual(before);
+    expect(q("#progress-text")!.textContent).toContain("file 2 of 3");
+    expect(q("#progress-text")!.textContent).toContain("60 MB/s");
+  });
+
+  it("drops the speed when the counter goes down", async () => {
+    await mount(dl());
+    await tick(dl({ bytes_done: 3_000_000_000 }), nowMs + 10_000);
+    expect(q("#progress-text")!.textContent).toContain("MB/s");
+    await tick(dl({ bytes_done: 1_000_000_000 }), nowMs + 10_000);
+    expect(q("#progress-text")!.textContent).not.toContain("MB/s");
+  });
+
+  it("falls back to the per-file bar when the server sends no overall download", async () => {
+    await mount({ state: "downloading", progress: { phase: "models", file: "m.safetensors", bytes_done: 30, bytes_total: 100 } });
+    expect(q("#progress-text")!.hidden).toBe(true);
+    expect(q<HTMLProgressElement>("#progress")!.value).toBe(30);
+  });
+
+  it("renders a hostile file name as text", async () => {
+    const evil = '<img src=x onerror="window.__pwned=1">';
+    await mount(dl({ current_file: evil }));
+    await tick({ ...dl({ current_file: evil }), progress: null }, nowMs + 1000);
+    expect(q("#progress-file")!.textContent).toBe(evil);
+    expect(document.querySelectorAll("img")).toHaveLength(0);
   });
 });
 
