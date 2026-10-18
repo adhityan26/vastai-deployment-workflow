@@ -102,6 +102,14 @@ describe("inferStop: the reason of an instance that disappeared by itself", () =
     expect(inferStop(obs({ seen_at: T0, idle_destroy_at: T0 + 100 }), T0 + 50, SLACK).ended_at).toBe(T0 + 50);
   });
 
+  it("an end by the agent's own reason or an unknown one is dated at the last sighting, never after detection", () => {
+    expect(inferStop(obs({ seen_at: T0 + 30, state: "stopping", reason: "idle_timeout" }), T0 + 500, SLACK)).toEqual({ reason: "idle_timeout", ended_at: T0 + 30 });
+    expect(inferStop(obs({ seen_at: T0 + 30 }), T0 + 500, SLACK)).toEqual({ reason: "gone", ended_at: T0 + 30 });
+    expect(inferStop(obs({ seen_at: T0 + 30, destroy_pending: true }), T0 + 500, SLACK)).toEqual({ reason: "failsafe_deadline", ended_at: T0 + 30 });
+    // A sighting dated after the detection (clock skew) is clamped to the detection.
+    expect(inferStop(obs({ seen_at: T0 + 900 }), T0 + 500, SLACK).ended_at).toBe(T0 + 500);
+  });
+
   it("observationOf keeps only what the inference needs", () => {
     const o = observationOf(status("stopping", { reason: "idle_timeout", destroy: { pending: true, attempts: 1 } }), T0 + 7);
     expect(o).toEqual({
@@ -208,6 +216,16 @@ describe("UsageHistory", () => {
     expect(h.list(T0 + 10)).toEqual([expect.objectContaining({ started_at: T0, started_by: "root", active: true })]);
   });
 
+  it("logs a start line for a Start that failed before the Vast create, so every stop has a start", () => {
+    const logs: string[] = [];
+    const h = new UsageHistory(LIMITS, null, (level, m) => logs.push(`${level} ${m}`));
+    h.begin("vast-a", T0, "root");
+    h.noteOffer("vast-a", "RTX A5000", 0.3);
+    h.requestStop("vast-a", "boot_failed");
+    h.end("vast-a", T0 + 3);
+    expect(logs).toEqual(["info usage: start gpu=RTX A5000 dph=0.300 by=root", "info usage: stop reason=boot_failed duration_s=3"]);
+  });
+
   it("ignores hostile numbers and keeps gpu names short and plain", () => {
     const h = new UsageHistory(LIMITS, null);
     h.begin("vast-a", T0, null);
@@ -224,6 +242,54 @@ describe("UsageHistory", () => {
 });
 
 describe("UsageHistory persistence", () => {
+  function counting() {
+    let saved: unknown = null;
+    const store = { saves: 0, load: () => saved, save: (v: unknown) => { store.saves++; saved = structuredClone(v); } };
+    return store;
+  }
+
+  it("saves an agent sighting only when the state or reason changes or a deadline moves earlier or by more than the slack", () => {
+    const store = counting();
+    const h = new UsageHistory(LIMITS, store);
+    h.begin("vast-a", T0, null);
+    h.observe("vast-a", status("ready"), T0); // first sighting
+    const base = store.saves;
+    // Busy queue: the idle deadline moves a little on every poll.
+    for (let i = 1; i <= 10; i++) h.observe("vast-a", status("ready", { idle_destroy_at: T0 + 1800 + i * 10 }), T0 + i * 10);
+    expect(store.saves).toBe(base + 0);
+    h.observe("vast-a", status("ready", { idle_destroy_at: T0 + 1800 + SLACK + 1 }), T0 + 200); // beyond the slack
+    expect(store.saves).toBe(base + 1);
+    h.observe("vast-a", status("ready", { idle_destroy_at: T0 + 1800 + SLACK }), T0 + 210); // earlier: always saved
+    expect(store.saves).toBe(base + 2);
+    h.observe("vast-a", status("idle-warning", { idle_destroy_at: T0 + 1800 + SLACK }), T0 + 220);
+    expect(store.saves).toBe(base + 3);
+    h.observe("vast-a", status("idle-warning", { idle_destroy_at: null }), T0 + 230);
+    expect(store.saves).toBe(base + 4);
+  });
+
+  it("a saved sighting that may be stale (by up to the slack) never names a deadline the exact rule would refuse", () => {
+    const path = join(dir(), "usage.json");
+    const D = T0 + 1800;
+    const h = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    h.begin("vast-a", T0, null);
+    h.observe("vast-a", status("ready", { idle_destroy_at: D }), T0); // saved
+    h.observe("vast-a", status("ready", { idle_destroy_at: D + SLACK }), T0 + 60); // in memory only
+    // In the same process the exact (in-memory) deadline is used with the slack.
+    const det = D - SLACK / 2; // D + SLACK > det + SLACK: the exact rule says the deadline had not passed
+    expect(inferStop(observationOf(status("ready", { idle_destroy_at: D + SLACK }), T0 + 60), det, SLACK).reason).toBe("gone");
+    // After a restart only the saved (possibly stale) copy exists: no slack, so no wrong idle_timeout.
+    const again = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    again.end("vast-a", det);
+    expect(again.list(det)[0]!.reason).toBe("gone");
+    // A deadline the stale copy shows as passed has passed for the exact rule too.
+    const third = new UsageHistory(LIMITS, new UsageStore(join(dir(), "u.json"), 1 << 20));
+    third.begin("vast-b", T0, null);
+    third.observe("vast-b", status("ready", { idle_destroy_at: D }), T0);
+    third.end("vast-b", det);
+    // Same process, exact deadline: D - det = SLACK / 2 lies within the slack, so it counts.
+    expect(third.list(det)[0]!.reason).toBe("idle_timeout");
+  });
+
   it("round trips through the file, including the open entry and the last agent sighting", () => {
     const path = join(dir(), "usage.json");
     const store = new UsageStore(path, usageFileCap(LIMITS.maxEntries));
@@ -266,6 +332,20 @@ describe("UsageHistory persistence", () => {
     expect(again.list(T0 + 20)).toHaveLength(1);
   });
 
+  it("a tampered file cannot smuggle odd characters into the names: those values are dropped", () => {
+    const path = join(dir(), "tampered.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20));
+    h.begin("vast-a", T0, "root");
+    h.noteOffer("vast-a", "RTX A5000", 0.3);
+    h.requestStop("vast-a", "destroy_button", "ayu");
+    h.end("vast-a", T0 + 10);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    Object.assign(saved.entries[0], { started_by: "<img src=x>", stop_by: "a@b.c", gpu_name: "RTX\u0000<b>" });
+    writeFileSync(path, JSON.stringify(saved));
+    const [e] = new UsageHistory(LIMITS, new UsageStore(path, 1 << 20)).list(T0 + 20);
+    expect(e).toMatchObject({ started_by: null, stop_by: null, gpu_name: null, reason: "destroy_button", dph: 0.3 });
+  });
+
   it("a save failure never breaks the history (it stays in memory)", () => {
     const h = new UsageHistory(LIMITS, { load: () => null, save: () => { throw new Error("disk full"); } });
     h.begin("vast-a", T0, "root");
@@ -295,6 +375,8 @@ describe("usageLimits and the reason list", () => {
     expect(usageLimits({ usageLogMaxEntries: 200, usageReasonSlackS: 120, secretNames: [] } as unknown as AppsConfig)).toEqual({ maxEntries: 200, slackS: 120 });
     expect(() => usageLimits({ secretNames: [] } as unknown as AppsConfig)).toThrow(/USAGE_LOG_MAX_ENTRIES/);
     expect(() => usageLimits({ usageLogMaxEntries: 10, secretNames: [] } as unknown as AppsConfig)).toThrow(/USAGE_REASON_SLACK_S/);
+    // One entry could not hold an adopted session next to the one it closes: at least two.
+    expect(() => usageLimits({ usageLogMaxEntries: 1, usageReasonSlackS: 0, secretNames: [] } as unknown as AppsConfig)).toThrow(/USAGE_LOG_MAX_ENTRIES must be an integer >= 2/);
   });
 
   it("is the fixed enum", () => {

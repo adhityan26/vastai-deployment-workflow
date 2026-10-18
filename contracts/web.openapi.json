@@ -820,7 +820,7 @@
               "integer",
               "null"
             ],
-            "description": "Epoch seconds of the end: when the web stopped it or noticed it gone; for a passed deadline the deadline itself (never before the last sighting). Null while active"
+            "description": "Epoch seconds of the end; null while active. When the web stopped the instance itself (or a Start failed): the moment it saw the stop complete. When the instance disappeared by itself: for a passed idle, failsafe or hard-cap deadline the deadline itself; for the agent's own destroy reason, the failsafe's pending destroy or an unknown cause (gone) the last time the web saw the agent; always clamped between that last sighting and the moment the web noticed the instance gone; without any sighting the moment it noticed"
           },
           "duration_s": {
             "type": "integer",

@@ -122,7 +122,8 @@ function intCfg(cfg: AppsConfig, key: string, envName: string, min: number): num
 
 export function usageLimits(cfg: AppsConfig): UsageLimits {
   return {
-    maxEntries: intCfg(cfg, "usageLogMaxEntries", "USAGE_LOG_MAX_ENTRIES", 1),
+    // Two at least: a session adopted or begun always fits next to the one it closes.
+    maxEntries: intCfg(cfg, "usageLogMaxEntries", "USAGE_LOG_MAX_ENTRIES", 2),
     slackS: intCfg(cfg, "usageReasonSlackS", "USAGE_REASON_SLACK_S", 0),
   };
 }
@@ -185,16 +186,19 @@ export function observationOf(status: AgentStatus, seenAt: number): AgentObserva
  * 2. a deadline had passed by `detectedAt + slackS`: the earliest one (hard cap first on a tie,
  *    then the failsafe, then idle), dated at that deadline within [last sighting, detection];
  * 3. the standalone failsafe was destroying: failsafe_deadline;
- * 4. otherwise `gone` (e.g. Vast removed it), dated at the detection.
+ * 4. otherwise `gone` (e.g. Vast removed it).
+ * Cases 1, 3 and 4 are dated at the last sighting (it was alive then and gone at the detection),
+ * never after the detection; without any sighting the end is the detection.
  */
 export function inferStop(obs: AgentObservation | null, detectedAt: number, slackS: number): { reason: StopReason; ended_at: number } {
   const at = Math.floor(detectedAt);
   if (obs === null) return { reason: "gone", ended_at: at };
+  const seen = Math.min(at, obs.seen_at);
   if (obs.state !== null && (DESTROYING_STATES.has(obs.state) || obs.state === FAILED_STATE)) {
     const exact = obs.reason === null ? undefined : AGENT_EXACT[obs.reason];
-    if (exact !== undefined) return { reason: exact, ended_at: at };
-    if (obs.reason !== null && AGENT_BOOT_REASONS.has(obs.reason)) return { reason: "boot_failed", ended_at: at };
-    if (obs.state === FAILED_STATE) return { reason: "boot_failed", ended_at: at };
+    if (exact !== undefined) return { reason: exact, ended_at: seen };
+    if (obs.reason !== null && AGENT_BOOT_REASONS.has(obs.reason)) return { reason: "boot_failed", ended_at: seen };
+    if (obs.state === FAILED_STATE) return { reason: "boot_failed", ended_at: seen };
   }
   const deadlines: [number | null, StopReason][] = [
     [obs.hard_cap_at, "hard_cap"],
@@ -207,8 +211,8 @@ export function inferStop(obs: AgentObservation | null, detectedAt: number, slac
     if (best === null || when < best[0]) best = [when, reason];
   }
   if (best !== null) return { reason: best[1], ended_at: Math.min(at, Math.max(best[0], obs.seen_at)) };
-  if (obs.destroy_pending) return { reason: "failsafe_deadline", ended_at: at };
-  return { reason: "gone", ended_at: at };
+  if (obs.destroy_pending) return { reason: "failsafe_deadline", ended_at: seen };
+  return { reason: "gone", ended_at: seen };
 }
 
 // ---- validation of a loaded file (anything unexpected drops that entry) ----
@@ -250,10 +254,24 @@ function validEntry(v: unknown): v is UsageEntry {
   );
 }
 
+/** A loaded entry's names under the same rules as when they were recorded; any other value is dropped. */
+function cleanNames(e: UsageEntry): UsageEntry {
+  const keep = (v: string | null, clean: (raw: string) => string | null) => (v !== null && clean(v) === v ? v : null);
+  e.started_by = keep(e.started_by, userLabel);
+  e.stop_by = keep(e.stop_by, userLabel);
+  e.gpu_name = keep(e.gpu_name, gpuLabel);
+  if (e.pending_stop !== null) e.pending_stop.by = keep(e.pending_stop.by, userLabel);
+  return e;
+}
+
 type Log = (level: "info" | "warn" | "error", message: string) => void;
 
 export class UsageHistory {
   private entries: UsageEntry[] | null = null; // oldest first; loaded on first use
+  // The exact last agent sighting per hostname, in this process only. The entry's `last_agent` is
+  // the copy last written to the file: it may lag behind, but a deadline in it is never later than
+  // the exact one and at most `slackS` earlier (see observe()).
+  private readonly fresh = new Map<string, AgentObservation>();
 
   constructor(
     private readonly limits: UsageLimits,
@@ -270,7 +288,7 @@ export class UsageHistory {
       saved = null;
     }
     const list = isObject(saved) && saved["version"] === FILE_VERSION && Array.isArray(saved["entries"]) ? saved["entries"] : [];
-    const valid = list.filter(validEntry).map((e) => structuredClone(e));
+    const valid = list.filter(validEntry).map((e) => cleanNames(structuredClone(e)));
     // At most one open entry survives (the newest); a duplicate hostname keeps its first entry.
     const seen = new Set<string>();
     const unique = valid.filter((e) => (seen.has(e.hostname) ? false : (seen.add(e.hostname), true)));
@@ -364,10 +382,12 @@ export class UsageHistory {
     const first = e.instance_id === null;
     e.instance_id = id;
     this.persist();
-    if (first) {
-      const dph = e.dph === null ? "?" : e.dph.toFixed(3);
-      this.log("info", `usage: start gpu=${e.gpu_name ?? "?"} dph=${dph} by=${e.started_by ?? "?"}`);
-    }
+    if (first) this.logStart(e);
+  }
+
+  private logStart(e: UsageEntry): void {
+    const dph = e.dph === null ? "?" : e.dph.toFixed(3);
+    this.log("info", `usage: start gpu=${e.gpu_name ?? "?"} dph=${dph} by=${e.started_by ?? "?"}`);
   }
 
   /** Vast's own price for the instance (it may differ from the offer). */
@@ -382,17 +402,34 @@ export class UsageHistory {
     this.patch(hostname, (e) => (e.ready_at !== null ? false : ((e.ready_at = Math.floor(at)), true)));
   }
 
-  /** The last agent status; written to the file only when something the inference reads changed. */
+  /**
+   * The last agent status. Kept exactly in memory; written to the file only when the state, the
+   * reason or the failsafe flag changes, a deadline appears, disappears or moves earlier, or it moves
+   * later by more than the slack. So the saved copy of a deadline is at most `slackS` earlier than
+   * the true one (a busy queue moves the idle deadline on every poll without rewriting the file).
+   */
   observe(hostname: string, status: AgentStatus, at: number): void {
     const next = observationOf(status, at);
+    if (this.open(hostname) === undefined) return;
+    this.fresh.set(hostname, next);
     this.patch(hostname, (e) => {
-      const prev = e.last_agent;
+      if (!this.worthSaving(e.last_agent, next)) return false;
       e.last_agent = next;
-      if (prev === null) return true;
-      const { seen_at: _a, ...a } = prev;
-      const { seen_at: _b, ...b } = next;
-      return JSON.stringify(a) !== JSON.stringify(b);
+      return true;
     });
+  }
+
+  private worthSaving(saved: AgentObservation | null, next: AgentObservation): boolean {
+    if (saved === null) return true;
+    if (saved.state !== next.state || saved.reason !== next.reason || saved.destroy_pending !== next.destroy_pending) return true;
+    for (const key of ["idle_destroy_at", "failsafe_at", "hard_cap_at"] as const) {
+      const a = saved[key];
+      const b = next[key];
+      if (a === null || b === null) {
+        if (a !== b) return true;
+      } else if (b < a || b - a > this.limits.slackS) return true;
+    }
+    return false;
   }
 
   /** The web service is about to stop the instance for `reason`; the first request wins. */
@@ -413,10 +450,17 @@ export class UsageHistory {
       e.stop_by = e.pending_stop.by;
       e.ended_at = at;
     } else {
-      const inferred = inferStop(e.last_agent, at, this.limits.slackS);
+      // The exact sighting of this process uses the slack. A copy from the file may show a deadline
+      // up to slackS too early, so it gets none: "saved <= detected" implies "true <= detected + slack",
+      // and a deadline the exact rule would refuse is never named.
+      const exact = this.fresh.get(hostname);
+      const inferred = exact !== undefined ? inferStop(exact, at, this.limits.slackS) : inferStop(e.last_agent, at, 0);
       e.reason = inferred.reason;
       e.ended_at = Math.max(e.started_at, inferred.ended_at);
     }
+    // Without an instance id the start line was never logged (it is logged at the create): log it now.
+    if (e.instance_id === null) this.logStart(e);
+    this.fresh.delete(hostname);
     const by = e.stop_by === null ? "" : ` by=${e.stop_by}`;
     this.log("info", `usage: stop reason=${e.reason} duration_s=${e.ended_at - e.started_at}${by}`);
     return true;

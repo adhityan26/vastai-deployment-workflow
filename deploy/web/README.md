@@ -249,9 +249,17 @@ when the cause is unknown (e.g. Vast removed it).
   stops itself, the reason comes from the last agent `/status` the web saw: the agent's own destroy
   state and reason first, then the earliest idle, failsafe or hard-cap deadline that had passed by
   the time the web noticed (plus `USAGE_REASON_SLACK_S` for clock skew), else "disappeared".
+  The first recorded reason wins, so in two rare cases the label can be wrong: Destroy pressed while
+  the create was still uncertain followed by a web restart (the boot timeout then destroys it, the
+  history says Destroy button), and a Start whose registry write and cleanup destroy both failed (a
+  later stop still shows "Boot failed").
 - The instance prints `[watchdog] destroying instance: reason=<reason>` before each self-destroy
   (agent log under supervisor, `failsafe.log` for the standalone failsafe).
-- `USAGE_LOG_MAX_ENTRIES` sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
+- Times: a stop by the web is dated when it completed; a self-stop at the passed deadline, or else at
+  the last time the web saw the agent. Agent sightings are written to the file only when something
+  meaningful changes (a deadline moving by less than the slack is not), so after a web restart a
+  saved deadline counts only once it lies before the moment the web noticed the end.
+- `USAGE_LOG_MAX_ENTRIES` (at least 2) sessions are kept in `USAGE_LOG_PATH` (compose: `/data/usage-history.json`,
   next to the registry); a corrupt file is ignored. The web log gets one `usage: start ...` and one
   `usage: stop ...` line per session (GPU, price, reason, duration and user names only).
 

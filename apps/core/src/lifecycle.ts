@@ -655,6 +655,9 @@ export class Lifecycle {
       return { record: publicRecord(updated), estimate: this.estimateFor(offer) };
     } catch (err) {
       // The instance exists but the registry could not record it: destroy it right away.
+      // When this destroy fails too, the record stays `creating` and reconcile later links and stops
+      // the instance (boot timeout, hard cap or the Destroy button): the history still says
+      // boot_failed, as the first stop request wins (rare; accepted).
       this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
       const outcome = await this.vastDestroy(created.id).catch(() => null);
       if (outcome !== null) {
@@ -743,6 +746,8 @@ export class Lifecycle {
           // Vast does not list it (yet). Keep the record and remember the request: reconcile
           // destroys the instance as soon as it links it by label.
           this.destroyRequested.add(record.tailnet_hostname);
+          // Persisted, while destroyRequested is not: after a web restart the boot timeout destroys
+          // this instance instead, and the history still says destroy_button (rare; accepted).
           this.withUsage((u) => u.requestStop(record.tailnet_hostname, "destroy_button", by));
           return { outcome: "pending", agent_error: null };
         }

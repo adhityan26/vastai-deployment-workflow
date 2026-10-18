@@ -82,6 +82,15 @@ class GatedRegistry extends Registry {
   beginGate: Promise<void> | null = null;
   /** Held after all() has read the file: the caller gets a snapshot older than the file. */
   allGate: Promise<void> | null = null;
+  /** Held after markGone() wrote the file: the lifecycle has not reacted to the end yet. */
+  markGoneGate: Promise<void> | null = null;
+  markGoneReached: (() => void) | null = null;
+  override async markGone(hostname: string): Promise<InstanceRecord> {
+    const gone = await super.markGone(hostname);
+    this.markGoneReached?.();
+    if (this.markGoneGate) await this.markGoneGate;
+    return gone;
+  }
   override async all(): Promise<InstanceRecord[]> {
     const records = await super.all();
     if (this.allGate) await this.allGate;
@@ -342,13 +351,20 @@ describe("usage history through the lifecycle", () => {
     expect(list.map((e) => [e.started_by, e.active])).toEqual([["ayu", true], ["root", false]]);
   });
 
-  it("race: a reader closing the entry during a Destroy still records destroy_button", async () => {
+  it("race: a reader that sees the record gone before the Destroy finishes still records destroy_button", async () => {
     const h = await harness();
     await h.lc.start(undefined, "root");
+    await h.lc.view(); // a plain "ready" sighting: an inference would say gone
+    let release!: () => void;
+    h.registry.markGoneGate = new Promise<void>((r) => (release = r));
+    const reached = new Promise<void>((r) => (h.registry.markGoneReached = r));
     const destroying = h.lc.destroy("ayu");
-    const reads = [h.lc.history(), h.lc.view(), h.lc.history()];
+    await reached; // the registry says gone; the lifecycle has not ended the entry yet
+    h.registry.markGoneGate = null;
+    const [seen] = await h.lc.history(); // this reader closes the entry itself
+    release();
     await destroying;
-    await Promise.all(reads);
+    expect(seen).toMatchObject({ reason: "destroy_button", stop_by: "ayu", active: false });
     expect((await h.lc.history())[0]).toMatchObject({ reason: "destroy_button", stop_by: "ayu" });
   });
 

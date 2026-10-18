@@ -105,6 +105,8 @@ describe("deploy files", () => {
       expect(schemaKeys.has(n)).toBe(true);
     }
     expect(schemaKeys.has("USAGE_LOG_PATH")).toBe(true);
+    const max = (schema.keys as { name: string; min?: number }[]).find((k) => k.name === "USAGE_LOG_MAX_ENTRIES");
+    expect(max?.min).toBe(2);
   });
 
   it("the Tailscale OAuth keys exist in the schema and in .env.example (secrets empty, tunables commented)", () => {
