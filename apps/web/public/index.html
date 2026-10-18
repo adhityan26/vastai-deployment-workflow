@@ -88,18 +88,34 @@
   <section class="card" aria-labelledby="gen-title">
     <h2 id="gen-title">Generate</h2>
     <p id="gen-hint" class="muted" role="status"></p>
+    <div id="mode-box" class="seg" role="group" aria-label="Mode" hidden>
+      <button id="mode-generate" type="button" aria-pressed="true">Generate</button>
+      <button id="mode-edit" type="button" aria-pressed="false">Edit images</button>
+    </div>
     <form id="gen-form" novalidate>
       <label for="prompt">Prompt</label>
       <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
       <p id="prompt-count" class="muted">0 characters</p>
+
+      <div id="edit-box" hidden>
+        <label for="ref-input">Reference images</label>
+        <p id="ref-hint" class="muted"></p>
+        <input id="ref-input" name="references" type="file" multiple>
+        <p id="ref-error" class="alert bad" role="alert" hidden></p>
+        <ul id="ref-list" class="refs" aria-label="Attached images"></ul>
+        <label for="resolution">Resolution</label>
+        <select id="resolution" name="resolution"></select>
+      </div>
 
       <fieldset>
         <legend>Quality</legend>
         <div id="presets" class="seg"></div>
       </fieldset>
 
-      <label for="size">Size</label>
-      <select id="size" name="size"></select>
+      <div id="size-box">
+        <label for="size">Size</label>
+        <select id="size" name="size"></select>
+      </div>
 
       <label for="seed">Seed (optional)</label>
       <input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" placeholder="random">

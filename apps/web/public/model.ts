@@ -21,6 +21,7 @@ export const API = {
   extend: "/api/extend",
   destroyUnknown: "/api/destroy-unknown",
   generate: "/api/generate",
+  edit: "/api/edit",
   me: "/api/me",
 } as const;
 
@@ -53,6 +54,9 @@ export interface Preset { name: string; steps: number }
 export interface Size { name: string; width: number; height: number }
 export interface Progress { phase: string; file: string; bytes_done: number; bytes_total: number }
 export interface Download { files_total: number; files_done: number; bytes_done: number; bytes_total: number; current_file: string }
+export interface Resolution { name: string; value: number }
+/** What the server offers for edit with reference images (null in the state when edit is off). */
+export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -72,12 +76,32 @@ export interface ApiState {
   unknown: UnknownInstance[];
   presets: Preset[];
   sizes: Size[];
+  edit: EditInfo | null;
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+const EDIT_TYPES = ["png", "jpeg", "webp"];
+const posInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+function parseEdit(v: unknown): EditInfo | null {
+  if (!isObj(v)) return null;
+  const { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels } = v;
+  if (!posInt(maxRefs) || !posInt(maxBytes) || !posInt(maxPixels)) return null;
+  const types = v["types"];
+  if (!Array.isArray(types) || types.length === 0 || !types.every((t) => typeof t === "string" && EDIT_TYPES.includes(t))) return null;
+  const res = v["resolutions"];
+  if (!Array.isArray(res) || res.length === 0) return null;
+  const resolutions: Resolution[] = [];
+  for (const r of res) {
+    if (!isObj(r) || typeof r["name"] !== "string" || r["name"] === "" || !posInt(r["value"])) return null;
+    resolutions.push({ name: r["name"], value: r["value"] });
+  }
+  return { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels, types: types as string[], resolutions };
+}
 
 function parseDownload(v: unknown): Download | null {
   if (!isObj(v)) return null;
@@ -149,6 +173,7 @@ export function parseState(json: unknown): ApiState | null {
         ? [{ name: s["name"], width: s["width"] as number, height: s["height"] as number }]
         : [],
     ),
+    edit: parseEdit(json["edit"]),
   };
 }
 
@@ -374,6 +399,8 @@ export interface Controls {
   canExtend: boolean;
   canDestroy: boolean;
   canGenerate: boolean;
+  /** Generating is possible and the server offers edit with reference images. */
+  canEdit: boolean;
 }
 
 export function controls(s: ApiState | null, busy: boolean, jobPending: boolean): Controls {
@@ -385,6 +412,7 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canExtend: admin && EXTEND_STATES.has(state) && !busy,
     canDestroy: admin && state !== "none" && state !== "stopping" && !busy,
     canGenerate: s !== null && GENERATE_STATES.has(state) && !jobPending,
+    canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
   };
 }
 
@@ -421,6 +449,67 @@ export function presetLabel(p: Preset): string {
 
 export function sizeLabel(s: Size): string {
   return `${s.name} (${s.width}×${s.height})`;
+}
+
+// ---- edit: reference images ----
+
+const BYTES_PER_MIB = 1024 * 1024;
+const MAX_NAME_SHOWN = 40;
+const DATA_URL = /^data:[^,;]*;base64,([A-Za-z0-9+/]+={0,2})$/;
+
+/** The value of the file input's accept attribute for the types the server lists. */
+export function acceptTypes(edit: EditInfo): string {
+  return edit.types.map((t) => `image/${t}`).join(",");
+}
+
+/** "8.0 MB" for a byte count (the server limit is a power-of-two size). */
+export function formatMegabytes(bytes: number): string {
+  return `${(bytes / BYTES_PER_MIB).toFixed(1)} MB`;
+}
+
+const typeNames = (edit: EditInfo): string => edit.types.map((t) => t.toUpperCase()).join(", ");
+
+export function referenceHint(edit: EditInfo): string {
+  return `Up to ${edit.max_references} images (${typeNames(edit)}), ${formatMegabytes(edit.max_bytes)} each. Refer to them as <image1>, <image2> in the prompt.`;
+}
+
+export interface PickedFile { name: string; type: string; size: number }
+export interface PickResult { /** Indexes into the picked list, in order. */ accepted: number[]; errors: string[] }
+
+const shown = (name: string): string => (name.length > MAX_NAME_SHOWN ? `${name.slice(0, MAX_NAME_SHOWN)}…` : name);
+
+/**
+ * Which of the picked files can be attached, given how many are attached already. The server checks
+ * everything again (magic bytes, pixels); this only saves a round trip for the obvious mistakes.
+ */
+export function pickReferences(existing: number, picked: readonly PickedFile[], edit: EditInfo): PickResult {
+  const accepted: number[] = [];
+  const errors: string[] = [];
+  let full = false;
+  picked.forEach((f, i) => {
+    if (!edit.types.some((t) => f.type === `image/${t}`)) {
+      errors.push(`${shown(f.name)}: only ${typeNames(edit)} images are accepted.`);
+    } else if (f.size <= 0) {
+      errors.push(`${shown(f.name)}: the file is empty.`);
+    } else if (f.size > edit.max_bytes) {
+      errors.push(`${shown(f.name)}: larger than ${formatMegabytes(edit.max_bytes)}.`);
+    } else if (existing + accepted.length >= edit.max_references) {
+      if (!full) errors.push(`At most ${edit.max_references} images can be attached.`);
+      full = true;
+    } else {
+      accepted.push(i);
+    }
+  });
+  return { accepted, errors };
+}
+
+/** The base64 payload of a FileReader data URL, or null for anything that is not one. */
+export function base64FromDataUrl(url: string): string | null {
+  return DATA_URL.exec(url)?.[1] ?? null;
+}
+
+export function editLabel(presetLabelText: string, resolution: string, references: number): string {
+  return `Edit: ${presetLabelText}, ${resolution}, ${references} reference${references === 1 ? "" : "s"}`;
 }
 
 export function characterCount(text: string): string {

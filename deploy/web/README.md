@@ -180,11 +180,26 @@ The browser only ever sees the coarse code (`/?login_error=<code>`).
 - Env keys: see `.env.example`. `COMFY_PORT` and `AGENT_PORT` are fixed (not sent to the
   instance): leave them unset. Not needed by this service: `TS_API_CREDENTIAL`, `DISCORD_BOT_TOKEN`.
 
+## Image edit with reference images
+
+Members can switch the Generate card to "Edit images", attach up to `EDIT_MAX_REFERENCES` PNG/JPEG/WebP
+files and describe the change. The files travel as base64 in the JSON body of `POST /api/edit`, are
+validated on the server (magic bytes, `EDIT_REFERENCE_MAX_BYTES`, `EDIT_REFERENCE_MAX_PIXELS`,
+`EDIT_REFERENCE_TYPES`), uploaded to the instance's ComfyUI under random names and are not stored by the
+web service. The route has its own request body limit derived from those values, so
+`WEB_BODY_LIMIT_BYTES` can stay small. A reverse proxy or the Cloudflare tunnel must allow a request body
+of that size (about `EDIT_MAX_REFERENCES` x `EDIT_REFERENCE_MAX_BYTES` x 1.34, about 45 MB with the defaults;
+Cloudflare's free plan allows 100 MB). The profile's `edit` section turns the feature on; without it the
+page shows only Generate.
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- Edit with reference images through the real stack (upload over the tailnet, two references, the
+  Cloudflare body size); the workflow itself was verified in spike S6.
 
 - The `groups` claim in a real Authentik ID token (and RS256 signing).
 - The Cloudflare tunnel hostname `gen.` -> `192.168.88.113:3400`.

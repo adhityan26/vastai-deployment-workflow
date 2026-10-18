@@ -682,3 +682,214 @@ describe("text from the api is inert", () => {
     expect(calls.filter((c) => c.path.startsWith("/api/generate/"))).toHaveLength(0);
   });
 });
+
+describe("edit with reference images", () => {
+  const editInfo = {
+    max_references: 3,
+    max_bytes: 1000,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+    resolutions: [{ name: "zz-res", value: 1024 }, { name: "zz-res-2", value: 768 }],
+  };
+
+  const imageFile = (name: string, content = "PNGDATA", type = "image/png") => new File([content], name, { type });
+
+  /** Put files into the picker the way a browser does and fire its change event. */
+  function pick(...files: File[]): void {
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: files, configurable: true });
+    input.dispatchEvent(new Event("change"));
+  }
+  const b64 = (text: string) => Buffer.from(text).toString("base64");
+  const chooseEdit = () => q<HTMLButtonElement>("#mode-edit")!.click();
+  const tags = () => [...document.querySelectorAll("#ref-list .ref-tag")].map((n) => n.textContent);
+
+  let created: string[] = [];
+  let revoked: string[] = [];
+  beforeEach(() => {
+    created = [];
+    revoked = [];
+    window.URL.createObjectURL = (() => {
+      const url = `blob:fake-${created.length}`;
+      created.push(url);
+      return url;
+    }) as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = ((url: string) => void revoked.push(url)) as typeof URL.revokeObjectURL;
+  });
+
+  it("offers the mode switch only when the server offers edit, and switches the form", async () => {
+    await mount();
+    expect(q("#mode-box")!.hidden).toBe(true);
+    expect(q("#edit-box")!.hidden).toBe(true);
+    routes["GET /api/state"] = { body: apiState({ edit: editInfo }) };
+    await app!.refresh();
+    expect(q("#mode-box")!.hidden).toBe(false);
+    expect(q("#edit-box")!.hidden).toBe(true);
+    expect(q("#size-box")!.hidden).toBe(false);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
+
+    chooseEdit();
+    expect(q("#edit-box")!.hidden).toBe(false);
+    expect(q("#size-box")!.hidden).toBe(true);
+    expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+    expect(q("#mode-generate")!.getAttribute("aria-pressed")).toBe("false");
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Edit");
+
+    q<HTMLButtonElement>("#mode-generate")!.click();
+    expect(q("#edit-box")!.hidden).toBe(true);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
+  });
+
+  it("takes the accepted types, hint and resolutions from the api, and keeps the choice across polls", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    expect(q<HTMLInputElement>("#ref-input")!.accept).toBe("image/png,image/jpeg");
+    expect(q("#ref-hint")!.textContent).toContain("Up to 3 images (PNG, JPEG)");
+    expect([...document.querySelectorAll("#resolution option")].map((o) => o.textContent)).toEqual(["zz-res", "zz-res-2"]);
+    q<HTMLSelectElement>("#resolution")!.value = "zz-res-2";
+    await app!.refresh();
+    expect(q<HTMLSelectElement>("#resolution")!.value).toBe("zz-res-2");
+    expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("shows previews tagged <image1>, <image2>, removes one, and releases the preview url", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    pick(imageFile("one.png"), imageFile("two.jpg", "JPG", "image/jpeg"));
+    expect(tags()).toEqual(["<image1>", "<image2>"]);
+    expect(document.querySelectorAll("#ref-list img")).toHaveLength(2);
+    expect(q<HTMLImageElement>("#ref-list img")!.getAttribute("src")).toBe("blob:fake-0");
+    expect(q("#ref-error")!.hidden).toBe(true);
+
+    q<HTMLButtonElement>("#ref-list li button")!.click();
+    expect(tags()).toEqual(["<image1>"]);
+    expect([...document.querySelectorAll("#ref-list .ref-name")].map((n) => n.textContent)).toEqual(["two.jpg"]);
+    expect(revoked).toEqual(["blob:fake-0"]);
+  });
+
+  it("refuses the wrong type, empty and oversized files and a fourth image, and says why", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    pick(imageFile("notes.txt", "x", "text/plain"), imageFile("empty.png", ""), imageFile("big.png", "x".repeat(1001)));
+    expect(tags()).toEqual([]);
+    const text = q("#ref-error")!.textContent!;
+    expect(q("#ref-error")!.hidden).toBe(false);
+    expect(text).toContain("notes.txt");
+    expect(text).toContain("empty.png");
+    expect(text).toContain("big.png");
+
+    pick(imageFile("a.png"), imageFile("b.png"), imageFile("c.png"), imageFile("d.png"));
+    expect(tags()).toEqual(["<image1>", "<image2>", "<image3>"]);
+    expect(q("#ref-error")!.textContent).toBe("At most 3 images can be attached.");
+    pick(imageFile("e.png"));
+    expect(tags()).toHaveLength(3);
+  });
+
+  it("renders a hostile file name as text only", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    pick(imageFile('<img src=x onerror="alert(1)">.png'));
+    expect(q("#ref-list img[onerror]")).toBeNull();
+    expect(q("#ref-list .ref-name")!.textContent).toBe('<img src=x onerror="alert(1)">.png');
+    expect(document.querySelectorAll("#ref-list img")).toHaveLength(1); // only the preview
+  });
+
+  it("does not call the api without a prompt or without references", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("Describe the change first.");
+    q<HTMLTextAreaElement>("#prompt")!.value = "make it real";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("Attach at least one reference image.");
+    expect(posts("/api/edit")).toHaveLength(0);
+    expect(posts("/api/generate")).toHaveLength(0);
+  });
+
+  it("posts the prompt, preset, resolution, seed and the images as base64 in order, then polls the job", async () => {
+    let polls = 0;
+    await mount({ edit: editInfo }, {
+      "POST /api/edit": { status: 202, body: { id: "edit-1" } },
+      "GET /api/generate/edit-1": () => {
+        polls += 1;
+        return polls === 1 ? { body: { status: "pending" } } : { body: { status: "done", images: [{ index: 0, url: "/api/image/edit-1/0" }] } };
+      },
+    });
+    chooseEdit();
+    pick(imageFile("one.png", "FIRST"), imageFile("two.jpg", "SECOND", "image/jpeg"));
+    q<HTMLTextAreaElement>("#prompt")!.value = "put <image2> on <image1>";
+    q<HTMLInputElement>("#seed")!.value = "42";
+    q<HTMLButtonElement>('#presets button[data-preset="zz-slow"]')!.click();
+    q<HTMLSelectElement>("#resolution")!.value = "zz-res-2";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+    await flush();
+
+    expect(posts("/api/edit")).toHaveLength(1);
+    expect(posts("/api/edit")[0]!.body).toEqual({
+      prompt: "put <image2> on <image1>",
+      preset: "zz-slow",
+      resolution: "zz-res-2",
+      images: [b64("FIRST"), b64("SECOND")],
+      seed: 42,
+    });
+    expect(posts("/api/generate")).toHaveLength(0);
+    expect(q(".job .muted")!.textContent).toBe("Edit: zz-slow (99 steps), zz-res-2, 2 references");
+    expect(q(".job-prompt")!.textContent).toBe("put <image2> on <image1>");
+
+    // The job is read through the same poll route as a generate job.
+    expect(calls.some((c) => c.method === "GET" && c.path === "/api/generate/edit-1")).toBe(true);
+    // The attached images stay for a tweak-and-retry.
+    expect(tags()).toEqual(["<image1>", "<image2>"]);
+  });
+
+  it("sends one request when submitted twice quickly", async () => {
+    await mount({ edit: editInfo }, { "POST /api/edit": { status: 202, body: { id: "edit-1" }, gate: Promise.resolve() } });
+    chooseEdit();
+    pick(imageFile("one.png"));
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    const form = q<HTMLFormElement>("#gen-form")!;
+    form.requestSubmit();
+    form.requestSubmit();
+    await flush();
+    expect(posts("/api/edit")).toHaveLength(1);
+  });
+
+  it("shows the api refusal, keeps the images and re-enables the button", async () => {
+    await mount({ edit: editInfo }, {
+      "POST /api/edit": { status: 400, body: { error: { code: "reference_too_many_pixels", message: "reference 1 has more than 1000000 pixels" } } },
+    });
+    chooseEdit();
+    pick(imageFile("one.png"));
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.hidden).toBe(false);
+    expect(q("#form-error")!.textContent).toBe("reference 1 has more than 1000000 pixels");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+    expect(tags()).toEqual(["<image1>"]);
+  });
+
+  it("is disabled until the instance is ready, and falls back to generate when the server stops offering edit", async () => {
+    await mount({ state: "booting", edit: editInfo });
+    chooseEdit();
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+    routes["GET /api/state"] = { body: apiState({ state: "ready", edit: null }) };
+    await app!.refresh();
+    expect(q("#mode-box")!.hidden).toBe(true);
+    expect(q("#edit-box")!.hidden).toBe(true);
+    expect(q("#size-box")!.hidden).toBe(false);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("releases the preview urls when the app stops", async () => {
+    await mount({ edit: editInfo });
+    chooseEdit();
+    pick(imageFile("one.png"), imageFile("two.png"));
+    app!.stop();
+    expect(revoked).toEqual(["blob:fake-0", "blob:fake-1"]);
+  });
+});

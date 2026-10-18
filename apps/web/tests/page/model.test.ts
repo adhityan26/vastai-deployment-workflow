@@ -34,6 +34,13 @@ import {
   pollIntervalMs,
   progressPercent,
   stateInfo,
+  acceptTypes,
+  base64FromDataUrl,
+  editLabel,
+  formatMegabytes,
+  pickReferences,
+  referenceHint,
+  type EditInfo,
 } from "../../public/model.js";
 
 const base = {
@@ -291,5 +298,99 @@ describe("download progress", () => {
     expect(downloadText(d({ bytes_total: 0 }), 1e6)).toBe("2.1 GB - file 1 of 3 - 1.0 MB/s");
     expect(downloadText(d({ bytes_done: 5e6, bytes_total: 50e6 }), null)).toBe("5.0 / 50.0 MB (10%) - file 1 of 3");
     expect(downloadText(d({ bytes_done: 9e17, bytes_total: 1e18 }), 1e9)).not.toMatch(/NaN|Infinity/);
+  });
+});
+
+describe("edit info from the state", () => {
+  const edit = { max_references: 4, max_bytes: 8_388_608, max_pixels: 16_777_216, types: ["png", "jpeg", "webp"], resolutions: [{ name: "1024", value: 1024 }] };
+
+  it("is null when the server sends none, or something unusable", () => {
+    expect(parseState(base)!.edit).toBeNull();
+    expect(parseState({ ...base, edit: null })!.edit).toBeNull();
+    const bad: unknown[] = [
+      "yes",
+      { ...edit, max_references: 0 },
+      { ...edit, max_references: 1.5 },
+      { ...edit, max_bytes: "8" },
+      { ...edit, max_pixels: -1 },
+      { ...edit, types: [] },
+      { ...edit, types: ["gif"] },
+      { ...edit, types: "png" },
+      { ...edit, resolutions: [] },
+      { ...edit, resolutions: [{ name: "x" }] },
+      { ...edit, resolutions: [{ name: 5, value: 1 }] },
+    ];
+    for (const e of bad) expect(parseState({ ...base, edit: e })!.edit, JSON.stringify(e)).toBeNull();
+  });
+
+  it("is kept when valid", () => {
+    expect(parseState({ ...base, edit })!.edit).toEqual(edit);
+  });
+
+  it("only canEdit when generating is possible and the server offers edit", () => {
+    const withEdit = (state: string) => parseState({ ...base, state, edit })!;
+    expect(controls(withEdit("ready"), false, false).canEdit).toBe(true);
+    expect(controls(withEdit("booting"), false, false).canEdit).toBe(false);
+    expect(controls(withEdit("ready"), false, true).canEdit).toBe(false);
+    expect(controls(parseState({ ...base, state: "ready" }), false, false).canEdit).toBe(false);
+    expect(controls(null, false, false).canEdit).toBe(false);
+  });
+});
+
+describe("reference helpers", () => {
+  const info: EditInfo = {
+    max_references: 3,
+    max_bytes: 2_097_152,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+    resolutions: [{ name: "1024", value: 1024 }],
+  };
+  const file = (name: string, type = "image/png", size = 1000) => ({ name, type, size });
+
+  it("builds the accept list and the hint from the limits", () => {
+    expect(acceptTypes(info)).toBe("image/png,image/jpeg");
+    expect(referenceHint(info)).toBe("Up to 3 images (PNG, JPEG), 2.0 MB each. Refer to them as <image1>, <image2> in the prompt.");
+    expect(formatMegabytes(8_388_608)).toBe("8.0 MB");
+    expect(formatMegabytes(1_572_864)).toBe("1.5 MB");
+  });
+
+  it("accepts valid files in order and reports the others by name", () => {
+    const r = pickReferences(0, [file("a.png"), file("b.txt", "text/plain"), file("c.jpg", "image/jpeg"), file("d.png", "image/png", 9_999_999), file("e.png", "image/png", 0)], info);
+    expect(r.accepted).toEqual([0, 2]);
+    expect(r.errors).toHaveLength(3);
+    expect(r.errors[0]).toContain("b.txt");
+    expect(r.errors[0]).toContain("PNG, JPEG");
+    expect(r.errors[1]).toContain("d.png");
+    expect(r.errors[1]).toContain("2.0 MB");
+    expect(r.errors[2]).toContain("e.png");
+  });
+
+  it("rejects a type the server does not list even if it is an image", () => {
+    expect(pickReferences(0, [file("x.webp", "image/webp"), file("y.gif", "image/gif")], info).accepted).toEqual([]);
+  });
+
+  it("stops at the maximum, counting what is already there, with one message", () => {
+    const r = pickReferences(2, [file("a.png"), file("b.png"), file("c.png")], info);
+    expect(r.accepted).toEqual([0]);
+    expect(r.errors).toEqual(["At most 3 images can be attached."]);
+    expect(pickReferences(3, [file("a.png")], info).accepted).toEqual([]);
+  });
+
+  it("shortens very long file names in messages", () => {
+    const r = pickReferences(0, [file(`${"n".repeat(200)}.txt`, "text/plain")], info);
+    expect(r.errors[0]!.length).toBeLessThan(200);
+  });
+
+  it("takes the base64 payload out of a data URL, and nothing else", () => {
+    expect(base64FromDataUrl("data:image/png;base64,QUJD")).toBe("QUJD");
+    expect(base64FromDataUrl("data:;base64,QUJD")).toBe("QUJD");
+    for (const bad of ["", "QUJD", "data:image/png,QUJD", "data:image/png;base64,", "data:image/png;base64,QU JD", "http://x/y;base64,QUJD"]) {
+      expect(base64FromDataUrl(bad), bad).toBeNull();
+    }
+  });
+
+  it("labels an edit job", () => {
+    expect(editLabel("fast (7 steps)", "1024", 1)).toBe("Edit: fast (7 steps), 1024, 1 reference");
+    expect(editLabel("fast (7 steps)", "1024", 3)).toBe("Edit: fast (7 steps), 1024, 3 references");
   });
 });

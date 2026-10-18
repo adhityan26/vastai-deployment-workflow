@@ -14,27 +14,21 @@ Private, cost-efficient image generation on rented Vast.ai GPUs: ComfyUI + Qwen-
 
 Start new work from `master` unless it depends on the above.
 
-## Next task for a cloud session: image EDIT with multiple reference images
+## Done on `claude/wonderful-ride-9xfkah`: image EDIT with multiple reference images
 
-Goal: besides text-to-image, let a user attach several reference images and a prompt to edit/transform them (anime to realistic, clean up an image, combine references).
+Plan and rationale: `docs/superpowers/plans/2026-10-18-image-edit.md` (references travel as base64 in the JSON
+body instead of multipart, on purpose). Summary of what exists now:
 
-Read first: `docs/spikes/S6-image-edit-references.md`. It proves this works on stock ComfyUI 0.41.0 and contains the working API-format workflow (about 47-54 s on an RTX 3090).
-
-Working graph (API format), summarised:
-- `UnetLoaderGGUF` (`qwen-image-2.1-UC-Q4_K_M.gguf`) -> `QwenImage21Cache` (device auto, dtype default)
-- `CLIPLoader` (`qwen3vl_8b_int8_convrot`, type `qwen_image`), `VAELoader`
-- one `LoadImage` per reference
-- `TextEncodeQwenImage21` with inputs `clip`, `prompt`, `negative_prompt` (""), `resolution` 1024, `vae`, and `images.image_1`, `images.image_2`, ... (each `[LoadImageNodeId, 0]`); outputs positive, negative, latent
-- `KSampler` (model from the cache node, positive/negative/latent from the encode node, cfg 1, euler/simple), `VAEDecode`, `SaveImage`
-
-What to build (follow the project's superpowers flow: plan in `docs/superpowers/plans/`, TDD, review):
-1. Profile: an `edit` section in `instance/profiles/image.yaml` next to `generate`, plus the node classes in `provides_node_classes`; limits (max references, max bytes per image, allowed types) come from `contracts/config-schema.yaml` and `.env.example`, never hardcoded.
-2. Workflow: `instance/workflows/qwen-image-edit.json`, parameterised for N references (build the `LoadImage` and `images.image_k` entries in code, `apps/core/src/generate.ts` is the place to look at how the t2i workflow is parameterised).
-3. Upload path: the web service receives the reference files (multipart, strict size/type/count validation, magic-byte check), uploads each to ComfyUI `/upload/image` through the existing tailnet client (`apps/core/src/comfy.ts`), then submits the edit workflow. References are not stored after the job.
-4. API + OpenAPI (`contracts/web.openapi.json`) + page UI (`apps/web/public/`): a mode switch (Generate / Edit), reference picker with thumbnails, remove button, mobile friendly, textContent only.
-5. Keep the existing rules: default-deny `/api/*`, Origin/Sec-Fetch-Site CSRF checks, no-store, strict CSP, no secrets in logs, config only through the schema and `apps/core/src/config.ts`.
-
-Verification limits: a cloud session cannot reach the homelab or start a real instance. Use the fake ComfyUI/Vast servers in the test suites. A real end-to-end check (start an instance, edit with 2 references) must be done later by the owner from the laptop.
+- Profile `edit:` section + `instance/workflows/qwen-image-edit.json`; `provides_node_classes` also lists
+  `TextEncodeQwenImage21` and `QwenImage21Cache` (boot fails closed without them).
+- `apps/core`: `references.ts` (magic-byte sniffing, header dimensions, limits from `EDIT_*` config),
+  `ComfyClient.uploadImage`, `buildEditPrompt`, `edit()`.
+- `apps/web`: `POST /api/edit` (member, own body limit, shares the generate rate limit), `edit` block in
+  `/api/state`, edit jobs polled through `GET /api/generate/:id` with the edit template, OpenAPI updated.
+- Page: Generate/Edit switch, reference picker with previews, base64 via FileReader.
+- Not verified live: a real edit through the web stack (owner to run: start an instance, edit with 2
+  references), the Cloudflare request body size, quality at 10 steps, `resolution` values other than 1024.
+- Ideas left out: client-side downscaling of big photos, prompt enhancer, saving results.
 
 ## Other pending work, in order
 

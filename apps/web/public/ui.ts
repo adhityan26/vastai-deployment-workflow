@@ -8,6 +8,11 @@ import {
   withoutLoginError,
   CLOCK_TICK_MS,
   DEFAULT_EXTEND_MINUTES,
+  acceptTypes,
+  base64FromDataUrl,
+  editLabel,
+  pickReferences,
+  referenceHint,
   GPU_STORAGE_KEY,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
@@ -70,6 +75,13 @@ class ApiError extends Error {
 /** The session is gone or the account lost access: the screen was already switched. */
 class AuthLostError extends ApiError {}
 
+/** One attached reference image: the file itself and, when the browser can make one, a preview URL. */
+interface Reference {
+  id: number;
+  file: File;
+  url: string | null;
+}
+
 interface HistoryEntry {
   id: string;
   prompt: string;
@@ -108,6 +120,9 @@ export function mountApp(doc: Document, env: Env): App {
   let unknownKey = "";
   let restoreFocus: HTMLElement | null = null;
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
+  let mode: "generate" | "edit" = "generate";
+  let refSeq = 0;
+  const references: Reference[] = [];
   const history: HistoryEntry[] = [];
 
   // ---- requests ----
@@ -703,6 +718,15 @@ export function mountApp(doc: Document, env: Env): App {
   const sizeSelect = $<HTMLSelectElement>("size");
   const generateBtn = $<HTMLButtonElement>("btn-generate");
   const promptBox = $<HTMLTextAreaElement>("prompt");
+  const modeBox = $("mode-box");
+  const modeGenerate = $<HTMLButtonElement>("mode-generate");
+  const modeEdit = $<HTMLButtonElement>("mode-edit");
+  const editBox = $("edit-box");
+  const sizeBox = $("size-box");
+  const refInput = $<HTMLInputElement>("ref-input");
+  const refList = $("ref-list");
+  const refError = $("ref-error");
+  const resolutionSelect = $<HTMLSelectElement>("resolution");
 
   function markPresets(): void {
     for (const b of Array.from(presetsBox.querySelectorAll("button"))) {
@@ -711,8 +735,10 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderForm(s: ApiState): void {
+    // Edit can disappear (server config) while it is selected: fall back to plain generate.
+    if (s.edit === null) mode = "generate";
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
-    const key = JSON.stringify([s.presets, s.sizes]);
+    const key = JSON.stringify([s.presets, s.sizes, s.edit]);
     if (key !== formKey) {
       formKey = key;
       if (!s.presets.some((p) => p.name === selectedPreset)) selectedPreset = s.presets[0]?.name ?? "";
@@ -738,18 +764,48 @@ export function mountApp(doc: Document, env: Env): App {
         }),
       );
       if (s.sizes.some((z) => z.name === keep)) sizeSelect.value = keep;
+      const keepResolution = resolutionSelect.value;
+      resolutionSelect.replaceChildren(
+        ...(s.edit?.resolutions ?? []).map((r) => {
+          const o = make("option", r.name);
+          o.value = r.name;
+          return o;
+        }),
+      );
+      if (s.edit?.resolutions.some((r) => r.name === keepResolution)) resolutionSelect.value = keepResolution;
+      if (s.edit !== null) {
+        refInput.accept = acceptTypes(s.edit);
+        $("ref-hint").textContent = referenceHint(s.edit);
+      }
     }
+    const editing = mode === "edit";
+    modeBox.hidden = s.edit === null;
+    modeGenerate.setAttribute("aria-pressed", String(!editing));
+    modeEdit.setAttribute("aria-pressed", String(editing));
+    editBox.hidden = !editing;
+    sizeBox.hidden = editing;
+    promptBox.placeholder = editing ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>" : "";
     const c = controls(s, busy, jobPending);
-    generateBtn.disabled = !c.canGenerate;
-    generateBtn.textContent = jobPending ? "Generating…" : "Generate";
+    const allowed = editing ? c.canEdit : c.canGenerate;
+    generateBtn.disabled = !allowed;
+    generateBtn.textContent = jobPending ? "Generating…" : editing ? "Edit" : "Generate";
     $("gen-hint").textContent = jobPending
       ? "A job is running. You can submit another when it finishes."
-      : c.canGenerate
+      : allowed
         ? ""
         : s.state === "none"
           ? "No instance is running. An admin needs to start one."
           : "Generating is available when the instance is ready.";
   }
+
+  function setMode(next: "generate" | "edit"): void {
+    if (next === "edit" && state?.edit == null) return;
+    mode = next;
+    formError.hidden = true;
+    if (state) renderForm(state);
+  }
+  modeGenerate.addEventListener("click", () => setMode("generate"));
+  modeEdit.addEventListener("click", () => setMode("edit"));
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);
@@ -761,9 +817,81 @@ export function mountApp(doc: Document, env: Env): App {
     formError.hidden = false;
   }
 
+  // ---- reference images (edit mode) ----
+
+  function previewUrl(file: Blob): string | null {
+    const api = doc.defaultView?.URL;
+    return api && typeof api.createObjectURL === "function" ? api.createObjectURL(file) : null;
+  }
+  function releaseUrl(url: string | null): void {
+    const api = doc.defaultView?.URL;
+    if (url !== null && api && typeof api.revokeObjectURL === "function") api.revokeObjectURL(url);
+  }
+
+  function showRefErrors(errors: readonly string[]): void {
+    refError.textContent = errors.join(" ");
+    refError.hidden = errors.length === 0;
+  }
+
+  function renderReferences(): void {
+    refList.replaceChildren(
+      ...references.map((r, i) => {
+        const item = make("li");
+        if (r.url !== null) {
+          const img = make("img");
+          img.src = r.url;
+          img.alt = `Reference ${i + 1}: ${r.file.name}`;
+          item.append(img);
+        }
+        const remove = make("button", "Remove");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Remove reference ${i + 1}: ${r.file.name}`);
+        remove.addEventListener("click", () => removeReference(r.id));
+        item.append(make("p", `<image${i + 1}>`, "ref-tag"), make("p", r.file.name, "ref-name"), remove);
+        return item;
+      }),
+    );
+  }
+
+  function removeReference(id: number): void {
+    const at = references.findIndex((r) => r.id === id);
+    if (at === -1) return;
+    releaseUrl(references[at]!.url);
+    references.splice(at, 1);
+    showRefErrors([]);
+    renderReferences();
+  }
+
+  refInput.addEventListener("change", () => {
+    const files = Array.from(refInput.files ?? []);
+    refInput.value = ""; // so the same file can be picked again after removing it
+    const edit = state?.edit ?? null;
+    if (edit === null || files.length === 0) return;
+    const result = pickReferences(references.length, files.map((f) => ({ name: f.name, type: f.type, size: f.size })), edit);
+    for (const i of result.accepted) references.push({ id: ++refSeq, file: files[i]!, url: previewUrl(files[i]!) });
+    showRefErrors(result.errors);
+    renderReferences();
+  });
+
+  /** The base64 text of a file (FileReader data URL without its prefix). */
+  function readBase64(file: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const Reader = doc.defaultView?.FileReader;
+      if (Reader === undefined) return reject(new ApiError("This browser cannot read the image files."));
+      const reader = new Reader();
+      reader.onload = () => {
+        const text = typeof reader.result === "string" ? base64FromDataUrl(reader.result) : null;
+        if (text === null) reject(new ApiError("An image file could not be read."));
+        else resolve(text);
+      };
+      reader.onerror = () => reject(new ApiError("An image file could not be read."));
+      reader.readAsDataURL(file);
+    });
+  }
+
   $("gen-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    void submitGenerate();
+    void (mode === "edit" ? submitEdit() : submitGenerate());
   });
 
   async function submitGenerate(): Promise<void> {
@@ -784,6 +912,36 @@ export function mountApp(doc: Document, env: Env): App {
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
       const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}`);
+      void pollJob(entry, 0);
+    } catch (err) {
+      jobPending = false;
+      formFail(err instanceof Error ? err.message : "Could not start the job.");
+      if (state) renderForm(state);
+    }
+  }
+
+  async function submitEdit(): Promise<void> {
+    formError.hidden = true;
+    if (!controls(state, busy, jobPending).canEdit) return;
+    const prompt = promptBox.value;
+    if (prompt.trim() === "") return formFail("Describe the change first.");
+    if (references.length === 0) return formFail("Attach at least one reference image.");
+    const seed = parseSeed($<HTMLInputElement>("seed").value);
+    if (!seed.ok) return formFail(seed.message);
+    if (selectedPreset === "" || resolutionSelect.value === "") return formFail("Choose a quality and a resolution.");
+    const files = references.map((r) => r.file);
+    jobPending = true; // also blocks a second submit while the files are being read and sent
+    if (state) renderForm(state);
+    try {
+      const images: string[] = [];
+      for (const file of files) images.push(await readBase64(file));
+      const body: Record<string, unknown> = { prompt, preset: selectedPreset, resolution: resolutionSelect.value, images };
+      if (seed.value !== undefined) body["seed"] = seed.value;
+      const res = await call("POST", API.edit, body);
+      const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
+      if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
+      const preset = state?.presets.find((p) => p.name === selectedPreset);
+      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -940,6 +1098,7 @@ export function mountApp(doc: Document, env: Env): App {
       if (pollHandle !== null) env.clearTimeout(pollHandle);
       if (tickHandle !== null) env.clearTimeout(tickHandle);
       doc.removeEventListener("visibilitychange", onVisibility);
+      for (const r of references.splice(0)) releaseUrl(r.url);
     },
   };
 }
