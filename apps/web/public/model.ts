@@ -22,6 +22,7 @@ export const API = {
   destroyUnknown: "/api/destroy-unknown",
   generate: "/api/generate",
   edit: "/api/edit",
+  credit: "/api/credit",
   me: "/api/me",
 } as const;
 
@@ -246,6 +247,30 @@ export function formatDuration(seconds: number | null): string {
 
 export function formatCost(usd: number | null): string {
   return usd === null || !Number.isFinite(usd) ? DASH : `$${usd.toFixed(2)}`;
+}
+
+/** How often the admin page asks for the Vast credit; the server caches it for about as long. */
+export const CREDIT_REFRESH_MS = 60_000;
+
+/** "$4.54", or "-$1.25" when the credit is used up; a rounding to zero never shows a minus sign. */
+export function formatCredit(usd: number): string {
+  const text = Math.abs(usd).toFixed(2);
+  return usd < 0 && text !== "0.00" ? `-$${text}` : `$${text}`;
+}
+
+export interface CreditReading { credit: number; asOf: number | null }
+
+/** Check GET /api/credit; null when the credit is not a usable number. */
+export function parseCredit(json: unknown): CreditReading | null {
+  if (!isObj(json)) return null;
+  const credit = num(json["credit"]);
+  if (credit === null) return null;
+  return { credit, asOf: num(json["as_of"]) };
+}
+
+/** True when the credit should be read again: the interval is over and no read is running. */
+export function creditDue(lastAskedAt: number, now: number, running: boolean): boolean {
+  return !running && now - lastAskedAt >= CREDIT_REFRESH_MS;
 }
 
 export function formatPrice(dph: number | null): string {

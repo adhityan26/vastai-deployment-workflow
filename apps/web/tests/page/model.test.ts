@@ -34,6 +34,10 @@ import {
   pollIntervalMs,
   progressPercent,
   stateInfo,
+  CREDIT_REFRESH_MS,
+  creditDue,
+  formatCredit,
+  parseCredit,
   acceptTypes,
   base64FromDataUrl,
   editLabel,
@@ -392,5 +396,31 @@ describe("reference helpers", () => {
   it("labels an edit job", () => {
     expect(editLabel("fast (7 steps)", "1024", 1)).toBe("Edit: fast (7 steps), 1024, 1 reference");
     expect(editLabel("fast (7 steps)", "1024", 3)).toBe("Edit: fast (7 steps), 1024, 3 references");
+  });
+});
+
+describe("Vast credit", () => {
+  it("formats dollars, with a minus sign when the credit is used up", () => {
+    expect(formatCredit(4.5377)).toBe("$4.54");
+    expect(formatCredit(0)).toBe("$0.00");
+    expect(formatCredit(-1.25)).toBe("-$1.25");
+    expect(formatCredit(-0.001)).toBe("$0.00");
+    expect(formatCredit(1234.5)).toBe("$1234.50");
+  });
+
+  it("parses only a finite credit number", () => {
+    expect(parseCredit({ credit: 4.5, as_of: 1_800_000_000 })).toEqual({ credit: 4.5, asOf: 1_800_000_000 });
+    expect(parseCredit({ credit: 0 })).toEqual({ credit: 0, asOf: null });
+    for (const bad of [null, "4", [], {}, { credit: "4.5" }, { credit: null }, { credit: Number.NaN }, { credit: Infinity }]) {
+      expect(parseCredit(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it("asks again once the refresh interval has passed, never while a read is running", () => {
+    expect(CREDIT_REFRESH_MS).toBe(60_000);
+    expect(creditDue(Number.NEGATIVE_INFINITY, 1000, false)).toBe(true);
+    expect(creditDue(1000, 1000 + CREDIT_REFRESH_MS - 1, false)).toBe(false);
+    expect(creditDue(1000, 1000 + CREDIT_REFRESH_MS, false)).toBe(true);
+    expect(creditDue(Number.NEGATIVE_INFINITY, 1000, true)).toBe(false);
   });
 });

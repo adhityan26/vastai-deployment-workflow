@@ -316,3 +316,58 @@ describe("VastClient", () => {
     expect(() => offerFiltersFromConfig({ ...base, vastMinReliability: "1.5" } as unknown as AppsConfig)).toThrow(/between 0 and 1/);
   });
 });
+
+describe("VastClient.accountCredit", () => {
+  const user = (over: Record<string, unknown> = {}) => ({
+    id: 7, email: "owner@example.test", username: "owner", credit: 4.5377, balance: 4.1, api_key: "leaked-api-key-value", ssh_key: "ssh-rsa AAAA", ...over,
+  });
+  const ok = (body: unknown) => (_s: Seen, res: ServerResponse) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+
+  it("reads GET users/current with the bearer key and returns only the credit number", async () => {
+    const { client, seen } = await fake(ok(user()));
+    expect(await client.accountCredit()).toBe(4.5377);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.method).toBe("GET");
+    expect(seen[0]!.url).toBe("/api/v0/users/current");
+    expect(seen[0]!.auth).toBe(`Bearer ${KEY}`);
+  });
+
+  it("accepts a zero or negative credit", async () => {
+    expect(await (await fake(ok(user({ credit: 0 })))).client.accountCredit()).toBe(0);
+    expect(await (await fake(ok(user({ credit: -1.25 })))).client.accountCredit()).toBe(-1.25);
+  });
+
+  const bad: Record<string, unknown> = {
+    missing: user({ credit: undefined }),
+    text: user({ credit: "4.5" }),
+    null_value: user({ credit: null }),
+    nan: user({ credit: "NaN" }),
+    not_an_object: ["credit"],
+  };
+  it.each(Object.keys(bad))("refuses a response whose credit is %s, without echoing the account", async (name) => {
+    const { client } = await fake(ok(bad[name]));
+    const err = await client.accountCredit().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VastError);
+    expect(String((err as Error).message)).not.toContain("owner@example.test");
+    expect(String((err as Error).message)).not.toContain("leaked-api-key-value");
+  });
+
+  it("turns an HTTP error into a VastError that hides the key and the account", async () => {
+    const { client } = await fake((_s, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ msg: `bad key ${KEY} for owner@example.test` }));
+    });
+    const err = await client.accountCredit().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VastError);
+    expect((err as Error).message).toContain("401");
+    expect((err as Error).message).not.toContain(KEY);
+  });
+
+  it("a hung Vast is a VastError after the timeout", async () => {
+    const { client } = await fake(() => undefined, 1);
+    await expect(client.accountCredit()).rejects.toBeInstanceOf(VastError);
+  }, 10_000);
+});

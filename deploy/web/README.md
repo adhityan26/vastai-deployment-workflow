@@ -192,11 +192,23 @@ of that size (about `EDIT_MAX_REFERENCES` x `EDIT_REFERENCE_MAX_BYTES` x 1.34, a
 Cloudflare's free plan allows 100 MB). The profile's `edit` section turns the feature on; without it the
 page shows only Generate.
 
+## Vast credit (admin)
+
+Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a
+minute; the server reuses one read for `VAST_CREDIT_CACHE_S` (default 60) and shares a read in flight, so any
+number of tabs cost at most one Vast call per interval. The call is `GET users/current` with the main
+API key (the same `VAST_API_KEY`); only the `credit` number is passed on, never the account record
+(which holds the email and ssh keys). Members never see or request it. "unavailable" means Vast could not
+be read; it does not affect anything else on the page.
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- `GET /api/v0/users/current` against the live API: the path and the `credit` field come from the vastai
+  1.8.3 SDK source and from the T13 spike, which watched `credit` fall by the cost of a boot.
 
 - Edit with reference images through the real stack (upload over the tailnet, two references, the
   Cloudflare body size); the workflow itself was verified in spike S6.

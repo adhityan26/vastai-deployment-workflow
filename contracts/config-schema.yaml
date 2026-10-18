@@ -76,6 +76,7 @@ keys:
   # --- apps (homelab, sub-projects 2-3; listed so the schema is the single registry) ---
   - {name: VAST_API_KEY, components: [apps], type: str, secret: true, required: true, default: null, description: "Main Vast API key, lives on the homelab only"}
   - {name: VAST_API_URL, components: [apps], type: str, secret: false, required: false, default: "https://console.vast.ai/api/v0", description: "Vast REST API base URL"}
+  - {name: VAST_CREDIT_CACHE_S, components: [apps], type: int, secret: false, required: false, default: 60, min: 5, description: "Seconds the web process reuses the Vast account credit it read (the admin page asks about once a minute; every read is one extra Vast API call)"}
   - {name: TS_API_CREDENTIAL, components: [apps], type: str, secret: true, required: false, default: null, description: "Tailscale OAuth credential used to mint auth keys"}
   - {name: DISCORD_BOT_TOKEN, components: [apps], type: str, secret: true, required: false, default: null, description: "Discord bot token"}
   - {name: DISCORD_ADMIN_USER_IDS, components: [apps], type: csv, secret: false, required: false, default: "", description: "Discord user ids allowed to start/destroy/extend"}

@@ -1083,6 +1083,84 @@
         }
       }
     },
+    "/api/credit": {
+      "get": {
+        "operationId": "credit",
+        "summary": "The prepaid credit of the Vast account in USD, read at most once per VAST_CREDIT_CACHE_S seconds (admin). Only the number is returned, never the account record.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "credit",
+                    "as_of"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "credit": {
+                      "type": "number",
+                      "description": "USD; zero or negative when the credit is used up"
+                    },
+                    "as_of": {
+                      "type": "integer",
+                      "description": "Epoch seconds of the Vast read (may be up to VAST_CREDIT_CACHE_S old)"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No credit source is wired on this server (code credit_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast could not be read (code vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/start": {
       "post": {
         "operationId": "start",

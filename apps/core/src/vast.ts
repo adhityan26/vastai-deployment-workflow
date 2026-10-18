@@ -291,6 +291,20 @@ export class VastClient {
     return rows;
   }
 
+  /**
+   * The prepaid credit of the account in USD (GET users/current, field `credit`; read from the vastai
+   * 1.8.3 SDK and the T13 spike, which watched it fall by the cost of a boot). The user record also
+   * holds the email and ssh keys: only the credit number leaves this method.
+   */
+  async accountCredit(): Promise<number> {
+    const reply = await this.send("GET", this.url("users/current"));
+    this.failIfNotOk("read account", reply);
+    const body = reply.json as Record<string, unknown> | null;
+    const credit = body && typeof body === "object" && !Array.isArray(body) ? body["credit"] : undefined;
+    if (typeof credit !== "number" || !Number.isFinite(credit)) throw new VastError("read account: response has no credit");
+    return credit;
+  }
+
   /** "destroyed" or "gone" (already absent); anything else, whatever the HTTP status, is a DestroyError. */
   async destroyInstance(id: number): Promise<DestroyOutcome> {
     if (!Number.isInteger(id) || id <= 0) throw new DestroyError("instance id must be a positive integer");

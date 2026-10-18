@@ -123,6 +123,7 @@ async function main(): Promise<void> {
     profile,
     template,
     editTemplate,
+    credit: () => vast.accountCredit(),
     login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,
     secrets: () => [...seenSecrets],
