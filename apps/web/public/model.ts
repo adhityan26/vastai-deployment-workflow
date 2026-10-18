@@ -24,9 +24,9 @@ export const API = {
   edit: "/api/edit",
   upscale: "/api/upscale",
   credit: "/api/credit",
+  history: "/api/history",
   gallery: "/api/gallery",
   galleryDelete: "/api/gallery/delete",
-  history: "/api/history",
   me: "/api/me",
 } as const;
 
@@ -902,6 +902,77 @@ export function bootSentence(payload: ConsolePayload | null): string | null {
   return sentence === undefined ? `${running.name}, in progress` : sentence;
 }
 
+// ---- usage history (admin only) ----
+
+/** One session of GET /api/history (contracts/web.openapi.json HistoryEntry). */
+export interface UsageEntry {
+  vast_instance_id: number | null;
+  gpu_name: string | null;
+  dph: number | null;
+  started_at: number;
+  ready_at: number | null;
+  ended_at: number | null;
+  duration_s: number;
+  estimated_cost: number | null;
+  started_by: string | null;
+  reason: string | null;
+  stop_by: string | null;
+  active: boolean;
+}
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const numOrNull = (v: unknown): boolean => v === null || isNum(v);
+const strOrNull = (v: unknown): boolean => v === null || typeof v === "string";
+
+/** The entries, or null when the body is not a usable history. */
+export function parseHistory(json: unknown): UsageEntry[] | null {
+  if (json === null || typeof json !== "object") return null;
+  const list = (json as { entries?: unknown }).entries;
+  if (!Array.isArray(list)) return null;
+  const ok = list.every((e: unknown) => {
+    if (e === null || typeof e !== "object") return false;
+    const r = e as Record<string, unknown>;
+    return (
+      numOrNull(r["vast_instance_id"]) && strOrNull(r["gpu_name"]) && numOrNull(r["dph"]) && isNum(r["started_at"]) &&
+      numOrNull(r["ready_at"]) && numOrNull(r["ended_at"]) && isNum(r["duration_s"]) && numOrNull(r["estimated_cost"]) &&
+      strOrNull(r["started_by"]) && strOrNull(r["reason"]) && strOrNull(r["stop_by"]) && typeof r["active"] === "boolean"
+    );
+  });
+  return ok ? (list as UsageEntry[]) : null;
+}
+
+const STOP_REASON_TEXT: Record<string, string> = {
+  destroy_button: "Destroy button",
+  idle_timeout: "Idle timeout",
+  failsafe_deadline: "Failsafe deadline",
+  hard_cap: "Hard cap",
+  boot_failed: "Boot failed",
+  agent_unreachable: "Agent unreachable",
+  gone: "Disappeared",
+};
+
+/** Why a session stopped, in plain words ("Destroy button (by ayu)"); "Running" while active. */
+export function stopReasonText(reason: string | null, stopBy: string | null, active: boolean): string {
+  if (active) return "Running";
+  const text = reason === null ? undefined : STOP_REASON_TEXT[reason];
+  if (text === undefined) return "Stopped";
+  return reason === "destroy_button" && stopBy !== null && stopBy !== "" ? `${text} (by ${stopBy})` : text;
+}
+
+/** The history is read once, then again only when the state changes to none or ready (no polling). */
+export function historyRefreshDue(previous: string | null, next: string): boolean {
+  if (previous === null) return true;
+  return previous !== next && (next === "none" || next === "ready");
+}
+
+/** Local "YYYY-MM-DD HH:MM" of an epoch second. */
+export function historyTime(t: number): string {
+  if (!Number.isFinite(t) || t <= 0) return DASH;
+  const d = new Date(t * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
 // ---- gallery (saved images) ----
 
 // Where the "save automatically" choice is remembered in this browser (a preference, no secret).
@@ -972,75 +1043,4 @@ export function formatBytes(bytes: number): string {
   if (bytes >= MB) return `${(bytes / MB).toFixed(1)} MB`;
   if (bytes >= KB) return `${(bytes / KB).toFixed(1)} KB`;
   return `${Math.max(0, Math.floor(bytes))} B`;
-}
-
-// ---- usage history (admin only) ----
-
-/** One session of GET /api/history (contracts/web.openapi.json HistoryEntry). */
-export interface UsageEntry {
-  vast_instance_id: number | null;
-  gpu_name: string | null;
-  dph: number | null;
-  started_at: number;
-  ready_at: number | null;
-  ended_at: number | null;
-  duration_s: number;
-  estimated_cost: number | null;
-  started_by: string | null;
-  reason: string | null;
-  stop_by: string | null;
-  active: boolean;
-}
-
-const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-const numOrNull = (v: unknown): boolean => v === null || isNum(v);
-const strOrNull = (v: unknown): boolean => v === null || typeof v === "string";
-
-/** The entries, or null when the body is not a usable history. */
-export function parseHistory(json: unknown): UsageEntry[] | null {
-  if (json === null || typeof json !== "object") return null;
-  const list = (json as { entries?: unknown }).entries;
-  if (!Array.isArray(list)) return null;
-  const ok = list.every((e: unknown) => {
-    if (e === null || typeof e !== "object") return false;
-    const r = e as Record<string, unknown>;
-    return (
-      numOrNull(r["vast_instance_id"]) && strOrNull(r["gpu_name"]) && numOrNull(r["dph"]) && isNum(r["started_at"]) &&
-      numOrNull(r["ready_at"]) && numOrNull(r["ended_at"]) && isNum(r["duration_s"]) && numOrNull(r["estimated_cost"]) &&
-      strOrNull(r["started_by"]) && strOrNull(r["reason"]) && strOrNull(r["stop_by"]) && typeof r["active"] === "boolean"
-    );
-  });
-  return ok ? (list as UsageEntry[]) : null;
-}
-
-const STOP_REASON_TEXT: Record<string, string> = {
-  destroy_button: "Destroy button",
-  idle_timeout: "Idle timeout",
-  failsafe_deadline: "Failsafe deadline",
-  hard_cap: "Hard cap",
-  boot_failed: "Boot failed",
-  agent_unreachable: "Agent unreachable",
-  gone: "Disappeared",
-};
-
-/** Why a session stopped, in plain words ("Destroy button (by ayu)"); "Running" while active. */
-export function stopReasonText(reason: string | null, stopBy: string | null, active: boolean): string {
-  if (active) return "Running";
-  const text = reason === null ? undefined : STOP_REASON_TEXT[reason];
-  if (text === undefined) return "Stopped";
-  return reason === "destroy_button" && stopBy !== null && stopBy !== "" ? `${text} (by ${stopBy})` : text;
-}
-
-/** The history is read once, then again only when the state changes to none or ready (no polling). */
-export function historyRefreshDue(previous: string | null, next: string): boolean {
-  if (previous === null) return true;
-  return previous !== next && (next === "none" || next === "ready");
-}
-
-/** Local "YYYY-MM-DD HH:MM" of an epoch second. */
-export function historyTime(t: number): string {
-  if (!Number.isFinite(t) || t <= 0) return DASH;
-  const d = new Date(t * 1000);
-  const two = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }

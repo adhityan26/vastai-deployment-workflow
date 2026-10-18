@@ -42,6 +42,11 @@ export interface ObjectStore {
   delete(key: string): Promise<void>;
   /** Keys under `prefix` in key order, after `startAfter` when given; at most `maxKeys`. */
   list(prefix: string, opts: { maxKeys: number; startAfter?: string }): Promise<{ entries: ObjectEntry[]; truncated: boolean }>;
+  /**
+   * The "folders" directly under `prefix` (each `prefix` + segment + "/"), in key order, for keys after
+   * `startAfter`; at most `maxKeys` folders (S3 ListObjectsV2 with Delimiter "/").
+   */
+  listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }): Promise<{ prefixes: string[]; truncated: boolean }>;
 }
 
 /** In-memory ObjectStore with the same behaviour as the S3 one; for tests. */
@@ -73,6 +78,19 @@ export class MemoryObjectStore implements ObjectStore {
     const keys = [...this.objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
     const page = keys.slice(0, opts.maxKeys);
     return { entries: page.map((key) => ({ key, size: this.objects.get(key)!.bytes.length })), truncated: keys.length > page.length };
+  }
+
+  async listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }) {
+    const after = opts.startAfter ?? "";
+    const folders: string[] = [];
+    for (const k of [...this.objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort()) {
+      const slash = k.indexOf("/", prefix.length);
+      if (slash === -1) continue;
+      const folder = k.slice(0, slash + 1);
+      if (folders[folders.length - 1] !== folder) folders.push(folder);
+    }
+    const page = folders.slice(0, opts.maxKeys);
+    return { prefixes: page, truncated: folders.length > page.length };
   }
 
   /** Test helper: every stored key. */
@@ -166,26 +184,51 @@ export class S3ObjectStore implements ObjectStore {
     }
   }
 
+  /**
+   * The object, read with one deadline for the request AND its body, and a running byte cap: the
+   * read stops (and the connection is dropped) as soon as the cap is passed, whether or not the server
+   * sent a Content-Length. With a known length the bytes go straight into one buffer of that size.
+   */
   async get(key: string, maxBytes: number): Promise<{ bytes: Buffer; contentType: string } | null> {
+    const signal = AbortSignal.timeout(this.timeoutMs);
     let reply;
     try {
-      reply = await this.send((o) => this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), o));
+      reply = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal });
     } catch (err) {
       if (isMissing(err)) return null;
       return this.fail("read");
     }
-    if ((reply.ContentLength ?? 0) > maxBytes) {
-      (reply.Body as { destroy?: () => void } | undefined)?.destroy?.();
+    const body = reply.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
+    const declared = reply.ContentLength;
+    if (typeof declared === "number" && declared > maxBytes) {
+      body?.destroy?.();
       throw new ObjectStoreError("object is larger than allowed");
     }
-    let bytes: Buffer;
+    if (body === undefined || typeof body[Symbol.asyncIterator] !== "function") return this.fail("read");
+    const onAbort = () => body.destroy?.(new Error("deadline"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const exact = typeof declared === "number" ? Buffer.allocUnsafe(declared) : null;
+    const chunks: Buffer[] = [];
+    let used = 0;
     try {
-      bytes = Buffer.from(await reply.Body!.transformToByteArray());
-    } catch {
+      for await (const chunk of body) {
+        if (signal.aborted) return this.fail("read");
+        used += chunk.length;
+        if (used > maxBytes || (exact !== null && used > exact.length)) {
+          body.destroy?.();
+          throw new ObjectStoreError("object is larger than allowed");
+        }
+        if (exact !== null) exact.set(chunk, used - chunk.length);
+        else chunks.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length));
+      }
+    } catch (err) {
+      if (err instanceof ObjectStoreError) throw err;
       return this.fail("read");
+    } finally {
+      signal.removeEventListener("abort", onAbort);
     }
-    if (bytes.length > maxBytes) throw new ObjectStoreError("object is larger than allowed");
-    return { bytes, contentType: reply.ContentType ?? "" };
+    if (signal.aborted || (exact !== null && used !== exact.length)) return this.fail("read");
+    return { bytes: exact ?? Buffer.concat(chunks, used), contentType: reply.ContentType ?? "" };
   }
 
   async delete(key: string): Promise<void> {
@@ -206,6 +249,23 @@ export class S3ObjectStore implements ObjectStore {
       );
       const entries = (r.Contents ?? []).flatMap((o) => (typeof o.Key === "string" ? [{ key: o.Key, size: o.Size ?? 0 }] : []));
       return { entries, truncated: r.IsTruncated === true };
+    } catch {
+      return this.fail("list");
+    }
+  }
+
+  async listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }) {
+    try {
+      const r = await this.send((o) =>
+        this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket, Prefix: prefix, Delimiter: "/", MaxKeys: opts.maxKeys, ...(opts.startAfter ? { StartAfter: opts.startAfter } : {}),
+          }),
+          o,
+        ),
+      );
+      const prefixes = (r.CommonPrefixes ?? []).flatMap((p) => (typeof p.Prefix === "string" ? [p.Prefix] : []));
+      return { prefixes, truncated: r.IsTruncated === true };
     } catch {
       return this.fail("list");
     }

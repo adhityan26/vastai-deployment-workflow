@@ -5,6 +5,7 @@ import {
   ComfyError,
   DestroyFailedError,
   GalleryError,
+  Semaphore,
   GenerateFailed,
   GenerateInputError,
   GpuNotAllowedError,
@@ -793,6 +794,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   // ---- gallery: images saved to the object store (MinIO) ----
 
   const viewerOf = (req: FastifyRequest): Viewer => ({ subject: req.identity!.subject, admin: req.role === "admin" });
+  // Saves are rate limited per identity, and every save and image read holds a slot: at most
+  // GALLERY_MAX_CONCURRENT images (each up to WEB_IMAGE_MAX_BYTES) are in memory for the gallery.
+  const saveLimiter =
+    gallery === null ? null : new RateLimiter(intCfg(cfg, "gallerySaveRateLimitPerHour", "GALLERY_SAVE_RATE_LIMIT_PER_HOUR"), HOUR_MS, now);
+  const gallerySlots = gallery === null ? null : new Semaphore(intCfg(cfg, "galleryMaxConcurrent", "GALLERY_MAX_CONCURRENT"));
   const galleryOff = (reply: FastifyReply) => sendError(reply, 503, "gallery_unavailable", "saving to the gallery is not set up on this server");
 
   /** The reply for a gallery or object-store failure; anything else is not ours to handle. */
@@ -823,7 +829,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   };
 
   app.post("/api/gallery", { ...member, schema: { body: GALLERY_SAVE_BODY } }, async (req, reply) => {
-    if (gallery === null) return galleryOff(reply);
+    if (gallery === null || saveLimiter === null || gallerySlots === null) return galleryOff(reply);
+    if (!saveLimiter.take(req.identity!.subject)) return sendError(reply, 429, "rate_limited", "too many gallery saves this hour");
+    return gallerySlots.run(() => saveToGallery(req, reply, gallery));
+  });
+
+  const saveToGallery = async (req: FastifyRequest, reply: FastifyReply, gallery: NonNullable<ServerDeps["gallery"]>) => {
     const { job: jobId, index } = req.body as { job: string; index: number };
     const loaded = await loadJobImage(req, jobId, index, { status: 409, code: "job_not_done", message: "the job has not finished yet" });
     if ("fail" in loaded) return sendError(reply, loaded.fail.status, loaded.fail.code, loaded.fail.message);
@@ -845,7 +856,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       return galleryFailure(reply, err, "save");
     }
-  });
+  };
 
   app.get("/api/gallery", { ...member, schema: { querystring: GALLERY_QUERY } }, async (req, reply) => {
     if (gallery === null) return galleryOff(reply);
@@ -872,10 +883,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   });
 
   app.get("/api/gallery/:id/image", { ...member, schema: { params: GALLERY_ID_PARAMS } }, async (req, reply) => {
-    if (gallery === null) return galleryOff(reply);
+    if (gallery === null || gallerySlots === null) return galleryOff(reply);
     const { id } = req.params as { id: string };
     try {
-      const image = await gallery.read(viewerOf(req), id);
+      const image = await gallerySlots.run(() => gallery.read(viewerOf(req), id));
       const ext = IMAGE_TYPES[image.contentType] ?? "bin";
       return reply
         .code(200)

@@ -10,9 +10,9 @@ import {
   ConsoleStore,
   Lifecycle,
   Registry,
-  S3ObjectStore,
   UsageHistory,
   UsageStore,
+  S3ObjectStore,
   VastClient,
   camelCase,
   consoleFileCap,
@@ -27,6 +27,7 @@ import {
 } from "@vast-comfy/core";
 import { createAuthStack } from "./auth.js";
 import { buildServer } from "./server.js";
+import { startupMessage } from "./startup.js";
 
 // Process entry: wire config, registry, Vast, lifecycle, auth and the reconcile loop, then
 // listen. All behaviour worth testing lives in buildServer() and apps/core.
@@ -230,9 +231,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  // These errors name keys or paths, never values; any other error is reduced to its name.
-  const safe = new Set(["ConfigError", "ProfileError", "VastError", "ObjectStoreError"]);
-  const text = err instanceof Error ? (safe.has(err.name) ? err.message : err.name) : "error";
-  log("error", `startup failed: ${text}`);
+  log("error", startupMessage(err)); // names keys or paths, never values (see startup.ts)
   process.exit(1);
 });

@@ -300,6 +300,8 @@ async function harness(
     webExtendMaxMinutes: 120,
     webGenerateRateLimitPerHour: 50,
     vastCreditCacheS: 60,
+    gallerySaveRateLimitPerHour: 50,
+    galleryMaxConcurrent: 4,
     editMaxReferences: 3,
     editReferenceMaxBytes: 4096,
     editReferenceMaxPixels: 1_000_000,
@@ -994,6 +996,46 @@ describe("gallery", () => {
     await post("/api/generate", other, okGen);
     await call("GET", "/api/generate/p-2", other);
     expect((await save(other, "p-2")).statusCode).toBe(201);
+  });
+
+  it("429 rate_limited past GALLERY_SAVE_RATE_LIMIT_PER_HOUR saves per member, other members unaffected", async () => {
+    h = await harness({ cfg: { gallerySaveRateLimitPerHour: 2, webJobTtlS: 7200 } });
+    const m = await member("ayu");
+    const job = await finishedJob(m);
+    expect((await save(m, job)).statusCode).toBe(201);
+    expect((await save(m, job)).statusCode).toBe(200);
+    const third = await save(m, job);
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error.code).toBe("rate_limited");
+    h.clock.ms += 3_600_000; // the window has passed
+    expect((await save(m, job)).statusCode).toBe(200);
+    // Counted per identity: another member saves freely (its job reuses the id p-1).
+    const other = await member("budi");
+    await post("/api/generate", other, okGen);
+    await call("GET", "/api/generate/p-1", other);
+    expect((await save(other, "p-1")).statusCode).toBe(201);
+  });
+
+  it("at most GALLERY_MAX_CONCURRENT gallery image reads run at once; the others wait and still succeed", async () => {
+    let running = 0;
+    let peak = 0;
+    class SlowReads extends MemoryObjectStore {
+      override async get(key: string, maxBytes: number) {
+        running++;
+        peak = Math.max(peak, running);
+        await new Promise((r) => setTimeout(r, 20));
+        running--;
+        return super.get(key, maxBytes);
+      }
+    }
+    const store = new SlowReads();
+    h = await harness({ cfg: { galleryMaxConcurrent: 1 }, gallery: new Gallery(store, { maxImages: 10, maxBytes: 1_000_000, pageSize: 5, adminScanMax: 100, maxImageBytes: 65_536 }) });
+    const m = await member();
+    const job = await finishedJob(m);
+    const { id } = (await save(m, job)).json();
+    const reads = await Promise.all([1, 2, 3].map(() => call("GET", `/api/gallery/${id}/image`, m)));
+    expect(reads.map((r) => r.statusCode)).toEqual([200, 200, 200]);
+    expect(peak).toBe(1);
   });
 
   it("502 gallery_error when the object store fails, with nothing from the store in the response or the logs", async () => {

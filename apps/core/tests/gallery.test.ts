@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AppsConfig } from "../src/config.js";
-import { Gallery, GalleryError, galleryLimits, type GalleryLimits, type SaveInput } from "../src/gallery.js";
+import { ConfigError, type AppsConfig } from "../src/config.js";
+import { Gallery, GalleryError, Semaphore, galleryLimits, type GalleryLimits, type SaveInput } from "../src/gallery.js";
 import { MemoryObjectStore, ObjectStoreError, type ObjectStore } from "../src/object-store.js";
 
 // A real-looking PNG header (inspectImage reads the size from it) plus a marker.
@@ -107,7 +107,7 @@ describe("save", () => {
   });
 
   it("a store failure surfaces as ObjectStoreError, not as a quota or validation error", async () => {
-    const broken: ObjectStore = { ...new MemoryObjectStore(), head: async () => null, list: async () => { throw new ObjectStoreError("object store list failed"); }, put: async () => undefined, get: async () => null, delete: async () => undefined };
+    const broken: ObjectStore = { ...new MemoryObjectStore(), head: async () => null, list: async () => { throw new ObjectStoreError("object store list failed"); }, put: async () => undefined, get: async () => null, delete: async () => undefined, listPrefixes: async () => ({ prefixes: [], truncated: false }) };
     await expect(new Gallery(broken, limits).save(input())).rejects.toBeInstanceOf(ObjectStoreError);
   });
 });
@@ -161,10 +161,36 @@ describe("list", () => {
     await expect(gallery.list(AYU, { scope: "mine", cursor: "nonsense" })).rejects.toMatchObject({ code: "invalid_id" });
   });
 
-  it("the admin scan reads at most GALLERY_ADMIN_SCAN_MAX keys", async () => {
-    const { gallery } = make({ maxImages: 50, adminScanMax: 3, pageSize: 10 });
-    for (let i = 0; i < 5; i++) await gallery.save(input({ jobId: `j${i}`, createdMs: T0 + i }));
-    expect((await gallery.list(ROOT, { scope: "all" })).items).toHaveLength(3);
+  it("the everyone view is newest first across all members even when one member has far more images than the scan bound", async () => {
+    const { gallery } = make({ maxImages: 50, maxBytes: 1_000_000, adminScanMax: 8, pageSize: 2 });
+    // The member whose folder sorts first owns many old images; the other one the two newest.
+    const [first, second] = [AYU.subject, BUDI.subject].sort((a, b) => (gallery.ownerKey(a) < gallery.ownerKey(b) ? -1 : 1));
+    for (let i = 0; i < 10; i++) await gallery.save(input({ owner: first!, ownerName: "many", jobId: `m${i}`, createdMs: T0 + i }));
+    for (let i = 0; i < 2; i++) await gallery.save(input({ owner: second!, ownerName: "new", jobId: `n${i}`, createdMs: T0 + 100 + i }));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await gallery.list(ROOT, { scope: "all", ...(cursor ? { cursor } : {}) });
+      seen.push(...page.items.map((i) => `${i.ownerName}:${i.createdMs - T0}`));
+      cursor = page.next ?? undefined;
+    } while (cursor);
+    expect(seen).toEqual(["new:101", "new:100", ...Array.from({ length: 10 }, (_, i) => `many:${9 - i}`)]);
+  });
+
+  it("one page of the everyone view reads at most GALLERY_ADMIN_SCAN_MAX keys (folders included)", async () => {
+    const mem = new MemoryObjectStore();
+    let read = 0;
+    const counting: ObjectStore = {
+      put: (...a) => mem.put(...a), head: (k) => mem.head(k), get: (k, m) => mem.get(k, m), delete: (k) => mem.delete(k),
+      list: async (p, o) => { const r = await mem.list(p, o); read += r.entries.length; return r; },
+      listPrefixes: async (p, o) => { const r = await mem.listPrefixes(p, o); read += r.prefixes.length; return r; },
+    };
+    const gallery = new Gallery(counting, { ...limits, maxImages: 50, maxBytes: 1_000_000, adminScanMax: 12, pageSize: 2 });
+    for (let o = 0; o < 6; o++) for (let i = 0; i < 4; i++) await gallery.save(input({ owner: `owner-${o}`, jobId: `j${o}-${i}`, createdMs: T0 + o * 10 + i }));
+    read = 0;
+    const page = await gallery.list(ROOT, { scope: "all" });
+    expect(read).toBeLessThanOrEqual(12);
+    expect(page.items).toHaveLength(2);
   });
 
   it("skips an object that vanished between the listing and its metadata read", async () => {
@@ -174,6 +200,7 @@ describe("list", () => {
       get: (...a) => mem.get(...a),
       delete: (k) => mem.delete(k),
       list: (...a) => mem.list(...a),
+      listPrefixes: (...a) => mem.listPrefixes(...a),
       head: async (k) => (k.endsWith("-gone-0") ? null : mem.head(k)),
     };
     const gallery = new Gallery(flaky, { ...limits, maxImages: 50 });
@@ -243,6 +270,8 @@ describe("galleryLimits and ownerKey", () => {
     expect(galleryLimits(cfg())).toEqual({ maxImages: 300, maxBytes: 2_147_483_648, pageSize: 12, adminScanMax: 5000, maxImageBytes: 33_554_432 });
     expect(() => galleryLimits(cfg({ galleryPageSize: 0 }))).toThrow("GALLERY_PAGE_SIZE");
     expect(() => galleryLimits(cfg({ galleryMaxImagesPerUser: "3" }))).toThrow("GALLERY_MAX_IMAGES_PER_USER");
+    // A ConfigError, which the web process logs in full at startup (it names keys, never values).
+    expect(() => galleryLimits(cfg({ galleryPageSize: 0 }))).toThrow(ConfigError);
   });
 
   it("derives a stable 32-hex owner key that does not reveal the subject", () => {
@@ -251,5 +280,64 @@ describe("galleryLimits and ownerKey", () => {
     expect(g.ownerKey("ayu@example.test")).toBe(g.ownerKey("ayu@example.test"));
     expect(g.ownerKey("ayu@example.test")).not.toBe(g.ownerKey("ayu@example.tesT"));
     expect(g.ownerKey("ayu@example.test")).not.toContain("ayu");
+  });
+});
+
+describe("quota under concurrent saves", () => {
+  /** A store whose writes take a moment, so concurrent saves interleave between the check and the put. */
+  class SlowStore extends MemoryObjectStore {
+    override async put(key: string, bytes: Buffer, contentType: string, metadata: Record<string, string>): Promise<void> {
+      await new Promise((r) => setTimeout(r, 5));
+      return super.put(key, bytes, contentType, metadata);
+    }
+  }
+  const burst = (gallery: Gallery, n: number, owner = AYU.subject) =>
+    Promise.allSettled(Array.from({ length: n }, (_, i) => gallery.save(input({ owner, jobId: `job-${i}` }))));
+
+  it("never stores more images than the quota", async () => {
+    const { store, gallery } = make({ maxImages: 3, maxBytes: 1_000_000 }, new SlowStore());
+    const results = await burst(gallery, 6);
+    expect((store as MemoryObjectStore).keys()).toHaveLength(3);
+    const refused = results.filter((r) => r.status === "rejected").map((r) => ((r as PromiseRejectedResult).reason as GalleryError).code);
+    expect(refused).toEqual(["quota_images", "quota_images", "quota_images"]);
+  });
+
+  it("never stores more bytes than the quota", async () => {
+    const size = png().length;
+    const { store, gallery } = make({ maxImages: 100, maxBytes: 3 * size + size - 1 }, new SlowStore());
+    await burst(gallery, 6);
+    const keys = (store as MemoryObjectStore).keys();
+    expect(keys).toHaveLength(3);
+  });
+
+  it("another owner's saves are not held up by the lock", async () => {
+    const { store, gallery } = make({ maxImages: 3, maxBytes: 1_000_000 }, new SlowStore());
+    const [a, b] = await Promise.all([burst(gallery, 3), burst(gallery, 3, BUDI.subject)]);
+    expect([...a, ...b].every((r) => r.status === "fulfilled")).toBe(true);
+    expect((store as MemoryObjectStore).keys()).toHaveLength(6);
+  });
+});
+
+describe("Semaphore", () => {
+  it("runs at most N tasks at a time, in order, and frees a slot when a task throws", async () => {
+    const sem = new Semaphore(2);
+    let running = 0;
+    let peak = 0;
+    const order: number[] = [];
+    const task = (i: number, fail = false) =>
+      sem.run(async () => {
+        running++;
+        peak = Math.max(peak, running);
+        await new Promise((r) => setTimeout(r, 5));
+        running--;
+        order.push(i);
+        if (fail) throw new Error("x");
+        return i;
+      });
+    const results = await Promise.allSettled([task(0, true), task(1), task(2), task(3), task(4)]);
+    expect(peak).toBe(2);
+    expect(results.map((r) => r.status)).toEqual(["rejected", "fulfilled", "fulfilled", "fulfilled", "fulfilled"]);
+    expect(order.sort()).toEqual([0, 1, 2, 3, 4]);
+    expect(() => new Semaphore(0)).toThrow();
   });
 });

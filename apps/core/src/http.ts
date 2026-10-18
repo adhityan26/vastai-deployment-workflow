@@ -79,7 +79,11 @@ export interface RequestOptions {
   fetch?: typeof fetch;
 }
 
-/** Read at most `maxBytes` of the body; cancels the stream as soon as the running total passes it. */
+/**
+ * Read at most `maxBytes` of the body; cancels the stream as soon as the running total passes it.
+ * With a plain Content-Length the bytes go straight into one buffer of that size, so a large image is
+ * never held twice (chunks plus their concatenation); a body that does not match it falls back to chunks.
+ */
 async function readCapped(res: Response, maxBytes: number, path: string, abort: AbortController): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
@@ -88,19 +92,27 @@ async function readCapped(res: Response, maxBytes: number, path: string, abort: 
   }
   if (res.body === null) return Buffer.alloc(0);
   const reader = res.body.getReader();
+  // fetch decodes a compressed body, so its length only means something without a Content-Encoding.
+  let exact = Number.isSafeInteger(declared) && declared > 0 && res.headers.get("content-encoding") === null ? Buffer.allocUnsafe(declared) : null;
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
+    if (total + value.byteLength > maxBytes) {
       abort.abort();
       await reader.cancel().catch(() => undefined);
       throw new ResponseTooLarge(path, maxBytes);
     }
-    chunks.push(value);
+    if (exact !== null && total + value.byteLength > exact.length) {
+      chunks.push(exact.subarray(0, total)); // longer than declared: keep what we have and go on in chunks
+      exact = null;
+    }
+    if (exact !== null) exact.set(value, total);
+    else chunks.push(value);
+    total += value.byteLength;
   }
+  if (exact !== null) return total === exact.length ? exact : exact.subarray(0, total);
   return Buffer.concat(chunks, total);
 }
 

@@ -19,7 +19,7 @@ afterEach(() => {
   server = undefined;
 });
 
-async function fakeS3(opts: { failWith?: number; hangMs?: number } = {}) {
+async function fakeS3(opts: { failWith?: number; hangMs?: number; chunked?: { size: number; every: number; count: number }; stallAfterFirstChunk?: boolean } = {}) {
   const objects = new Map<string, Stored>();
   const seen: Seen[] = [];
   server = createServer((req, res) => {
@@ -44,6 +44,21 @@ async function fakeS3(opts: { failWith?: number; hangMs?: number } = {}) {
           const after = url.searchParams.get("start-after") ?? "";
           const max = Number(url.searchParams.get("max-keys") ?? "1000");
           const keys = [...objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
+          if (url.searchParams.get("delimiter") === "/") {
+            const folders: string[] = [];
+            for (const k of keys) {
+              const slash = k.indexOf("/", prefix.length);
+              if (slash !== -1 && folders[folders.length - 1] !== k.slice(0, slash + 1)) folders.push(k.slice(0, slash + 1));
+            }
+            const shown = folders.slice(0, max);
+            const xml =
+              `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${BUCKET}</Name><Prefix>${prefix}</Prefix><Delimiter>/</Delimiter>` +
+              `<KeyCount>${shown.length}</KeyCount><MaxKeys>${max}</MaxKeys><IsTruncated>${folders.length > shown.length}</IsTruncated>` +
+              shown.map((f) => `<CommonPrefixes><Prefix>${f}</Prefix></CommonPrefixes>`).join("") +
+              "</ListBucketResult>";
+            res.writeHead(200, { "Content-Type": "application/xml" });
+            return res.end(xml);
+          }
           const page = keys.slice(0, max);
           const body =
             `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${BUCKET}</Name><Prefix>${prefix}</Prefix>` +
@@ -72,6 +87,20 @@ async function fakeS3(opts: { failWith?: number; hangMs?: number } = {}) {
         }
         const headers: Record<string, string | number> = { "Content-Type": found.contentType, "Content-Length": found.bytes.length };
         for (const [k, v] of Object.entries(found.meta)) headers[`x-amz-meta-${k}`] = v;
+        if (req.method === "GET" && (opts.chunked || opts.stallAfterFirstChunk)) {
+          // No Content-Length: the body arrives in pieces (or stalls after the first one).
+          delete headers["Content-Length"];
+          res.writeHead(200, headers);
+          const c = opts.chunked ?? { size: 64, every: 10_000, count: 1 };
+          let sent = 0;
+          const tick = () => {
+            if (res.destroyed) return;
+            res.write(Buffer.alloc(c.size, 0x41));
+            if (++sent < c.count) setTimeout(tick, c.every);
+            else if (!opts.stallAfterFirstChunk) res.end();
+          };
+          return tick();
+        }
         res.writeHead(200, headers);
         res.end(req.method === "HEAD" ? undefined : found.bytes);
       };
@@ -144,6 +173,14 @@ describe.each(implementations)("%s", (_name, make) => {
     expect((await store.list("x/", { maxKeys: 10 })).entries).toEqual([]);
   });
 
+  it("lists the folders under a prefix in order, after startAfter, a page at a time", async () => {
+    const store = await make();
+    for (const k of ["u/b/1", "u/a/1", "u/a/2", "u/c/9", "x/z/1", "u/loose"]) await store.put(k, PNG, "image/png", {});
+    expect(await store.listPrefixes("u/", { maxKeys: 10 })).toEqual({ prefixes: ["u/a/", "u/b/", "u/c/"], truncated: false });
+    expect(await store.listPrefixes("u/", { maxKeys: 2 })).toEqual({ prefixes: ["u/a/", "u/b/"], truncated: true });
+    expect(await store.listPrefixes("u/", { maxKeys: 10, startAfter: "u/a/~" })).toEqual({ prefixes: ["u/b/", "u/c/"], truncated: false });
+  });
+
   it("keeps keys with unusual but legal characters intact", async () => {
     const store = await make();
     const key = "u/0a1b/9999999999999-job_1-A-2";
@@ -197,6 +234,29 @@ describe("S3ObjectStore", () => {
     const started = Date.now();
     await expect(quick.head("u/a/1")).rejects.toBeInstanceOf(ObjectStoreError);
     expect(Date.now() - started).toBeLessThan(8000);
+  }, 20_000);
+
+  it("reads a body without Content-Length under a running cap: it stops early instead of buffering it all", async () => {
+    const { store } = await fakeS3({ chunked: { size: 1024, every: 100, count: 20 } });
+    await store.put("u/a/1", PNG, "image/png", {});
+    const started = Date.now();
+    await expect(store.get("u/a/1", 1536)).rejects.toBeInstanceOf(ObjectStoreError);
+    expect(Date.now() - started).toBeLessThan(1000); // the whole body would take about 2 s
+  }, 20_000);
+
+  it("a chunked body within the cap is read completely", async () => {
+    const { store } = await fakeS3({ chunked: { size: 100, every: 5, count: 5 } });
+    await store.put("u/a/1", PNG, "image/png", {});
+    expect((await store.get("u/a/1", 500))?.bytes.length).toBe(500);
+  }, 20_000);
+
+  it("the deadline also covers a body that stalls after the headers", async () => {
+    const { cfg } = await fakeS3({ stallAfterFirstChunk: true });
+    const quick = new S3ObjectStore({ ...cfg, webImageTimeoutS: 1 } as unknown as AppsConfig);
+    await quick.put("u/a/1", PNG, "image/png", {});
+    const started = Date.now();
+    await expect(quick.get("u/a/1", 10_000)).rejects.toBeInstanceOf(ObjectStoreError);
+    expect(Date.now() - started).toBeLessThan(4000);
   }, 20_000);
 
   it("refuses to start without an endpoint, a bucket or credentials, naming the key and not a value", () => {

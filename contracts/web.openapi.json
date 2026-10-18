@@ -1587,7 +1587,7 @@
     "/api/gallery": {
       "get": {
         "operationId": "galleryList",
-        "summary": "One page of saved images, newest first: your own, or with scope=all (admin) everyone's. Cursor = the next value of the previous page.",
+        "summary": "One page of saved images, newest first: your own, or with scope=all (admin) everyone's, merged newest first across members. Cursor = the next value of the previous page. One scope=all page reads at most GALLERY_ADMIN_SCAN_MAX object keys: each member folder costs GALLERY_PAGE_SIZE + 2, so the view merges floor(GALLERY_ADMIN_SCAN_MAX / (GALLERY_PAGE_SIZE + 2)) members (their images are complete and in order); members beyond that, in folder order (a hash of the login, so effectively random), are not shown.",
         "security": [
           {
             "sessionCookie": []
@@ -1748,7 +1748,7 @@
       },
       "post": {
         "operationId": "gallerySave",
-        "summary": "Save one image of one of your finished jobs to the gallery. The server fetches the image from the instance itself; the browser sends no image data. Saving the same image again changes nothing (200, created false).",
+        "summary": "Save one image of one of your finished jobs to the gallery. The server fetches the image from the instance itself; the browser sends no image data. Saving the same image again changes nothing (200, created false). An admin may save any member's finished job: the copy (with that member's prompt and label) goes to the admin's own gallery, under the admin's name.",
         "security": [
           {
             "sessionCookie": []
