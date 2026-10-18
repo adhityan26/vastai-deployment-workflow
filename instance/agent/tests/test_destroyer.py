@@ -159,6 +159,22 @@ def test_flow_watchdog_line_never_echoes_an_unknown_reason(tmp_path, capsys):
     assert out == "[watchdog] destroying instance: reason=unknown\n"
 
 
+class _BrokenStdout:
+    def write(self, _text):
+        raise OSError(28, "No space left on device")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_flow_still_destroys_when_stdout_cannot_be_written(tmp_path, monkeypatch):
+    states, destroyer, _, flow = flow_setup(tmp_path, True)
+    monkeypatch.setattr("sys.stdout", _BrokenStdout())
+    assert flow.run("idle_timeout") is True
+    assert destroyer.calls == 1
+    assert states.get().state == State.STOPPING
+
+
 def test_flow_failure_marks_destroy_failed_and_stops_comfy(tmp_path):
     states, destroyer, stopped, flow = flow_setup(tmp_path, False)
     assert flow.run("manual") is False

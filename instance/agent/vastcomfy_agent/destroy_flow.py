@@ -38,7 +38,10 @@ class DestroyFlow:
             self._record(State.STOPPING, reason)
             # One line on stdout for the container logs; only a known reason id is ever printed.
             shown = reason if reason in REASONS else "unknown"
-            print(f"[watchdog] destroying instance: reason={shown}", flush=True)
+            try:
+                print(f"[watchdog] destroying instance: reason={shown}", flush=True)
+            except Exception:  # a full disk or a closed pipe must never skip the destroy
+                pass
             if self._destroyer.destroy():
                 return True
             self._record(State.DESTROY_FAILED)
