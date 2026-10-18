@@ -26,7 +26,8 @@ function jpeg(width: number, height: number): Buffer {
   sof[2] = 8;
   sof.writeUInt16BE(height, 3);
   sof.writeUInt16BE(width, 5);
-  return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xc0]), sof, Buffer.from([0xff, 0xd9])]);
+  const scan = Buffer.from([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x12, 0xff, 0xd9]);
+  return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xc0]), sof, scan]);
 }
 const b64 = (b: Buffer) => b.toString("base64");
 

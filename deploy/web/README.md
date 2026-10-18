@@ -190,7 +190,7 @@ refused because ComfyUI would decode every frame), uploaded to the instance's Co
 web service. The route has its own request body limit derived from those values, so
 `WEB_BODY_LIMIT_BYTES` can stay small. A reverse proxy or the Cloudflare tunnel must allow a request body
 of that size (about `EDIT_MAX_REFERENCES` x `EDIT_REFERENCE_MAX_BYTES` x 1.34, about 45 MB with the defaults;
-Cloudflare's free plan allows 100 MB). The profile's `edit` section turns the feature on; without it the
+see the note on Cloudflare below). The profile's `edit` section turns the feature on; without it the
 page shows only Generate.
 
 Limits to keep in mind:

@@ -27,7 +27,7 @@ function jpeg(width: number, height: number, opts: { sof?: number; app?: number 
     app,
     Buffer.from([0xff, opts.sof ?? 0xc0]),
     sof,
-    Buffer.from([0xff, 0xd9]),
+    Buffer.from([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x12, 0xff, 0xd9]),
   ]);
 }
 
@@ -179,6 +179,39 @@ describe("inspectImage", () => {
     expect(inspectImage(garbage[name]!)).toBeNull();
   });
 
+  // Pillow and libjpeg skip "FF 00" and other bytes that are not a marker until the next FF, so a
+  // walk that read a length there could jump over a segment the decoder later sees.
+  const sof = () => jpegSegment(0xc0, sofData(7, 9));
+  const strictJpeg: Record<string, Buffer> = {
+    ff00_hiding_mpf: Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x00, mpf().length + 2]),
+      mpf(),
+      jpegWith([app0(), sof()]).subarray(2),
+      jpegWith([sof()]),
+      jpegWith([sof()]),
+      jpegWith([sof()]),
+    ]),
+    marker_02: jpegWith([jpegSegment(0x02, Buffer.alloc(4)), sof()]),
+    marker_80: jpegWith([jpegSegment(0x80, Buffer.alloc(4)), sof()]),
+    marker_bf: jpegWith([jpegSegment(0xbf, Buffer.alloc(4)), sof()]),
+    eoi_before_scan: Buffer.concat([Buffer.from([0xff, 0xd8]), sof(), Buffer.from([0xff, 0xd9])]),
+    no_scan_after_frame: Buffer.concat([Buffer.from([0xff, 0xd8]), sof()]),
+  };
+  it.each(Object.keys(strictJpeg))("refuses a JPEG with %s", (name) => {
+    expect(inspectImage(strictJpeg[name]!)).toBeNull();
+  });
+
+  it("accepts JFIF, Exif, progressive, COM, tables and fill bytes", () => {
+    const exif = jpegSegment(0xe1, Buffer.concat([Buffer.from("Exif\0\0", "latin1"), Buffer.alloc(8)]));
+    const files = [
+      jpegWith([app0(), sof()]),
+      jpegWith([exif, jpegSegment(0xdb, Buffer.alloc(65)), jpegSegment(0xc4, Buffer.alloc(20)), sof()]),
+      jpegWith([app0(), jpegSegment(0xfe, Buffer.from("comment", "latin1")), jpegSegment(0xdd, Buffer.alloc(2)), jpegSegment(0xc2, sofData(7, 9))]),
+      jpegWith([app0(), Buffer.from([0xff, 0xff]), sof()]),
+    ];
+    for (const f of files) expect(inspectImage(f)).toEqual({ type: "jpeg", width: 7, height: 9 });
+  });
+
   const singleFrame: Record<string, [Buffer, string]> = {
     png_with_ancillary_chunks: [pngWith([pngChunk("tEXt", Buffer.from("a\0b", "latin1"))]), "png"],
     png_actl_after_first_idat: [pngWith([], [acTL()]), "png"],
@@ -229,6 +262,12 @@ describe("decodeReferences", () => {
     side_too_long: [[b64(png(9000, 10))], "reference_side_too_long"],
     apng: [[b64(pngWith([acTL()]))], "reference_animated"],
     mpo: [[b64(jpegWith([mpf(), jpegSegment(0xc0, sofData(7, 9))]))], "reference_animated"],
+    jpeg_ff00_hiding_mpf: [[b64(Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x00, mpf().length + 2]),
+      mpf(),
+      jpegWith([jpegSegment(0xc0, sofData(7, 9))]).subarray(2),
+      jpegWith([jpegSegment(0xc0, sofData(7, 9))]),
+    ]))], "invalid_reference"],
     jpeg_two_frames: [[b64(jpegWith([jpegSegment(0xc0, sofData(7, 9)), jpegSegment(0xc0, sofData(7, 9))]))], "reference_animated"],
     animated_webp: [[b64(riff([vp8x(4, 4, 0x02), riffChunk("ANIM", Buffer.alloc(6))]))], "reference_animated"],
   };

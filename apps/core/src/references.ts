@@ -76,15 +76,28 @@ function pngInfo(b: Buffer): ImageInfo | null {
 const MPF_ID = "MPF\0";
 
 /**
+ * Whether a byte after 0xFF is a marker defined by ITU T.81: TEM (0x01) and 0xC0..0xFE (SOFn, DHT,
+ * JPG, DAC, RSTn, SOI, EOI, SOS, DQT, DNL, DRI, DHP, EXP, APPn, JPGn, COM). Anything else, 0x00
+ * included, is data a decoder skips byte by byte until the next 0xFF, which a length-based walk
+ * would not follow.
+ */
+function isJpegMarker(m: number): boolean {
+  return m === 0x01 || (m >= 0xc0 && m <= 0xfe);
+}
+
+/**
  * Walk the marker segments up to the start of scan and read the frame size from the start-of-frame
  * (SOFn) segment. A second SOFn before the scan (Pillow would use the last one) or an APP2 "MPF"
  * segment (a multi-picture MPO file, which Pillow opens with every picture as a frame) marks the
- * file as animated.
+ * file as animated. The walk fails closed: an undefined marker (FF 00 included), an end of image
+ * before the scan, or no scan at all make the file unsupported, so the walk never resynchronises
+ * differently from the decoder.
  */
 function jpegInfo(b: Buffer): ImageInfo | null {
   if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) return null;
   let frame: { width: number; height: number } | null = null;
   let multi = false;
+  let scan = false;
   let i = 2;
   while (i + 4 <= b.length) {
     if (b[i] !== 0xff) return null;
@@ -93,11 +106,16 @@ function jpegInfo(b: Buffer): ImageInfo | null {
       i += 1; // fill byte
       continue;
     }
+    if (!isJpegMarker(marker)) return null;
     if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
       i += 2; // markers without a length
       continue;
     }
-    if (marker === 0xd9 || marker === 0xda) break; // end of image / start of scan
+    if (marker === 0xd9) return null; // end of image before any scan
+    if (marker === 0xda) {
+      scan = true;
+      break;
+    }
     const length = b.readUInt16BE(i + 2);
     if (length < 2) return null;
     const isFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
@@ -110,7 +128,7 @@ function jpegInfo(b: Buffer): ImageInfo | null {
     }
     i += 2 + length;
   }
-  return frame === null ? null : dims("jpeg", frame.width, frame.height, multi);
+  return frame === null || !scan ? null : dims("jpeg", frame.width, frame.height, multi);
 }
 
 /**
