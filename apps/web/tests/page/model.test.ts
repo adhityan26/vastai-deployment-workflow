@@ -594,6 +594,7 @@ describe("gallery helpers", () => {
     expect(page!.items).toHaveLength(2);
     expect(page!.items[0]).toEqual({ id: ID, url: `/api/gallery/${ID}/image`, createdAt: 1_800_000_000, kind: "generate", prompt: "a fox", label: "preview, 1:1", ownerName: "Ayu", mine: true, size: 12345 });
     expect(page!.items[1]!.kind).toBe("generate"); // an unknown kind falls back instead of dropping the image
+    expect(parseGalleryPage({ items: [entry({ kind: "upscale" }), entry({ kind: "edit" })], next: null })!.items.map((i) => i.kind)).toEqual(["upscale", "edit"]);
     expect(page!.next).toBe(ID);
     expect(parseGalleryPage({ items: [], next: null })).toEqual({ items: [], next: null });
     expect(parseGalleryPage({ items: [], next: "junk" })!.next).toBeNull();

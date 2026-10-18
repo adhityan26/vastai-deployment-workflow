@@ -644,7 +644,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       owner: identity.subject,
       hostname,
       prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-      label: `${asked.preset}, ${asked.size}`.slice(0, JOB_LABEL_KEPT),
+      label: `${asked.preset}, ${asked.size}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
     });
     return reply.code(202).send({ id: promptId });
   });
@@ -679,7 +679,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         hostname,
         kind: "edit",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}`.slice(0, JOB_LABEL_KEPT),
+        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
       });
       return reply.code(202).send({ id: promptId });
     },
@@ -699,14 +699,25 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (!generateLimiter.take(identity.subject)) {
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
-      let promptId: string;
+      let submitted: Awaited<ReturnType<typeof runUpscale>>;
       try {
-        ({ promptId } = await runUpscale(upscaleDeps(hostname, upscalePixels), req.body as UpscaleRequest));
+        submitted = await runUpscale(upscaleDeps(hostname, upscalePixels), req.body as UpscaleRequest);
       } catch (err) {
         return submitFailure(reply, err, "upscale");
       }
+      const { promptId, width, height } = submitted;
       if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
-      jobs.add({ id: promptId, owner: identity.subject, hostname, kind: "upscale" });
+      // An upscale has no prompt; the label says what was done, so a saved image can say so too.
+      const scale = String((req.body as UpscaleRequest).scale);
+      const factor = upscaleSpec?.scales.find((sc) => sc.name === scale)?.factor ?? 1;
+      jobs.add({
+        id: promptId,
+        owner: identity.subject,
+        hostname,
+        kind: "upscale",
+        prompt: "",
+        label: `Upscale: ${scale}, ${width}x${height} to ${Math.round(width * factor)}x${Math.round(height * factor)}`.slice(0, JOB_LABEL_KEPT),
+      });
       return reply.code(202).send({ id: promptId });
     },
   );

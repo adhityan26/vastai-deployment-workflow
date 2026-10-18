@@ -1306,6 +1306,15 @@ function comfyEdit(images: unknown[] | null = null): Handler {
   };
 }
 
+/** Wrap a ComfyUI fake so /view answers with a PNG that has a real header (the gallery checks it). */
+function realView(base: Handler): Handler {
+  return (s, res) => {
+    if (!s.url.startsWith("/view")) return base(s, res);
+    res.writeHead(200, { "Content-Type": "image/png" });
+    res.end(pngOf(16, 16, "SAVED-RESULT"));
+  };
+}
+
 describe("edit with reference images", () => {
   it("is described in /api/state for every member, including the limits and resolutions", async () => {
     for (const who of [await member(), await admin()]) {
@@ -2241,6 +2250,20 @@ describe("styles", () => {
     expect(sent["4"].inputs.model).toEqual(["style_lora", 0]);
   });
 
+  it("a styled job's label names the style, so a saved image says how it was made", async () => {
+    h = await harness({ profile: styledProfile() });
+    h.setComfy(realView(comfyEdit([{ filename: "e.png", subfolder: "", type: "output" }])));
+    const m = await member("ayu");
+    const res = await post("/api/edit", m, { ...okEdit, ...asked });
+    expect(res.statusCode).toBe(202);
+    expect((await call("GET", `/api/generate/${res.json().id}`, m)).json().status).toBe("done");
+    expect((await post("/api/gallery", m, { job: res.json().id, index: 0 })).statusCode).toBe(201);
+    const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
+    expect(head!.metadata["kind"]).toBe("edit");
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1024, 1 reference, Anything to Real");
+    expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("make it real");
+  });
+
   const bad: [string, "edit" | "generate", unknown, string][] = [
     ["an unknown style", "edit", { id: "nope" }, "unknown_style"],
     ["an edit-only style in generate", "generate", { id: "anything2real" }, "style_not_for_mode"],
@@ -2347,6 +2370,24 @@ describe("upscale", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("upscale_too_large");
     expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("an upscale result can be saved: kind upscale, the scale and sizes as label, no prompt", async () => {
+    h = await harness({ profile: upscaleProfile() });
+    h.setComfy(realView(comfyUp([{ filename: "upscale_00001_.png", subfolder: "", type: "output" }])));
+    const m = await member("ayu");
+    const res = await post("/api/upscale", m, { image: pngOf(100, 50, "UP").toString("base64"), scale: "2x" });
+    expect(res.statusCode).toBe(202);
+    const id = res.json().id as string;
+    expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
+    const saved = await post("/api/gallery", m, { job: id, index: 0 });
+    expect(saved.statusCode).toBe(201);
+    const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
+    expect(head!.metadata["kind"]).toBe("upscale");
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("Upscale: 2x, 100x50 to 200x100");
+    expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("");
+    const item = (await call("GET", "/api/gallery", m)).json().items[0];
+    expect(item).toMatchObject({ kind: "upscale", label: "Upscale: 2x, 100x50 to 200x100", prompt: "" });
   });
 
   it("reads the pixel bounds at startup: a bad value stops the server, not a request", async () => {

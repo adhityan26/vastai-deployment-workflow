@@ -983,7 +983,7 @@ export interface GalleryEntry {
   id: string;
   url: string;
   createdAt: number;
-  kind: "generate" | "edit";
+  kind: "generate" | "edit" | "upscale";
   prompt: string;
   label: string;
   ownerName: string;
@@ -1021,7 +1021,7 @@ export function parseGalleryPage(json: unknown): { items: GalleryEntry[]; next: 
       id: raw["id"],
       url: `${API.gallery}/${raw["id"]}/image`,
       createdAt,
-      kind: raw["kind"] === "edit" ? "edit" : "generate",
+      kind: raw["kind"] === "edit" || raw["kind"] === "upscale" ? raw["kind"] : "generate",
       prompt: typeof raw["prompt"] === "string" ? raw["prompt"] : "",
       label: typeof raw["label"] === "string" ? raw["label"] : "",
       ownerName: typeof raw["owner_name"] === "string" ? raw["owner_name"] : "",

@@ -47,6 +47,18 @@ describe("save", () => {
     expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("ünïcode & spaces / ?");
   });
 
+  it("keeps the kind of an edit and of an upscale; anything else reads back as generate", async () => {
+    const { store, gallery } = make();
+    await gallery.save(input({ jobId: "e", kind: "edit", createdMs: T0 + 1 }));
+    await gallery.save(input({ jobId: "u", kind: "upscale", prompt: "", label: "Upscale: 2x", createdMs: T0 + 2 }));
+    await gallery.save(input({ jobId: "g", createdMs: T0 + 3 }));
+    const key = (store as MemoryObjectStore).keys().find((k) => k.endsWith("-g-0"))!;
+    const odd = await store.head(key);
+    await store.put(key, png(), "image/png", { ...odd!.metadata, kind: "weird" });
+    const items = (await gallery.list(AYU, { scope: "mine" })).items;
+    expect(items.map((i) => [i.kind, i.label])).toEqual([["generate", "preview, 1:1"], ["upscale", "Upscale: 2x"], ["edit", "preview, 1:1"]]);
+  });
+
   it("a later image sorts before an earlier one", async () => {
     const { store, gallery } = make();
     await gallery.save(input({ jobId: "old", createdMs: T0 }));
