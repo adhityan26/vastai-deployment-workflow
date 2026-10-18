@@ -2,6 +2,7 @@ import type { AppsConfig } from "./config.js";
 import { randomBytes } from "node:crypto";
 import { baseUrl, clip, imageTimeoutMs, jsonMaxBytes, parseJson, positiveInt, request, timeoutMs, RawBody, type RawReply } from "./http.js";
 import { isPlainFileName } from "./profile.js";
+import { watchProgress, type ProgressSink, type ProgressSocket } from "./progress.js";
 
 export { ResponseTooLarge, Unreachable } from "./http.js";
 
@@ -43,15 +44,26 @@ function safeSegment(name: string, value: string, allowEmpty: boolean): string {
   return value;
 }
 
+/** What a job's progress socket needs besides the instance address (read from config by the caller). */
+export interface ProgressLimits {
+  readonly lifetimeMs: number;
+  readonly maxTextBytes: number;
+  readonly maxPreviewBytes: number;
+}
+
 export class ComfyClient {
   private readonly base: string;
+  private readonly host: string;
+  private readonly port: number;
   private readonly ms: number;
   private readonly imageMs: number;
   private readonly jsonMax: number;
   private readonly imageMax: number;
 
   constructor(host: string, cfg: AppsConfig) {
-    this.base = baseUrl(host, positiveInt("COMFY_PORT", cfg["comfyPort"]));
+    this.port = positiveInt("COMFY_PORT", cfg["comfyPort"]);
+    this.base = baseUrl(host, this.port); // also the host allow-list check
+    this.host = host;
     this.ms = timeoutMs(cfg);
     // Images are megabytes over the tailnet (a 1.8 MB PNG took 7.5 s), so /view has its own, longer timeout.
     this.imageMs = imageTimeoutMs(cfg);
@@ -68,8 +80,12 @@ export class ComfyClient {
     throw new ComfyError(reply.status, clip(`${what} failed with HTTP ${reply.status}: ${reply.body.toString("utf8")}`));
   }
 
-  async submit(prompt: unknown): Promise<{ promptId: string }> {
-    const reply = await this.call("POST", "/prompt", { prompt });
+  /**
+   * Queue a prompt. With a `clientId`, ComfyUI sends the prompt's progress and previews to the websocket
+   * opened with the same id (see progress()).
+   */
+  async submit(prompt: unknown, clientId?: string): Promise<{ promptId: string }> {
+    const reply = await this.call("POST", "/prompt", clientId === undefined ? { prompt } : { prompt, client_id: clientId });
     if (reply.status !== 200) this.fail("submit", reply);
     const id = (parseJson(reply.body) as { prompt_id?: unknown } | null)?.prompt_id;
     if (typeof id !== "string" || id === "") throw new ComfyError(reply.status, "submit: response has no prompt_id");
@@ -131,6 +147,17 @@ export class ComfyClient {
       throw new ComfyError(reply.status, "upload: unexpected response");
     }
     return { name: parsed.name };
+  }
+
+  /**
+   * Open the progress websocket of one job on the same instance and port as every other call (same host
+   * check, the JSON timeout as the connect timeout). Never throws; see progress.ts for the limits.
+   */
+  progress(clientId: string, sink: ProgressSink, limits: ProgressLimits, progressNode: string | null): ProgressSocket {
+    return watchProgress(
+      { host: this.host, port: this.port, clientId, connectTimeoutMs: this.ms, progressNode, ...limits },
+      sink,
+    );
   }
 
   async queue(): Promise<{ running: unknown[]; pending: unknown[] }> {

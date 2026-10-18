@@ -42,7 +42,7 @@ export interface ServerDeps {
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
-  comfyFor(hostname: string): Pick<ComfyClient, "submit" | "history" | "view" | "uploadImage">;
+  comfyFor(hostname: string): Pick<ComfyClient, "submit" | "history" | "view" | "uploadImage"> & Partial<Pick<ComfyClient, "progress">>;
   profile: Profile;
   /** The workflow template JSON named by the profile. */
   template: unknown;

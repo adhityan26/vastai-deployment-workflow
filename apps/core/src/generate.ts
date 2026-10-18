@@ -31,6 +31,8 @@ export interface GenerateDeps {
   random?: () => number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** The progress socket's client id; ComfyUI then sends this job's progress and previews there. */
+  clientId?: string;
 }
 
 export interface GenerateRequest {
@@ -98,7 +100,7 @@ export async function generate(deps: GenerateDeps, input: GenerateRequest): Prom
     seed,
     style,
   });
-  return deps.comfy.submit(prompt);
+  return deps.comfy.submit(prompt, deps.clientId);
 }
 
 export interface EditDeps {
@@ -111,6 +113,8 @@ export interface EditDeps {
   random?: () => number;
   /** A fresh random token for an uploaded file name; injectable for tests. */
   newName?: () => string;
+  /** The progress socket's client id; ComfyUI then sends this job's progress and previews there. */
+  clientId?: string;
 }
 
 export interface EditRequest {
@@ -155,7 +159,7 @@ export async function edit(deps: EditDeps, input: EditRequest): Promise<{ prompt
     const stored = await deps.comfy.uploadImage(`edit-${token()}.${kind.ext}`, ref.bytes, kind.contentType);
     names.push(stored.name);
   }
-  return deps.comfy.submit(buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: names }));
+  return deps.comfy.submit(buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: names }), deps.clientId);
 }
 
 export interface UpscaleDeps {
@@ -167,6 +171,8 @@ export interface UpscaleDeps {
   /** Pixel bounds read once at startup (UPSCALE_MAX_OUTPUT_PIXELS, UPSCALE_MAX_INTERMEDIATE_PIXELS). */
   limits: UpscaleLimits;
   newName?: () => string;
+  /** The progress socket's client id; ComfyUI then sends this job's progress and previews there. */
+  clientId?: string;
 }
 
 export interface UpscaleLimits {
@@ -209,7 +215,7 @@ export async function upscale(deps: UpscaleDeps, input: UpscaleRequest): Promise
   const kind = FILE_TYPES[image!.type];
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
   const stored = await deps.comfy.uploadImage(`upscale-${token()}.${kind.ext}`, image!.bytes, kind.contentType);
-  const { promptId } = await deps.comfy.submit(buildUpscalePrompt(spec, deps.template, stored.name, option.name));
+  const { promptId } = await deps.comfy.submit(buildUpscalePrompt(spec, deps.template, stored.name, option.name), deps.clientId);
   return { promptId, width: image!.width, height: image!.height };
 }
 

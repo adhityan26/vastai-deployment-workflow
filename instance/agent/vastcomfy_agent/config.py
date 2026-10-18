@@ -31,6 +31,24 @@ class KeySpec:
     description: str
     min: int | None = None
     max: int | None = None
+    choices: tuple[str, ...] | None = None
+
+
+def _choices(item: dict) -> tuple[str, ...] | None:
+    """The closed list of values a str key may take (`choices:` in the schema), or None."""
+    value = item.get("choices")
+    if value is None:
+        return None
+    if item["type"] != "str":
+        raise ConfigError(f"{item['name']}: choices are only allowed on str keys")
+    if not isinstance(value, list) or not value or not all(isinstance(c, str) and c for c in value):
+        raise ConfigError(f"{item['name']}: choices must be a non-empty list of non-empty strings")
+    if len(set(value)) != len(value):
+        raise ConfigError(f"{item['name']}: choices must be distinct")
+    default = item.get("default")
+    if default not in (None, "") and default not in value:
+        raise ConfigError(f"{item['name']}: the default is not one of the choices")
+    return tuple(value)
 
 
 def _bound(item: dict, which: str) -> int | None:
@@ -68,6 +86,7 @@ def load_schema(path: Path | None = None) -> list[KeySpec]:
                 description=item["description"],
                 min=low,
                 max=high,
+                choices=_choices(item),
             )
         )
     names = [s.name for s in specs]
@@ -104,6 +123,8 @@ def default_text(spec: KeySpec) -> str:
 
 def _coerce(spec: KeySpec, text: str) -> Any:
     if spec.type == "str":
+        if spec.choices is not None and text not in spec.choices:
+            raise ConfigError(f"{spec.name}: must be one of {', '.join(spec.choices)}")
         return text
     if spec.type == "int":
         if not _INT_TEXT.fullmatch(text):

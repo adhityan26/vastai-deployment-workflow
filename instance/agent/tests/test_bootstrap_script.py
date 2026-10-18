@@ -95,6 +95,12 @@ def test_comfyui_is_restarted_not_started_after_the_workflows():
     assert "|| die_with comfyui_start_failed" in lines()[index_of('restart "$COMFY_PROGRAM"')]
 
 
+def test_comfyui_arguments_with_the_preview_method_are_written_right_before_the_restart():
+    line = index_of("boot comfy-args")
+    assert index_of("copy-workflows") < line < index_of("disable_comfy_manager ||") < index_of('restart "$COMFY_PROGRAM"')
+    assert lines()[line].strip() == 'boot comfy-args --env-file "$ENV_FILE" || exit $?'
+
+
 def test_authkey_is_never_placed_on_a_command_line():
     text = SCRIPT.read_text()
     assert '--auth-key="file:$AUTH_FILE"' in text

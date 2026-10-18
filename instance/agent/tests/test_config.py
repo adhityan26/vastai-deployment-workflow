@@ -276,3 +276,32 @@ def test_real_schema_defaults_load_through_load_config(tmp_path):
     cfg = load_config(env, "instance")
     assert cfg.comfy_port == 18188 and cfg.venv_dir == "/opt/vastcomfy-venv" and cfg.vastai_version == "1.8.3"
     assert cfg.supervisor_programs_file == "vastcomfy.conf" and cfg.destroy_assume_yes is True
+
+
+CHOICE_SCHEMA = """
+version: 1
+keys:
+  - {name: MODE, components: [instance], type: str, secret: false, required: false, default: b, choices: [a, b], description: "a closed list"}
+"""
+
+
+def test_a_str_key_with_choices_accepts_only_those_values(tmp_path):
+    path = tmp_path / "schema.yaml"
+    path.write_text(CHOICE_SCHEMA)
+    assert load_config(write_env(tmp_path, "MODE=a\n"), "instance", path).mode == "a"
+    assert load_config(write_env(tmp_path, ""), "instance", path).mode == "b"
+    with pytest.raises(ConfigError, match="MODE: must be one of a, b"):
+        load_config(write_env(tmp_path, "MODE=c\n"), "instance", path)
+
+
+@pytest.mark.parametrize("line, message", [
+    ("{name: X, components: [instance], type: int, secret: false, required: false, default: 1, choices: [a], description: d}", "only allowed on str keys"),
+    ("{name: X, components: [instance], type: str, secret: false, required: false, default: a, choices: [], description: d}", "non-empty list"),
+    ("{name: X, components: [instance], type: str, secret: false, required: false, default: a, choices: [a, a], description: d}", "distinct"),
+    ("{name: X, components: [instance], type: str, secret: false, required: false, default: z, choices: [a], description: d}", "default is not one of the choices"),
+])
+def test_bad_choices_in_the_schema_are_refused(tmp_path, line, message):
+    path = tmp_path / "schema.yaml"
+    path.write_text(f"version: 1\nkeys:\n  - {line}\n")
+    with pytest.raises(ConfigError, match=message):
+        load_schema(path)

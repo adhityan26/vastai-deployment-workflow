@@ -157,13 +157,47 @@
           {
             "type": "object",
             "required": [
-              "status"
+              "status",
+              "progress",
+              "preview_seq"
             ],
             "properties": {
               "status": {
                 "const": "pending"
+              },
+              "progress": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "step",
+                      "max"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "step": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                ],
+                "description": "The newest sampler step ComfyUI reported on the job's progress socket (step of max); null when none was seen (progress off, no socket, not started, or an upscale)"
+              },
+              "preview_seq": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of live previews received so far; GET /api/generate/{id}/preview again only when it changed. 0 when there is none"
               }
-            }
+            },
+            "additionalProperties": false
           },
           {
             "type": "object",
@@ -225,7 +259,8 @@
               "message": {
                 "type": "string"
               }
-            }
+            },
+            "additionalProperties": false
           }
         ]
       },
@@ -3465,6 +3500,87 @@
           },
           "502": {
             "description": "ComfyUI unreachable, poll again (code comfy_unavailable); history over WEB_JSON_MAX_BYTES fails the job (code upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/generate/{id}/preview": {
+      "get": {
+        "operationId": "jobPreview",
+        "summary": "The newest live preview of a pending job (owner or admin), as the JPEG or PNG its magic bytes say; never stored beyond the job",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preview image; Cache-Control no-store, X-Content-Type-Options nosniff",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed id (code invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or not yours (code not_found); no preview yet, the job finished, or progress is off (code no_preview)",
             "content": {
               "application/json": {
                 "schema": {

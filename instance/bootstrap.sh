@@ -250,9 +250,12 @@ boot wait --target agent --env-file "$ENV_FILE" || exit $?
 boot install-nodes --env-file "$ENV_FILE" || exit $?
 boot install-models --env-file "$ENV_FILE" || exit $?
 
-# Step 9: bundled workflows (never overwrites), then restart the image's ComfyUI (already running since the
-# entrypoint) once so it loads the new nodes.
+# Step 9: bundled workflows (never overwrites), the ComfyUI arguments, then restart the image's ComfyUI (already
+# running since the entrypoint) once so it loads the new nodes and the preview method.
 boot copy-workflows --env-file "$ENV_FILE" || exit $?
+# ComfyUI's arguments with the preview method (COMFY_PREVIEW_METHOD) go where the image's start script reads them,
+# so the restart below runs with previews.
+boot comfy-args --env-file "$ENV_FILE" || exit $?
 disable_comfy_manager || die_with comfyui_start_failed
 ctl restart "$COMFY_PROGRAM" || die_with comfyui_start_failed
 boot wait --target comfy --env-file "$ENV_FILE" || exit $?

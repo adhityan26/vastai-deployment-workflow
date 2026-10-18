@@ -52,6 +52,14 @@ import {
   type UsageEntry,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
+  elapsedText,
+  isPreviewType,
+  jobPollDelayMs,
+  parseJobProgress,
+  parsePreviewSeq,
+  previewPath,
+  stepText,
+  type JobProgress,
   characterCount,
   durationText,
   parseSeconds,
@@ -146,6 +154,14 @@ interface HistoryEntry {
   label: string;
   /** How long the job took, once the server said so. */
   seconds: number | null;
+  /** env.now() when it was submitted (the elapsed time of a running job). */
+  submittedAt: number;
+  /** The newest step counter while it runs. */
+  progress: JobProgress | null;
+  /** The preview_seq of the preview shown (or being fetched); a different one is fetched. */
+  previewSeq: number;
+  /** Object URL of the newest live preview; revoked when replaced and when the job ends. */
+  previewUrl: string | null;
   status: "pending" | "done" | "failed";
   message: string;
   images: string[];
@@ -1222,7 +1238,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   const historyBox = $("history");
   function addEntry(id: string, kind: JobKind, prompt: string, label: string): HistoryEntry {
-    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
+    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, submittedAt: env.now(), progress: null, previewSeq: 0, previewUrl: null, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
     history.unshift(entry);
     historyBox.prepend(entry.node);
     $("hist-empty").hidden = true;
@@ -1286,6 +1302,23 @@ export function mountApp(doc: Document, env: Env): App {
       const p = make("p", "Generating…");
       p.setAttribute("role", "status");
       kids.push(p);
+      // An upscale has no sampler steps: it only shows how long it has been running.
+      if (e.progress !== null && e.kind !== "upscale") {
+        const bar = make("progress");
+        bar.max = e.progress.max;
+        bar.value = e.progress.step;
+        bar.setAttribute("aria-label", stepText(e.progress));
+        kids.push(bar, make("p", stepText(e.progress), "muted job-step"));
+      }
+      kids.push(make("p", elapsedText(env.now() - e.submittedAt), "muted job-elapsed"));
+      if (e.previewUrl !== null) {
+        const fig = make("figure", undefined, "live-preview");
+        const img = make("img");
+        img.src = e.previewUrl;
+        img.alt = "Live preview (rough)";
+        fig.append(img, make("figcaption", "Live preview (rough)", "muted"));
+        kids.push(fig);
+      }
     } else if (e.status === "failed") {
       kids.push(make("p", `Failed: ${e.message}`, "alert bad"));
       kids[kids.length - 1]!.setAttribute("role", "alert");
@@ -1337,9 +1370,17 @@ export function mountApp(doc: Document, env: Env): App {
     for (const e of history) if (e.status === "done") renderEntry(e);
   }
 
+  /** Forget the live preview of an entry (the final image replaces it). */
+  function dropPreview(e: HistoryEntry): void {
+    releaseUrl(e.previewUrl);
+    e.previewUrl = null;
+    e.progress = null;
+  }
+
   function finishEntry(e: HistoryEntry, status: "done" | "failed", message = ""): void {
     e.status = status;
     e.message = message;
+    dropPreview(e);
     jobPending = false;
     renderEntry(e);
     if (state) renderForm(state);
@@ -1499,10 +1540,32 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
 
+  /** Fetch the newest live preview of a running job; a failure only means no (new) preview is shown. */
+  async function loadPreview(e: HistoryEntry, seq: number): Promise<void> {
+    const path = previewPath(e.id);
+    if (path === null) return;
+    e.previewSeq = seq;
+    try {
+      const res = await env.fetch(path, { credentials: "same-origin" });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      if (!isPreviewType(blob.type) || e.status !== "pending" || e.previewSeq !== seq) return;
+      const url = previewUrl(blob);
+      if (url === null) return;
+      releaseUrl(e.previewUrl);
+      e.previewUrl = url;
+      renderEntry(e);
+    } catch {
+      // no preview this time
+    }
+  }
+
   async function pollJob(e: HistoryEntry, errors: number): Promise<void> {
     if (stopped || !active) return;
     try {
+      const askedAt = env.now();
       const res = await call("GET", `${API.generate}/${e.id}`);
+      const latency = env.now() - askedAt;
       const r = (typeof res === "object" && res !== null ? res : {}) as Record<string, unknown>;
       if (r["status"] === "done" && Array.isArray(r["images"])) {
         e.images = [];
@@ -1520,7 +1583,12 @@ export function mountApp(doc: Document, env: Env): App {
       if (r["status"] === "failed") {
         return finishEntry(e, "failed", typeof r["message"] === "string" ? r["message"] : "Generation failed.");
       }
-      env.setTimeout(() => void pollJob(e, 0), JOB_POLL_MS);
+      // Still running: the step counter, a new preview only when the server has one, and a faster pace.
+      e.progress = parseJobProgress(r["progress"]);
+      const seq = parsePreviewSeq(r["preview_seq"]);
+      renderEntry(e);
+      if (seq !== 0 && seq !== e.previewSeq) void loadPreview(e, seq);
+      env.setTimeout(() => void pollJob(e, 0), jobPollDelayMs(latency));
     } catch (err) {
       if (err instanceof AuthLostError) return;
       // A network blip or a 5xx may pass; anything else (404, 403) will not.

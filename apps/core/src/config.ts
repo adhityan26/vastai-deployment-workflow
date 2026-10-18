@@ -16,6 +16,8 @@ interface KeySpec {
   default: unknown;
   min?: number;
   max?: number;
+  /** The closed list of values a str key may take (`choices:` in the schema). */
+  choices?: readonly string[];
 }
 
 export type ConfigValue = string | number | boolean | string[];
@@ -68,6 +70,16 @@ function loadSchema(schemaPath: string): KeySpec[] {
       }
       spec[which] = bound;
     }
+    const choices = item["choices"];
+    if (choices !== undefined && choices !== null) {
+      if (type !== "str" || !Array.isArray(choices) || choices.length === 0 || !choices.every((c) => typeof c === "string" && c !== "")) {
+        throw new ConfigError([`${spec.name}: choices must be a non-empty list of strings on a str key`]);
+      }
+      if (new Set(choices).size !== choices.length) throw new ConfigError([`${spec.name}: choices must be distinct`]);
+      const def = spec.default;
+      if (def !== null && def !== "" && !choices.includes(def as string)) throw new ConfigError([`${spec.name}: the default is not one of the choices`]);
+      spec.choices = choices as string[];
+    }
     specs.push(spec);
   }
   return specs;
@@ -83,6 +95,7 @@ function defaultText(spec: KeySpec): string {
 function coerce(spec: KeySpec, text: string): ConfigValue {
   switch (spec.type) {
     case "str":
+      if (spec.choices !== undefined && !spec.choices.includes(text)) throw new Error(`must be one of ${spec.choices.join(", ")}`);
       return text;
     case "int": {
       if (!INT_TEXT.test(text)) throw new Error("expected an integer (digits only)");

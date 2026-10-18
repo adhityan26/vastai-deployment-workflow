@@ -7,6 +7,8 @@ export const STATE_POLL_IDLE_MS = 15_000; // no instance: nothing changes quickl
 export const STATE_POLL_HIDDEN_MS = 30_000; // tab in the background
 export const STATE_POLL_MAX_MS = 60_000; // ceiling when the API keeps failing
 export const JOB_POLL_MS = 2_000;
+export const JOB_POLL_FAST_MS = 1_000; // while a job runs and the server answers quickly (the step counter moves)
+const JOB_POLL_FAST_LATENCY_MS = 500;
 export const JOB_POLL_MAX_ERRORS = 5;
 export const CLOCK_TICK_MS = 1_000;
 export const DEFAULT_EXTEND_MINUTES = 30;
@@ -740,6 +742,52 @@ export function upscaleHint(u: UpscaleInfo): string {
 
 export function upscaleLabel(scale: string): string {
   return `Upscale: ${scale}`;
+}
+
+// ---- a running job: step counter and live preview ----
+
+export interface JobProgress { step: number; max: number }
+const STEP_MAX = 100_000;
+
+/** The step counter of a pending job, or null when the server sent none or nonsense. */
+export function parseJobProgress(v: unknown): JobProgress | null {
+  if (!isObj(v)) return null;
+  const step = v["step"];
+  const max = v["max"];
+  if (!Number.isInteger(step) || !Number.isInteger(max)) return null;
+  const s = step as number;
+  const m = max as number;
+  return m >= 1 && m <= STEP_MAX && s >= 0 && s <= m ? { step: s, max: m } : null;
+}
+
+/** How many previews the server has received for a job; 0 for anything unusable. */
+export function parsePreviewSeq(v: unknown): number {
+  return Number.isSafeInteger(v) && (v as number) > 0 ? (v as number) : 0;
+}
+
+export function stepText(p: JobProgress): string {
+  return `Step ${p.step} of ${p.max}`;
+}
+
+/** The live preview path of a job; null for an id that is not one. */
+export function previewPath(id: string): string | null {
+  return isJobId(id) ? `${API.generate}/${id}/preview` : null;
+}
+
+/** Only these come back from the preview route; anything else is not shown. */
+export function isPreviewType(type: string): boolean {
+  return type === "image/jpeg" || type === "image/png";
+}
+
+/** Poll a running job every second while the server answers fast, otherwise at the normal pace. */
+export function jobPollDelayMs(latencyMs: number): number {
+  return latencyMs >= 0 && latencyMs < JOB_POLL_FAST_LATENCY_MS ? JOB_POLL_FAST_MS : JOB_POLL_MS;
+}
+
+/** "Running for 12 s" from the milliseconds since the job was submitted. */
+export function elapsedText(ms: number): string {
+  const s = Math.floor(Math.max(0, ms) / 1000);
+  return `Running for ${s < SECONDS_PER_MINUTE * 2 ? `${s} s` : `${Math.floor(s / SECONDS_PER_MINUTE)} min ${s % SECONDS_PER_MINUTE} s`}`;
 }
 
 // ---- how long a job took ----

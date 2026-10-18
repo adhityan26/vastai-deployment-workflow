@@ -264,6 +264,13 @@ describe("Lifecycle.start", () => {
     expect((await registry.active())?.agent_token).toBe(TOKEN);
   });
 
+  it("passes the ComfyUI preview method to the instance when it is configured", async () => {
+    const { life, vast } = setup({ cfg: { comfyPreviewMethod: "taesd" } });
+    await life.start();
+    expect(vast.requests[0]!.env["COMFY_PREVIEW_METHOD"]).toBe("taesd");
+    expect(vast.requests[0]!.env["COMFYUI_ARGS"]).toBe("--disable-auto-launch --port 18188");
+  });
+
   it("two concurrent starts create one instance", async () => {
     const { life, vast, registry } = setup();
     const [a, b] = await Promise.allSettled([life.start(), life.start()]);

@@ -360,6 +360,37 @@ about 2 MP (1448x1448) at any scale. Each scale's `factor` must equal model_fact
 pixels). Every result also gets an "Upscale" button next to "Use as reference". UNVERIFIED on a real instance: the
 workflow `instance/workflows/image-upscale.json` has never run, and VRAM use of a large upscale is unknown.
 
+## Live progress and preview
+
+While a job runs, its result card shows "Step 12 of 25" with a progress bar (generate and edit; an upscale only shows
+how long it has been running) and a small "Live preview (rough)" image that changes as the sampler works. The final
+image replaces both. Every finished result also says how long it took ("Generated in 52 s"): ComfyUI's own execution
+time from its history, else the server's time from submit to done; saved gallery images keep it in their metadata.
+
+How it works: for each job the web process opens ComfyUI's websocket `/ws?clientId=<random id>` on the same tailnet
+host and port as every other ComfyUI call and submits the prompt with that `client_id`, so ComfyUI sends that job's
+`progress` messages and binary preview frames there. Only the newest step and the newest preview (JPEG or PNG by magic
+bytes, at most `WEB_PREVIEW_MAX_BYTES`) are kept in memory with the job; the page polls `GET /api/generate/:id` about
+once a second and fetches `GET /api/generate/:id/preview` only when `preview_seq` changed. The socket is closed when
+the job finishes or fails, when the job is forgotten, on Destroy, and after `GENERATE_TIMEOUT_S` at the latest. It is
+a small client written for this (no dependency): Node's built-in WebSocket buffers single frames of up to 2 GiB and
+negotiates compression, so it could not bound what a rented host sends. Frame sizes are checked from the header
+before anything is buffered; anything unexpected is ignored or closes that job's socket, never the job. Without a
+socket (or with `WEB_PROGRESS_ENABLED=false`) jobs work exactly as before.
+
+ComfyUI makes no previews by default. The instance boot writes the image's COMFYUI_ARGS variable with `--preview-method
+$COMFY_PREVIEW_METHOD` (default `latent2rgb`) into `/workspace/.env`, which the image's `comfyui.sh` reads after
+`/etc/environment`, right before it restarts ComfyUI (`boot comfy-args` in `instance/bootstrap.sh`). `latent2rgb`
+needs no extra model and gives rough colour previews; `none` turns previews off (the step counter still works).
+`taesd` gives much better previews but needs the Qwen-Image 2.1 TAESD decoder (`taeqi2_1_decoder`, per ComfyUI's
+`latent_formats.py`) in `models/vae_approx/`; its download source is not known yet, so it is not in the profile.
+Follow-up: find an official, licensed source for that file, pin it in `models:` with dest `models/vae_approx/`, then
+set `COMFY_PREVIEW_METHOD=taesd`.
+
+UNVERIFIED live: the websocket through the tailnet (userspace Tailscale forwards plain TCP, so it should work), how
+useful `latent2rgb` previews of Qwen-Image 2.1 look, and whether ComfyUI's step progress comes only from the sampler
+node of our workflows.
+
 ## Vast credit (admin)
 
 Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a

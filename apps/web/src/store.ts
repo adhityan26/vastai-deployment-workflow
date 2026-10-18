@@ -1,4 +1,4 @@
-import type { ResultImage } from "@vast-comfy/core";
+import type { PreviewFrame, ProgressSink, ResultImage } from "@vast-comfy/core";
 
 // Small in-memory state of the web process: a sliding-window rate limiter and the generate job
 // table. Both are deliberately process-local (one web container); a restart forgets them, which
@@ -41,6 +41,60 @@ export type JobState =
     }
   | { kind: "failed"; message: string };
 
+/** The part of a progress socket a job needs. */
+export interface LiveSocket {
+  setPromptId(id: string): void;
+  close(): void;
+}
+
+/**
+ * What the progress socket of a pending job saw: only the newest step and the newest preview (never a
+ * history of previews), plus when ComfyUI started the prompt. `end()` closes the socket and drops the
+ * preview; it is called when the job finishes, fails, is forgotten or its instance is destroyed.
+ */
+export class LiveProgress implements ProgressSink {
+  step: { step: number; max: number } | null = null;
+  frame: PreviewFrame | null = null;
+  /** Bumped on every new preview, so the page fetches the image only when it changed. */
+  previewSeq = 0;
+  /** Server time when ComfyUI reported execution_start, or null. */
+  startedAt: number | null = null;
+  socket: LiveSocket | null = null;
+  private ended = false;
+
+  constructor(private readonly now: () => number) {}
+
+  progress(step: number, max: number): void {
+    if (!this.ended) this.step = { step, max };
+  }
+
+  preview(frame: PreviewFrame): void {
+    if (this.ended) return;
+    this.frame = frame;
+    this.previewSeq += 1;
+  }
+
+  started(): void {
+    if (!this.ended && this.startedAt === null) this.startedAt = this.now();
+  }
+
+  finished(): void {
+    // The history poll decides when the job is done; the socket closes itself.
+  }
+
+  end(): void {
+    this.ended = true;
+    this.frame = null;
+    const socket = this.socket;
+    this.socket = null;
+    try {
+      socket?.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
 /** Which workflow a job ran: its SaveImage node is looked up in that template when polling. */
 export type JobKind = "generate" | "edit" | "upscale";
 
@@ -56,6 +110,8 @@ export interface Job {
   readonly prompt: string;
   readonly label: string;
   state: JobState;
+  /** The job's progress socket and what it saw; null when progress is off or the socket could not be opened. */
+  readonly live: LiveProgress | null;
 }
 
 /** Generate jobs by ComfyUI prompt id, bounded by count and age. */
@@ -68,23 +124,44 @@ export class JobStore {
     private readonly now: () => number,
   ) {}
 
-  private purge(): void {
-    const t = this.now();
-    for (const [id, job] of this.jobs) if (t - job.createdAt >= this.ttlMs) this.jobs.delete(id);
+  /** Forget a job; its progress socket (if any) is closed with it. */
+  private forget(id: string): void {
+    this.jobs.get(id)?.live?.end();
+    this.jobs.delete(id);
   }
 
-  add(job: Omit<Job, "createdAt" | "state" | "kind" | "prompt" | "label"> & { kind?: JobKind; prompt?: string; label?: string }): Job {
+  private purge(): void {
+    const t = this.now();
+    for (const [id, job] of this.jobs) if (t - job.createdAt >= this.ttlMs) this.forget(id);
+  }
+
+  add(
+    job: Omit<Job, "createdAt" | "state" | "kind" | "prompt" | "label" | "live"> & { kind?: JobKind; prompt?: string; label?: string; live?: LiveProgress | null },
+  ): Job {
     this.purge();
     // Map iteration is insertion order: forget the oldest jobs first.
     while (this.jobs.size >= this.max) {
       const oldest = this.jobs.keys().next().value;
       if (oldest === undefined) break;
-      this.jobs.delete(oldest);
+      this.forget(oldest);
     }
-    const stored: Job = { ...job, kind: job.kind ?? "generate", prompt: job.prompt ?? "", label: job.label ?? "", createdAt: this.now(), state: { kind: "pending" } };
-    this.jobs.delete(stored.id);
+    const stored: Job = {
+      ...job,
+      kind: job.kind ?? "generate",
+      prompt: job.prompt ?? "",
+      label: job.label ?? "",
+      live: job.live ?? null,
+      createdAt: this.now(),
+      state: { kind: "pending" },
+    };
+    this.forget(stored.id);
     this.jobs.set(stored.id, stored);
     return stored;
+  }
+
+  /** Close every progress socket (the instance is being destroyed); the jobs themselves stay readable. */
+  endAllLive(): void {
+    for (const job of this.jobs.values()) job.live?.end();
   }
 
   get(id: string): Job | null {

@@ -8,6 +8,7 @@ export * from "./gallery.js";
 export * from "./generate.js";
 export * from "./lifecycle.js";
 export * from "./profile.js";
+export * from "./progress.js";
 export * from "./references.js";
 export * from "./object-store.js";
 export * from "./registry.js";

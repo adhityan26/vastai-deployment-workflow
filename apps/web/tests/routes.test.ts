@@ -33,6 +33,7 @@ import { SESSION_COOKIE, TRANSACTION_COOKIE, cookieNames, type Sessions } from "
 import type { OidcIdentity } from "../src/oidc.js";
 import { buildServer, registeredRoutes } from "../src/server.js";
 import { CLIENT_ID, CLIENT_SECRET, startFakeIdp, type FakeIdp } from "./fake-idp.js";
+import { JPEG, PNG_IMG, acceptWebSockets, previewFrame, textFrame, until, type Peer, type WsOptions } from "../../core/tests/fake-ws.js";
 
 const repo = (p: string) => fileURLToPath(new URL(`../../../${p}`, import.meta.url));
 const REGISTRY_SCHEMA = repo("contracts/instance-registry.schema.json");
@@ -135,11 +136,13 @@ async function cookieOf(groups: string[], sub = "user-1"): Promise<Creds> {
 interface Seen { method: string; url: string; auth: string | undefined; body: string }
 type Handler = (s: Seen, res: ServerResponse) => void;
 const servers: Server[] = [];
+/** Upgraded sockets are not closed with their server: every harness's peers, destroyed after each test. */
+const wsPeerLists: Peer[][] = [];
 const apps: FastifyInstance[] = [];
 /** Per-harness temp directories, removed after each test (they used to pile up in the tmpdir). */
 const tempDirs: string[] = [];
 
-async function fakeServer(handler: () => Handler): Promise<{ port: number; seen: Seen[] }> {
+async function fakeServer(handler: () => Handler): Promise<{ port: number; seen: Seen[]; server: Server }> {
   const seen: Seen[] = [];
   const server = createServer((req: IncomingMessage, res) => {
     let raw = "";
@@ -152,7 +155,7 @@ async function fakeServer(handler: () => Handler): Promise<{ port: number; seen:
   });
   servers.push(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  return { port: (server.address() as AddressInfo).port, seen };
+  return { port: (server.address() as AddressInfo).port, seen, server };
 }
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -220,6 +223,8 @@ interface Harness {
   logs: string[];
   creditReads: { n: number };
   galleryStore: MemoryObjectStore;
+  /** Websocket peers of the fake ComfyUI (only progress-enabled harnesses open any). */
+  comfyWs: { peers: Peer[]; nextPeer(): Promise<Peer> };
 }
 
 let h: Harness;
@@ -237,6 +242,8 @@ async function harness(
     credit?: (() => Promise<number>) | null;
     /** null turns the gallery off; undefined gives an in-memory one with small limits. */
     gallery?: Gallery | null;
+    /** How the fake ComfyUI answers websocket upgrades. */
+    ws?: WsOptions;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -248,6 +255,8 @@ async function harness(
   let comfyHandler: Handler = (_s, res) => json(res, 500, {});
   const agent = await fakeServer(() => agentHandler);
   const comfy = await fakeServer(() => comfyHandler);
+  const comfyWs = acceptWebSockets(comfy.server, opts.ws);
+  wsPeerLists.push(comfyWs.peers);
   const dir = mkdtempSync(join(tmpdir(), "web-routes-"));
   tempDirs.push(dir);
   const publicDir = join(dir, "public");
@@ -374,7 +383,7 @@ async function harness(
   opts.extraRoutes?.(app);
   await app.ready();
   return {
-    app, vast, registry, lifecycle, dir, publicDir, clock, sessions, logs, creditReads, galleryStore,
+    app, vast, registry, lifecycle, dir, publicDir, clock, sessions, logs, creditReads, galleryStore, comfyWs,
     agentSeen: agent.seen,
     comfySeen: comfy.seen,
     setAgent: (fn) => (agentHandler = fn),
@@ -389,6 +398,7 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const list of wsPeerLists.splice(0)) for (const p of list) p.socket.destroy();
   for (const s of servers.splice(0)) {
     s.closeAllConnections?.();
     s.close();
@@ -811,7 +821,7 @@ describe("generate", () => {
     });
     const m = await member();
     await post("/api/generate", m, okGen);
-    expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "pending" });
+    expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "pending", progress: null, preview_seq: 0 });
     state = "error";
     const failed = await call("GET", "/api/generate/p-1", m);
     expect(failed.json()).toEqual({ status: "failed", message: expect.stringContaining("CUDA out of memory") });
@@ -2513,5 +2523,166 @@ describe("upscale", () => {
     expect((await post("/api/upscale", {}, ok)).statusCode).toBe(401);
     h = await harness({ profile: upscaleProfile(), ready: false });
     expect((await post("/api/upscale", await member(), ok)).statusCode).toBe(409);
+  });
+});
+
+describe("live progress and previews", () => {
+  const PROGRESS_CFG = { webProgressEnabled: true, webPreviewMaxBytes: 1024, webProgressMessageMaxBytes: 4096 };
+  const step = (value: number, max: number, promptId = "p-1", node = "8") => textFrame({ type: "progress", data: { value, max, prompt_id: promptId, node } });
+
+  /** A fake ComfyUI whose prompts finish when `done` holds their id; prompt ids are p-1, p-2, ... */
+  function comfyJobs(done: Set<string>) {
+    let n = 0;
+    const clientIds: string[] = [];
+    const handler: Handler = (s, res) => {
+      if (s.url === "/prompt") {
+        clientIds.push(JSON.parse(s.body).client_id);
+        return json(res, 200, { prompt_id: `p-${++n}` });
+      }
+      const id = /^\/history\/(.+)$/.exec(s.url)?.[1];
+      if (id !== undefined) {
+        if (!done.has(id)) return json(res, 200, {});
+        return json(res, 200, { [id]: { outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } } });
+      }
+      json(res, 404, {});
+    };
+    return { handler, clientIds };
+  }
+
+  async function pollUntil(id: string, who: Creds, check: (body: Record<string, unknown>) => boolean) {
+    let body: Record<string, unknown> = {};
+    const end = Date.now() + 3000;
+    for (;;) {
+      body = (await call("GET", `/api/generate/${id}`, who)).json();
+      if (check(body)) return body;
+      if (Date.now() > end) throw new Error(`job ${id} never reached the state: ${JSON.stringify(body)}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  it("shows the newest step and preview of a pending job, serves the preview to its owner only, and drops both when it is done", async () => {
+    h = await harness({ cfg: PROGRESS_CFG });
+    const done = new Set<string>();
+    const fake = comfyJobs(done);
+    h.setComfy(fake.handler);
+    const m = await member();
+    const peerP = h.comfyWs.nextPeer();
+    expect((await post("/api/generate", m, okGen)).statusCode).toBe(202);
+    const peer = await peerP;
+    // The socket's client id is the prompt's client_id, fresh and random, never anything from the browser.
+    expect(peer.clientId).toMatch(/^[0-9a-f]{32}$/);
+    expect(fake.clientIds).toEqual([peer.clientId]);
+    expect((await call("GET", "/api/generate/p-1/preview", m)).json().error.code).toBe("no_preview");
+
+    h.clock.ms += 2_000;
+    peer.send(textFrame({ type: "execution_start", data: { prompt_id: "p-1", timestamp: 1 } }));
+    peer.send(step(3, 10));
+    peer.send(step(4, 10, "p-1", "12")); // another node's progress (not the sampler) is not a step
+    peer.send(previewFrame(JPEG("first")));
+    peer.send(previewFrame(PNG_IMG("second"), 2));
+    const pending = await pollUntil("p-1", m, (b) => b["preview_seq"] === 2);
+    expect(pending).toEqual({ status: "pending", progress: { step: 3, max: 10 }, preview_seq: 2 });
+
+    const img = await call("GET", "/api/generate/p-1/preview", m);
+    expect(img.statusCode).toBe(200);
+    expect(img.headers["content-type"]).toBe("image/png");
+    expect(img.headers["cache-control"]).toBe("no-store");
+    expect(img.headers["x-content-type-options"]).toBe("nosniff");
+    expect(img.rawPayload.equals(PNG_IMG("second"))).toBe(true);
+    expect((await call("GET", "/api/generate/p-1/preview", await member("budi"))).statusCode).toBe(404);
+    expect((await call("GET", "/api/generate/p-1/preview", await admin())).statusCode).toBe(200);
+    expect((await call("GET", "/api/generate/nope/preview", m)).json().error.code).toBe("not_found");
+
+    done.add("p-1");
+    const finished = (await call("GET", "/api/generate/p-1", m)).json();
+    expect(finished).toMatchObject({ status: "done", queued_seconds: 2 });
+    expect(finished).not.toHaveProperty("progress");
+    await until(() => peer.frames().some((f) => f.op === 0x8)); // the socket was closed
+    expect((await call("GET", "/api/generate/p-1/preview", m)).json().error.code).toBe("no_preview");
+  });
+
+  it("a job whose prompt finishes while the socket is open closes it, and the next job's previews do not mix", async () => {
+    h = await harness({ cfg: PROGRESS_CFG });
+    const done = new Set<string>();
+    h.setComfy(comfyJobs(done).handler);
+    const m = await member();
+    const firstP = h.comfyWs.nextPeer();
+    await post("/api/generate", m, okGen);
+    const first = await firstP;
+    first.send(previewFrame(JPEG("one")));
+    await pollUntil("p-1", m, (b) => b["preview_seq"] === 1);
+    first.send(textFrame({ type: "execution_success", data: { prompt_id: "p-1" } }));
+    await until(() => first.frames().some((f) => f.op === 0x8));
+    done.add("p-1");
+    expect((await call("GET", "/api/generate/p-1", m)).json().status).toBe("done");
+
+    const secondP = h.comfyWs.nextPeer();
+    await post("/api/generate", m, okGen);
+    const second = await secondP;
+    expect(second.clientId).not.toBe(first.clientId);
+    first.send(previewFrame(JPEG("late-from-the-first"))); // a closed job's socket is not read any more
+    second.send(previewFrame(JPEG("two")));
+    await pollUntil("p-2", m, (b) => b["preview_seq"] === 1);
+    const img = await call("GET", "/api/generate/p-2/preview", m);
+    expect(img.rawPayload.equals(JPEG("two"))).toBe(true);
+    expect((await call("GET", "/api/generate/p-1/preview", m)).statusCode).toBe(404);
+  });
+
+  it("keeps working without previews: a socket that never connects, malformed and oversized frames", async () => {
+    h = await harness({ cfg: PROGRESS_CFG, ws: { onUpgrade: () => false } });
+    const done = new Set<string>();
+    h.setComfy(comfyJobs(done).handler);
+    const m = await member();
+    const t0 = Date.now();
+    expect((await post("/api/generate", m, okGen)).statusCode).toBe(202);
+    expect(Date.now() - t0).toBeLessThan(2_500); // the wait for the socket is bounded
+    expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "pending", progress: null, preview_seq: 0 });
+    done.add("p-1");
+    expect((await call("GET", "/api/generate/p-1", m)).json()).toMatchObject({ status: "done", queued_seconds: null });
+
+    h = await harness({ cfg: PROGRESS_CFG });
+    const done2 = new Set<string>();
+    h.setComfy(comfyJobs(done2).handler);
+    const m2 = await member();
+    const peerP = h.comfyWs.nextPeer();
+    await post("/api/generate", m2, okGen);
+    const peer = await peerP;
+    peer.send(textFrame("{broken"));
+    peer.send(previewFrame(Buffer.from("GIF89a....")));
+    peer.send(step(1, 5));
+    await pollUntil("p-1", m2, (b) => (b["progress"] as { step?: number } | null)?.step === 1);
+    peer.send(previewFrame(Buffer.concat([JPEG(), Buffer.alloc(2000)]))); // above WEB_PREVIEW_MAX_BYTES: the socket closes
+    await until(() => peer.frames().some((f) => f.op === 0x8));
+    expect((await call("GET", "/api/generate/p-1", m2)).json()).toEqual({ status: "pending", progress: { step: 1, max: 5 }, preview_seq: 0 });
+    done2.add("p-1");
+    expect((await call("GET", "/api/generate/p-1", m2)).json().status).toBe("done");
+  });
+
+  it("opens no socket when progress is off", async () => {
+    h = await harness({ cfg: { webProgressEnabled: false } });
+    h.setComfy(comfyJobs(new Set()).handler);
+    await post("/api/generate", await member(), okGen);
+    expect(JSON.parse(h.comfySeen.find((s) => s.url === "/prompt")!.body)).not.toHaveProperty("client_id");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.comfyWs.peers).toHaveLength(0);
+  });
+
+  it("destroying the instance closes the open sockets", async () => {
+    h = await harness({ cfg: PROGRESS_CFG });
+    h.setComfy(comfyJobs(new Set()).handler);
+    const peerP = h.comfyWs.nextPeer();
+    await post("/api/generate", await member(), okGen);
+    const peer = await peerP;
+    expect((await post("/api/destroy", await admin())).statusCode).toBe(200);
+    await until(() => peer.frames().some((f) => f.op === 0x8));
+  });
+
+  it("documents the preview route and the pending fields", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const op = doc.paths["/api/generate/{id}/preview"].get;
+    expect(Object.keys(op.responses["200"].content).sort()).toEqual(["image/jpeg", "image/png"]);
+    const pending = doc.components.schemas.Job.oneOf.find((o: { properties: { status: { const: string } } }) => o.properties.status.const === "pending");
+    expect(pending.required).toEqual(["status", "progress", "preview_seq"]);
+    expect(pending.additionalProperties).toBe(false);
   });
 });

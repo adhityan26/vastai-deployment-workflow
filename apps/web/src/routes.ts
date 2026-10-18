@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { randomBytes } from "node:crypto";
 import {
   AgentError,
   AlreadyActiveError,
@@ -34,6 +35,7 @@ import {
   type EditRequest,
   type GenerateDeps,
   type GenerateRequest,
+  type ProgressLimits,
   type ReferenceLimits,
   type Viewer,
   type StartFailReason,
@@ -42,7 +44,7 @@ import {
   type StatusView,
   type UsageItem,
 } from "@vast-comfy/core";
-import { CreditCache, JobStore, RateLimiter, type Job, type JobKind } from "./store.js";
+import { CreditCache, JobStore, LiveProgress, RateLimiter, type Job, type JobKind } from "./store.js";
 import { sendError } from "./reply.js";
 import type { ServerDeps } from "./server.js";
 
@@ -275,6 +277,10 @@ const GALLERY_QUERY = {
   properties: { cursor: { type: "string", pattern: GALLERY_ID }, scope: { type: "string", enum: ["mine", "all"] } },
 } as const;
 const JOB_PROMPT_KEPT = 500;
+// The progress socket gets this long to connect before a job is submitted anyway (so ComfyUI's
+// execution_start, and with it the queue time, is usually seen); it never fails a submit.
+const PROGRESS_OPEN_WAIT_MS = 1000;
+const CLIENT_ID_BYTES = 16;
 const JOB_LABEL_KEPT = 120;
 
 // Field values are validated by the generate service so its error codes reach the client.
@@ -329,6 +335,15 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     now,
   );
   const generateTimeoutMs = intCfg(cfg, "generateTimeoutS", "GENERATE_TIMEOUT_S") * 1000;
+  // Live progress and previews: one ComfyUI websocket per job, open at most as long as a job may run.
+  const progressLimits: ProgressLimits | null =
+    cfg["webProgressEnabled"] === true
+      ? {
+          lifetimeMs: generateTimeoutMs,
+          maxTextBytes: intCfg(cfg, "webProgressMessageMaxBytes", "WEB_PROGRESS_MESSAGE_MAX_BYTES"),
+          maxPreviewBytes: intCfg(cfg, "webPreviewMaxBytes", "WEB_PREVIEW_MAX_BYTES"),
+        }
+      : null;
   // Credit: only when a source is wired, so a deployment without one needs no VAST_CREDIT_CACHE_S.
   const creditCache =
     deps.credit === undefined
@@ -384,6 +399,35 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     template: editTemplate,
     cfg,
   });
+
+  /** The node whose progress is a sampler step, per kind of job (upscale has none: any progress counts). */
+  const samplerNode = (kind: JobKind): string | null =>
+    kind === "generate" ? deps.profile.generate.params.steps.node : kind === "edit" ? (deps.profile.edit?.params.steps.node ?? null) : null;
+
+  /**
+   * Open the progress socket of a job about to be submitted and wait briefly for it. Null when progress
+   * is off or the client cannot open one; never throws and never delays a submit by more than
+   * PROGRESS_OPEN_WAIT_MS.
+   */
+  const startLive = async (hostname: string, kind: JobKind): Promise<{ live: LiveProgress; clientId: string } | null> => {
+    if (progressLimits === null) return null;
+    const comfy = deps.comfyFor(hostname);
+    if (typeof comfy.progress !== "function") return null;
+    const clientId = randomBytes(CLIENT_ID_BYTES).toString("hex");
+    const live = new LiveProgress(now);
+    try {
+      const socket = comfy.progress(clientId, live, progressLimits, samplerNode(kind));
+      live.socket = socket;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waited = new Promise<void>((resolve) => (timer = setTimeout(resolve, PROGRESS_OPEN_WAIT_MS)));
+      await Promise.race([socket.ready, waited]);
+      clearTimeout(timer);
+    } catch {
+      live.end();
+      return null;
+    }
+    return { live, clientId };
+  };
 
   /** ", <style title>" for the label of a job that ran with a style (it was validated before submit). */
   const styleSuffix = (style: unknown): string => {
@@ -558,6 +602,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     log("info", `destroy requested by ${userLabel(req.identity?.username) ?? "?"}`);
     try {
       const result = await deps.lifecycle.destroy(req.identity?.username ?? null);
+      jobs.endAllLive(); // the instance is going away: no progress socket stays open to it
       return { outcome: result.outcome, agent_reached: result.agent_error === null };
     } catch (err) {
       log("warn", `destroy failed: ${(err as Error).name}`);
@@ -667,17 +712,24 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
     }
     let promptId: string;
+    const started = await startLive(hostname, "generate");
     try {
-      ({ promptId } = await generate(generateDeps(hostname), req.body as GenerateRequest));
+      ({ promptId } = await generate({ ...generateDeps(hostname), ...(started ? { clientId: started.clientId } : {}) }, req.body as GenerateRequest));
     } catch (err) {
+      started?.live.end();
       return submitFailure(reply, err, "generate");
     }
-    if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+    if (!PROMPT_ID.test(promptId)) {
+      started?.live.end();
+      return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+    }
+    started?.live.socket?.setPromptId(promptId);
     const asked = req.body as GenerateRequest;
     jobs.add({
       id: promptId,
       owner: identity.subject,
       hostname,
+      live: started?.live ?? null,
       prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
       label: `${asked.preset}, ${asked.size}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
     });
@@ -700,18 +752,25 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
       let promptId: string;
+      const started = await startLive(hostname, "edit");
       try {
-        ({ promptId } = await runEdit(editDeps(hostname), req.body as EditRequest));
+        ({ promptId } = await runEdit({ ...editDeps(hostname), ...(started ? { clientId: started.clientId } : {}) }, req.body as EditRequest));
       } catch (err) {
+        started?.live.end();
         return submitFailure(reply, err, "edit");
       }
-      if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      if (!PROMPT_ID.test(promptId)) {
+        started?.live.end();
+        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      }
+      started?.live.socket?.setPromptId(promptId);
       const asked = req.body as EditRequest;
       const refs = Array.isArray(asked.images) ? asked.images.length : 0;
       jobs.add({
         id: promptId,
         owner: identity.subject,
         hostname,
+        live: started?.live ?? null,
         kind: "edit",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
         label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
@@ -735,13 +794,19 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
       let submitted: Awaited<ReturnType<typeof runUpscale>>;
+      const started = await startLive(hostname, "upscale");
       try {
-        submitted = await runUpscale(upscaleDeps(hostname, upscalePixels), req.body as UpscaleRequest);
+        submitted = await runUpscale({ ...upscaleDeps(hostname, upscalePixels), ...(started ? { clientId: started.clientId } : {}) }, req.body as UpscaleRequest);
       } catch (err) {
+        started?.live.end();
         return submitFailure(reply, err, "upscale");
       }
       const { promptId, width, height } = submitted;
-      if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      if (!PROMPT_ID.test(promptId)) {
+        started?.live.end();
+        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      }
+      started?.live.socket?.setPromptId(promptId);
       // An upscale has no prompt; the label says what was done, so a saved image can say so too.
       const scale = String((req.body as UpscaleRequest).scale);
       const factor = upscaleSpec?.scales.find((sc) => sc.name === scale)?.factor ?? 1;
@@ -749,6 +814,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         id: promptId,
         owner: identity.subject,
         hostname,
+        live: started?.live ?? null,
         kind: "upscale",
         prompt: "",
         label: `Upscale: ${scale}, ${width}x${height} to ${Math.round(width * factor)}x${Math.round(height * factor)}`.slice(0, JOB_LABEL_KEPT),
@@ -772,7 +838,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           if (result !== null) {
             // ComfyUI's own execution time; without it, the time this server saw from submit to done.
             const seconds = result.executionSeconds ?? tenthsOfSeconds(Math.max(0, now() - job.createdAt));
-            job.state = { kind: "done", images: result.images, seconds, queuedSeconds: null };
+            const startedAt = job.live?.startedAt ?? null;
+            const queuedSeconds = startedAt === null ? null : tenthsOfSeconds(Math.max(0, startedAt - job.createdAt));
+            job.state = { kind: "done", images: result.images, seconds, queuedSeconds };
             log("info", `job done: kind=${job.kind} seconds=${seconds}`);
           }
         } catch (err) {
@@ -792,6 +860,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
     }
     const state = job.state;
+    // A finished or failed job needs no socket and no preview any more.
+    if (state.kind !== "pending") job.live?.end();
     if (state.kind === "done") {
       return {
         status: "done",
@@ -801,7 +871,24 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       };
     }
     if (state.kind === "failed") return { status: "failed", message: state.message };
-    return { status: "pending" };
+    const live = job.live;
+    return { status: "pending", progress: live?.step ?? null, preview_seq: live?.previewSeq ?? 0 };
+  });
+
+  // The newest live preview of a pending job (owner or admin, like the job). The type is the one its
+  // magic bytes say (only JPEG or PNG are ever kept); 404 when there is none (yet, or any more).
+  app.get("/api/generate/:id/preview", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = ownJob(req, id);
+    if (job === null) return sendError(reply, 404, "not_found", "no such job");
+    const frame = job.state.kind === "pending" ? (job.live?.frame ?? null) : null;
+    if (frame === null) return sendError(reply, 404, "no_preview", "there is no preview for this job");
+    return reply
+      .code(200)
+      .header("cache-control", "no-store")
+      .header("content-disposition", `inline; filename="preview.${frame.contentType === "image/png" ? "png" : "jpg"}"`)
+      .type(frame.contentType)
+      .send(frame.bytes);
   });
 
   type JobImage = { job: Job; bytes: Buffer; type: string; ext: string };

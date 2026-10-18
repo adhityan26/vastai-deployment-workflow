@@ -41,6 +41,24 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...base, VAST_START_STUCK_MIN: "24", BOOT_TIMEOUT_MIN: "25" }, schema)["vastStartStuckMin"]).toBe(24);
   });
 
+  it("the preview method defaults to latent2rgb and only takes its listed choices", () => {
+    expect(loadConfig(base, schema)["comfyPreviewMethod"]).toBe("latent2rgb");
+    for (const ok of ["none", "latent2rgb", "taesd", "auto"]) expect(loadConfig({ ...base, COMFY_PREVIEW_METHOD: ok }, schema)["comfyPreviewMethod"]).toBe(ok);
+    expect(() => loadConfig({ ...base, COMFY_PREVIEW_METHOD: "fast" }, schema)).toThrow(/COMFY_PREVIEW_METHOD: must be one of none, latent2rgb, taesd, auto/);
+    expect(loadConfig(base, schema)["webProgressEnabled"]).toBe(true);
+    expect(loadConfig(base, schema)["webPreviewMaxBytes"]).toBe(524288);
+    expect(loadConfig(base, schema)["webProgressMessageMaxBytes"]).toBe(65536);
+  });
+
+  it("refuses choices on a non-str key, empty or repeated choices and a default outside them", () => {
+    const line = (rest: string) => `  - {name: X_KEY, components: [apps], secret: false, required: false, description: d, ${rest}}`;
+    expect(() => loadConfig({}, customSchema(line("type: int, default: 1, choices: [a]")))).toThrow(/choices must be a non-empty list of strings on a str key/);
+    expect(() => loadConfig({}, customSchema(line("type: str, default: a, choices: []")))).toThrow(/non-empty list/);
+    expect(() => loadConfig({}, customSchema(line("type: str, default: a, choices: [a, a]")))).toThrow(/distinct/);
+    expect(() => loadConfig({}, customSchema(line("type: str, default: z, choices: [a]")))).toThrow(/default is not one of the choices/);
+    expect(loadConfig({ X_KEY: "b" }, customSchema(line("type: str, default: a, choices: [a, b]")))["xKey"]).toBe("b");
+  });
+
   it("rejects a failsafe longer than the hard cap", () => {
     expect(() => loadConfig({ ...base, START_FAILSAFE_HOURS: "7", START_HARD_CAP_HOURS: "6" }, schema)).toThrow(
       /START_FAILSAFE_HOURS: must not be greater than START_HARD_CAP_HOURS/,

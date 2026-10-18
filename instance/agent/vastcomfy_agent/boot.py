@@ -22,6 +22,7 @@ from .profile import (
     free_bytes_of, install_nodes, load_profile, missing_models,
 )
 from .state import InvalidTransition, State, StateStore
+from .comfy_args import image_env_file, render_args, write_image_env
 from .supervisor_conf import render as render_supervisor_programs
 from .wiring import build
 
@@ -170,6 +171,19 @@ def cmd_copy_workflows(b: Boot) -> int:
     return EXIT_OK
 
 
+def cmd_comfy_args(b: Boot) -> int:
+    """Before the ComfyUI restart: write its arguments (with COMFY_PREVIEW_METHOD) where the image's start script
+    reads them. A failure here means ComfyUI could not be started as configured."""
+    try:
+        args = render_args(b.cfg)
+        write_image_env(image_env_file(b.cfg), args)
+    except (ConfigError, OSError) as exc:
+        print(f"boot: ComfyUI arguments could not be written: {exc}", file=sys.stderr)
+        return b.fail("comfyui_start_failed")
+    print(f"boot: ComfyUI arguments: {args}", file=sys.stderr)
+    return EXIT_OK
+
+
 def cmd_wait(b: Boot, target: str) -> int:
     if target == "comfy":
         timeout, reason = b.cfg.comfy_start_timeout_s, "comfyui_start_failed"
@@ -282,7 +296,7 @@ def main(
     parser = argparse.ArgumentParser(prog="vastcomfy_agent.boot")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("write-env")
-    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "verify-nodes", "mark-ready", "env-export", "render-supervisor-conf"):
+    for name in ("begin", "init-times", "install-nodes", "install-models", "copy-workflows", "comfy-args", "verify-nodes", "mark-ready", "env-export", "render-supervisor-conf"):
         sub.add_parser(name).add_argument("--env-file", type=Path, required=True)
     p = sub.add_parser("fail")
     p.add_argument("reason")
@@ -353,6 +367,8 @@ def run_boot_command(b: Boot, args) -> int:
         return cmd_install_models(b)
     if args.command == "copy-workflows":
         return cmd_copy_workflows(b)
+    if args.command == "comfy-args":
+        return cmd_comfy_args(b)
     if args.command == "wait":
         return cmd_wait(b, args.target)
     if args.command == "render-supervisor-conf":
