@@ -264,20 +264,7 @@ export class Gallery {
       }
       more = picked.length > this.limits.pageSize;
     } else {
-      const all: ParsedId[] = [];
-      let after: string | undefined;
-      scan: for (;;) {
-        const page = await this.store.list(`${KEY_ROOT}/`, { maxKeys: Math.min(LIST_PAGE, this.limits.adminScanMax - all.length), ...(after ? { startAfter: after } : {}) });
-        for (const e of page.entries) {
-          const p = idOfKey(e.key);
-          if (p !== null) all.push(p);
-        }
-        if (!page.truncated || page.entries.length === 0 || all.length >= this.limits.adminScanMax) break scan;
-        after = page.entries[page.entries.length - 1]!.key;
-      }
-      all.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
-      const rest = cursor === null ? all : all.filter((p) => p.sortKey > cursor.sortKey);
-      picked.push(...rest.slice(0, this.limits.pageSize + 1));
+      picked.push(...(await this.newestOfEveryone(cursor)));
       more = picked.length > this.limits.pageSize;
     }
     const page = picked.slice(0, this.limits.pageSize);
@@ -302,6 +289,45 @@ export class Gallery {
     );
     const last = page[page.length - 1];
     return { items: items.filter((i): i is GalleryItem => i !== null), next: more && last ? idOf(last) : null };
+  }
+
+  /**
+   * The next page+1 images after `cursor` across every member, newest first: the member folders are
+   * listed, each folder gives its own first page+1 keys after the cursor (one folder is already newest
+   * first), and those are merged. A page reads about GALLERY_ADMIN_SCAN_MAX keys at most (folders
+   * included): each folder costs page+2, so floor(scan / (page + 2)) folders are merged and members
+   * past them (in folder order, a hash) are left out of the view.
+   */
+  private async newestOfEveryone(cursor: ParsedId | null): Promise<ParsedId[]> {
+    const want = this.limits.pageSize + 1;
+    const maxFolders = Math.max(1, Math.floor(this.limits.adminScanMax / (want + 1)));
+    const folders: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.store.listPrefixes(`${KEY_ROOT}/`, { maxKeys: Math.min(LIST_PAGE, maxFolders - folders.length), ...(after ? { startAfter: after } : {}) });
+      folders.push(...page.prefixes.filter((f) => /^u\/[0-9a-f]{32}\/$/.test(f)));
+      if (!page.truncated || page.prefixes.length === 0 || folders.length >= maxFolders) break;
+      // Every key in a folder starts with a digit, which sorts before "~": this skips the whole folder.
+      after = `${page.prefixes[page.prefixes.length - 1]!}~`;
+    }
+    const perFolder = await Promise.all(
+      folders.slice(0, maxFolders).map(async (folder) => {
+        const got: ParsedId[] = [];
+        // From the cursor's time on (same-millisecond keys are filtered by the full sort key).
+        let start: string | undefined = cursor === null ? undefined : `${folder}${cursor.rts}`;
+        for (let round = 0; round < 2 && got.length < want; round++) {
+          const page = await this.store.list(folder, { maxKeys: want, ...(start ? { startAfter: start } : {}) });
+          for (const e of page.entries) {
+            const p = idOfKey(e.key);
+            if (p !== null && (cursor === null || p.sortKey > cursor.sortKey)) got.push(p);
+          }
+          if (!page.truncated || page.entries.length === 0) break;
+          start = page.entries[page.entries.length - 1]!.key;
+        }
+        return got.slice(0, want);
+      }),
+    );
+    return perFolder.flat().sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0)).slice(0, want);
   }
 
   /** The stored image. Someone else's image looks exactly like a missing one. */

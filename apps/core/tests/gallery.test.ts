@@ -107,7 +107,7 @@ describe("save", () => {
   });
 
   it("a store failure surfaces as ObjectStoreError, not as a quota or validation error", async () => {
-    const broken: ObjectStore = { ...new MemoryObjectStore(), head: async () => null, list: async () => { throw new ObjectStoreError("object store list failed"); }, put: async () => undefined, get: async () => null, delete: async () => undefined };
+    const broken: ObjectStore = { ...new MemoryObjectStore(), head: async () => null, list: async () => { throw new ObjectStoreError("object store list failed"); }, put: async () => undefined, get: async () => null, delete: async () => undefined, listPrefixes: async () => ({ prefixes: [], truncated: false }) };
     await expect(new Gallery(broken, limits).save(input())).rejects.toBeInstanceOf(ObjectStoreError);
   });
 });
@@ -161,10 +161,36 @@ describe("list", () => {
     await expect(gallery.list(AYU, { scope: "mine", cursor: "nonsense" })).rejects.toMatchObject({ code: "invalid_id" });
   });
 
-  it("the admin scan reads at most GALLERY_ADMIN_SCAN_MAX keys", async () => {
-    const { gallery } = make({ maxImages: 50, adminScanMax: 3, pageSize: 10 });
-    for (let i = 0; i < 5; i++) await gallery.save(input({ jobId: `j${i}`, createdMs: T0 + i }));
-    expect((await gallery.list(ROOT, { scope: "all" })).items).toHaveLength(3);
+  it("the everyone view is newest first across all members even when one member has far more images than the scan bound", async () => {
+    const { gallery } = make({ maxImages: 50, maxBytes: 1_000_000, adminScanMax: 8, pageSize: 2 });
+    // The member whose folder sorts first owns many old images; the other one the two newest.
+    const [first, second] = [AYU.subject, BUDI.subject].sort((a, b) => (gallery.ownerKey(a) < gallery.ownerKey(b) ? -1 : 1));
+    for (let i = 0; i < 10; i++) await gallery.save(input({ owner: first!, ownerName: "many", jobId: `m${i}`, createdMs: T0 + i }));
+    for (let i = 0; i < 2; i++) await gallery.save(input({ owner: second!, ownerName: "new", jobId: `n${i}`, createdMs: T0 + 100 + i }));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await gallery.list(ROOT, { scope: "all", ...(cursor ? { cursor } : {}) });
+      seen.push(...page.items.map((i) => `${i.ownerName}:${i.createdMs - T0}`));
+      cursor = page.next ?? undefined;
+    } while (cursor);
+    expect(seen).toEqual(["new:101", "new:100", ...Array.from({ length: 10 }, (_, i) => `many:${9 - i}`)]);
+  });
+
+  it("one page of the everyone view reads at most GALLERY_ADMIN_SCAN_MAX keys (folders included)", async () => {
+    const mem = new MemoryObjectStore();
+    let read = 0;
+    const counting: ObjectStore = {
+      put: (...a) => mem.put(...a), head: (k) => mem.head(k), get: (k, m) => mem.get(k, m), delete: (k) => mem.delete(k),
+      list: async (p, o) => { const r = await mem.list(p, o); read += r.entries.length; return r; },
+      listPrefixes: async (p, o) => { const r = await mem.listPrefixes(p, o); read += r.prefixes.length; return r; },
+    };
+    const gallery = new Gallery(counting, { ...limits, maxImages: 50, maxBytes: 1_000_000, adminScanMax: 12, pageSize: 2 });
+    for (let o = 0; o < 6; o++) for (let i = 0; i < 4; i++) await gallery.save(input({ owner: `owner-${o}`, jobId: `j${o}-${i}`, createdMs: T0 + o * 10 + i }));
+    read = 0;
+    const page = await gallery.list(ROOT, { scope: "all" });
+    expect(read).toBeLessThanOrEqual(12);
+    expect(page.items).toHaveLength(2);
   });
 
   it("skips an object that vanished between the listing and its metadata read", async () => {
@@ -174,6 +200,7 @@ describe("list", () => {
       get: (...a) => mem.get(...a),
       delete: (k) => mem.delete(k),
       list: (...a) => mem.list(...a),
+      listPrefixes: (...a) => mem.listPrefixes(...a),
       head: async (k) => (k.endsWith("-gone-0") ? null : mem.head(k)),
     };
     const gallery = new Gallery(flaky, { ...limits, maxImages: 50 });

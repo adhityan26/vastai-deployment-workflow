@@ -327,8 +327,10 @@ checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2
 
 - **Limits per member** (the server refuses a Save above them with `gallery_quota`):
   `GALLERY_MAX_IMAGES_PER_USER` (300) and `GALLERY_MAX_BYTES_PER_USER` (2 GiB). The same job image saved
-  twice is one object. `GALLERY_PAGE_SIZE` images per page; an admin's "everyone" view reads at most
-  `GALLERY_ADMIN_SCAN_MAX` keys.
+  twice is one object. `GALLERY_PAGE_SIZE` images per page. An admin's "everyone" view merges the members' folders newest
+  first and reads at most `GALLERY_ADMIN_SCAN_MAX` keys per page: each member costs `GALLERY_PAGE_SIZE` + 2,
+  so with the defaults (5000, 12) up to 357 members are shown completely; members beyond that bound (in
+  folder order, a hash of the login) are left out of the view, never the oldest images of one member.
 - **What is stored:** the image with its own content type, plus prompt, settings label, owner name and kind
   as (URL-encoded, trimmed) object metadata. There is no database; deleting in the page deletes the object.
 - **Abuse limits:** `GALLERY_SAVE_RATE_LIMIT_PER_HOUR` (120) saves per member per hour (`rate_limited`).

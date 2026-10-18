@@ -42,6 +42,11 @@ export interface ObjectStore {
   delete(key: string): Promise<void>;
   /** Keys under `prefix` in key order, after `startAfter` when given; at most `maxKeys`. */
   list(prefix: string, opts: { maxKeys: number; startAfter?: string }): Promise<{ entries: ObjectEntry[]; truncated: boolean }>;
+  /**
+   * The "folders" directly under `prefix` (each `prefix` + segment + "/"), in key order, for keys after
+   * `startAfter`; at most `maxKeys` folders (S3 ListObjectsV2 with Delimiter "/").
+   */
+  listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }): Promise<{ prefixes: string[]; truncated: boolean }>;
 }
 
 /** In-memory ObjectStore with the same behaviour as the S3 one; for tests. */
@@ -73,6 +78,19 @@ export class MemoryObjectStore implements ObjectStore {
     const keys = [...this.objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
     const page = keys.slice(0, opts.maxKeys);
     return { entries: page.map((key) => ({ key, size: this.objects.get(key)!.bytes.length })), truncated: keys.length > page.length };
+  }
+
+  async listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }) {
+    const after = opts.startAfter ?? "";
+    const folders: string[] = [];
+    for (const k of [...this.objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort()) {
+      const slash = k.indexOf("/", prefix.length);
+      if (slash === -1) continue;
+      const folder = k.slice(0, slash + 1);
+      if (folders[folders.length - 1] !== folder) folders.push(folder);
+    }
+    const page = folders.slice(0, opts.maxKeys);
+    return { prefixes: page, truncated: folders.length > page.length };
   }
 
   /** Test helper: every stored key. */
@@ -231,6 +249,23 @@ export class S3ObjectStore implements ObjectStore {
       );
       const entries = (r.Contents ?? []).flatMap((o) => (typeof o.Key === "string" ? [{ key: o.Key, size: o.Size ?? 0 }] : []));
       return { entries, truncated: r.IsTruncated === true };
+    } catch {
+      return this.fail("list");
+    }
+  }
+
+  async listPrefixes(prefix: string, opts: { maxKeys: number; startAfter?: string }) {
+    try {
+      const r = await this.send((o) =>
+        this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket, Prefix: prefix, Delimiter: "/", MaxKeys: opts.maxKeys, ...(opts.startAfter ? { StartAfter: opts.startAfter } : {}),
+          }),
+          o,
+        ),
+      );
+      const prefixes = (r.CommonPrefixes ?? []).flatMap((p) => (typeof p.Prefix === "string" ? [p.Prefix] : []));
+      return { prefixes, truncated: r.IsTruncated === true };
     } catch {
       return this.fail("list");
     }

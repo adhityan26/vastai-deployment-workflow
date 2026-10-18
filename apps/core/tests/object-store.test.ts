@@ -44,6 +44,21 @@ async function fakeS3(opts: { failWith?: number; hangMs?: number; chunked?: { si
           const after = url.searchParams.get("start-after") ?? "";
           const max = Number(url.searchParams.get("max-keys") ?? "1000");
           const keys = [...objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
+          if (url.searchParams.get("delimiter") === "/") {
+            const folders: string[] = [];
+            for (const k of keys) {
+              const slash = k.indexOf("/", prefix.length);
+              if (slash !== -1 && folders[folders.length - 1] !== k.slice(0, slash + 1)) folders.push(k.slice(0, slash + 1));
+            }
+            const shown = folders.slice(0, max);
+            const xml =
+              `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${BUCKET}</Name><Prefix>${prefix}</Prefix><Delimiter>/</Delimiter>` +
+              `<KeyCount>${shown.length}</KeyCount><MaxKeys>${max}</MaxKeys><IsTruncated>${folders.length > shown.length}</IsTruncated>` +
+              shown.map((f) => `<CommonPrefixes><Prefix>${f}</Prefix></CommonPrefixes>`).join("") +
+              "</ListBucketResult>";
+            res.writeHead(200, { "Content-Type": "application/xml" });
+            return res.end(xml);
+          }
           const page = keys.slice(0, max);
           const body =
             `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${BUCKET}</Name><Prefix>${prefix}</Prefix>` +
@@ -156,6 +171,14 @@ describe.each(implementations)("%s", (_name, make) => {
     expect(second.truncated).toBe(false);
     expect((await store.list("u/", { maxKeys: 10 })).entries).toHaveLength(4);
     expect((await store.list("x/", { maxKeys: 10 })).entries).toEqual([]);
+  });
+
+  it("lists the folders under a prefix in order, after startAfter, a page at a time", async () => {
+    const store = await make();
+    for (const k of ["u/b/1", "u/a/1", "u/a/2", "u/c/9", "x/z/1", "u/loose"]) await store.put(k, PNG, "image/png", {});
+    expect(await store.listPrefixes("u/", { maxKeys: 10 })).toEqual({ prefixes: ["u/a/", "u/b/", "u/c/"], truncated: false });
+    expect(await store.listPrefixes("u/", { maxKeys: 2 })).toEqual({ prefixes: ["u/a/", "u/b/"], truncated: true });
+    expect(await store.listPrefixes("u/", { maxKeys: 10, startAfter: "u/a/~" })).toEqual({ prefixes: ["u/b/", "u/c/"], truncated: false });
   });
 
   it("keeps keys with unusual but legal characters intact", async () => {
