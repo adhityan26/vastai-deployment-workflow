@@ -199,7 +199,8 @@
           "unknown",
           "role",
           "presets",
-          "sizes"
+          "sizes",
+          "edit"
         ],
         "properties": {
           "state": {
@@ -482,6 +483,61 @@
                 },
                 "height": {
                   "type": "integer"
+                }
+              }
+            }
+          },
+          "edit": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Edit with reference images; null when it is off on this server",
+            "required": [
+              "max_references",
+              "max_bytes",
+              "max_pixels",
+              "types",
+              "resolutions"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "max_references": {
+                "type": "integer"
+              },
+              "max_bytes": {
+                "type": "integer"
+              },
+              "max_pixels": {
+                "type": "integer"
+              },
+              "types": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "png",
+                    "jpeg",
+                    "webp"
+                  ]
+                }
+              },
+              "resolutions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "integer"
+                    }
+                  }
                 }
               }
             }
@@ -1717,6 +1773,184 @@
           },
           "502": {
             "description": "ComfyUI unavailable or oversized response (codes comfy_unavailable, upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/edit": {
+      "post": {
+        "operationId": "edit",
+        "summary": "Edit or combine reference images with an instruction (member or admin; shares the generate rate limit). The references are base64 inside the JSON body; they are validated by magic bytes, size and pixel count, uploaded to the instance under server-chosen names and are not stored by the web service. Poll the returned id with GET /api/generate/{id}.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "prompt",
+                  "preset",
+                  "resolution",
+                  "images"
+                ],
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "At most GENERATE_MAX_PROMPT_CHARS; may mention <image1>, <image2>, ..."
+                  },
+                  "preset": {
+                    "type": "string",
+                    "description": "A preset name from /api/state"
+                  },
+                  "resolution": {
+                    "type": "string",
+                    "description": "A resolution name from edit.resolutions in /api/state"
+                  },
+                  "seed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "images": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Base64 (no data: prefix) PNG, JPEG or WebP images, in order: the first is <image1>. At most edit.max_references items, each at most edit.max_bytes decoded and edit.max_pixels pixels.",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_type_not_allowed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than the edit body limit derived from EDIT_MAX_REFERENCES and EDIT_REFERENCE_MAX_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The instance is not ready (code not_ready)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Generate rate limit reached (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Profile and workflow disagree (code profile_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ComfyUI unavailable (also while uploading a reference) or oversized response (codes comfy_unavailable, upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Edit is not available on this server (code edit_unavailable)",
             "content": {
               "application/json": {
                 "schema": {

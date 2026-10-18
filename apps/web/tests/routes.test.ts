@@ -34,6 +34,7 @@ const STATUS_SCHEMA = repo("contracts/status.schema.json");
 const OPENAPI = repo("contracts/web.openapi.json");
 const profile = loadProfile(repo("instance/profiles/image.yaml"));
 const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.generate.workflow}`), "utf8"));
+const editTemplate = JSON.parse(readFileSync(repo(`instance/workflows/${profile.edit!.workflow}`), "utf8"));
 
 const PUBLIC_ORIGIN = "https://comfy.example.test"; // config-lint: ok (test fixture)
 const SESSION_SECRET = "test-session-secret-0123456789abcdef";
@@ -213,6 +214,9 @@ async function harness(
     cfg?: Record<string, unknown>;
     extraRoutes?: (app: FastifyInstance) => void;
     authKey?: () => Promise<string>;
+    profile?: typeof profile;
+    /** undefined keeps the shipped edit workflow; null turns edit off. */
+    editTemplate?: unknown;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -276,6 +280,10 @@ async function harness(
     webJobTtlS: 3600,
     webExtendMaxMinutes: 120,
     webGenerateRateLimitPerHour: 50,
+    editMaxReferences: 3,
+    editReferenceMaxBytes: 4096,
+    editReferenceMaxPixels: 1_000_000,
+    editReferenceTypes: ["png", "jpeg", "webp"],
     secretNames: ["VAST_API_KEY", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...opts.cfg,
   } as unknown as AppsConfig;
@@ -310,8 +318,9 @@ async function harness(
     lifecycle,
     registry,
     comfyFor: () => new ComfyClient("127.0.0.1", cfg),
-    profile,
+    profile: opts.profile ?? profile,
     template,
+    editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     publicDir,
     secrets: () => [VAST_KEY, AUTH_KEY, CLIENT_SECRET, SESSION_SECRET],
     now: () => clock.ms,
@@ -823,6 +832,221 @@ describe("generate", () => {
 
 const location = (res: Res) => String(res.headers.location ?? "");
 const loginError = (res: Res) => new URL(location(res), PUBLIC_ORIGIN).searchParams.get("login_error");
+
+// ---- edit with reference images ----
+
+function pngOf(width: number, height: number, marker = "REF"): Buffer {
+  const ihdr = Buffer.alloc(25);
+  ihdr.writeUInt32BE(13, 0);
+  ihdr.write("IHDR", 4, "latin1");
+  ihdr.writeUInt32BE(width, 8);
+  ihdr.writeUInt32BE(height, 12);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, Buffer.from(marker)]);
+}
+const REF_A = pngOf(64, 64, "REF-A-UNIQUE-MARKER");
+const REF_B = pngOf(32, 48, "REF-B-UNIQUE-MARKER");
+const okEdit = { prompt: "make it real", preset: "preview", resolution: "1024", images: [REF_A.toString("base64")] };
+
+/** A ComfyUI that stores uploads as sent and accepts prompts; the edit workflow saves through node 9. */
+function comfyEdit(images: unknown[] | null = null): Handler {
+  return (s, res) => {
+    if (s.url === "/upload/image") {
+      const name = /filename="([^"]+)"/.exec(s.body)![1]!;
+      return json(res, 200, { name, subfolder: "", type: "input" });
+    }
+    if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-edit" });
+    if (s.url.startsWith("/history/")) {
+      if (images === null) return json(res, 200, {});
+      return json(res, 200, { "p-edit": { outputs: { "9": { images } }, status: { completed: true, status_str: "success" } } });
+    }
+    if (s.url.startsWith("/view")) {
+      res.writeHead(200, { "Content-Type": "image/png" });
+      return res.end(PNG);
+    }
+    json(res, 404, {});
+  };
+}
+
+describe("edit with reference images", () => {
+  it("is described in /api/state for every member, including the limits and resolutions", async () => {
+    for (const who of [await member(), await admin()]) {
+      const body = (await call("GET", "/api/state", who)).json();
+      expect(body.edit).toEqual({
+        max_references: 3,
+        max_bytes: 4096,
+        max_pixels: 1_000_000,
+        types: ["png", "jpeg", "webp"],
+        resolutions: [{ name: "1024", value: 1024 }],
+      });
+    }
+  });
+
+  it("uploads the references, submits the filled edit workflow, and polls with the edit template", async () => {
+    h.setComfy(comfyEdit([{ filename: "edit_00001_.png", subfolder: "", type: "output" }]));
+    const m = await member();
+    const res = await post("/api/edit", m, { ...okEdit, seed: 12, images: [REF_A.toString("base64"), REF_B.toString("base64")] });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ id: "p-edit" });
+    expect(h.comfySeen.map((s) => s.url)).toEqual(["/upload/image", "/upload/image", "/prompt"]);
+    const names = h.comfySeen.slice(0, 2).map((s) => /filename="([^"]+)"/.exec(s.body)![1]!);
+    for (const n of names) expect(n).toMatch(/^edit-[0-9a-f]{16}\.png$/);
+    expect(names[0]).not.toBe(names[1]);
+    const sent = JSON.parse(h.comfySeen[2]!.body).prompt;
+    expect(sent["ref_1"]).toEqual({ class_type: "LoadImage", inputs: { image: names[0] } });
+    expect(sent["ref_2"]).toEqual({ class_type: "LoadImage", inputs: { image: names[1] } });
+    expect(sent["6"].inputs["images.image_1"]).toEqual(["ref_1", 0]);
+    expect(sent["6"].inputs["images.image_2"]).toEqual(["ref_2", 0]);
+    expect(sent["6"].inputs.prompt).toBe("make it real");
+    expect(sent["7"].inputs).toMatchObject({ steps: 10, seed: 12 });
+
+    // The edit job is polled against the edit workflow (SaveImage is node 9, not the generate template's 10).
+    const poll = await call("GET", "/api/generate/p-edit", m);
+    expect(poll.json()).toEqual({ status: "done", images: [{ index: 0, url: "/api/image/p-edit/0" }] });
+    const img = await call("GET", "/api/image/p-edit/0", m);
+    expect(img.statusCode).toBe(200);
+    expect(img.rawPayload.equals(PNG)).toBe(true);
+  });
+
+  it("only the submitter (or an admin) can read an edit job", async () => {
+    h.setComfy(comfyEdit([{ filename: "edit_00001_.png", subfolder: "", type: "output" }]));
+    await post("/api/edit", await member("ayu"), okEdit);
+    expect((await call("GET", "/api/generate/p-edit", await member("budi"))).statusCode).toBe(404);
+    expect((await call("GET", "/api/generate/p-edit", await member("ayu"))).statusCode).toBe(200);
+    expect((await call("GET", "/api/generate/p-edit", await admin())).statusCode).toBe(200);
+  });
+
+  it("accepts a body larger than the global limit but refuses one over the edit limit with 413", async () => {
+    h.setComfy(comfyEdit());
+    const m = await member();
+    const big = pngOf(8, 8, "x".repeat(3000)); // ~4 KB of base64 per image, three of them: over WEB_BODY_LIMIT_BYTES (4096)
+    const three = { ...okEdit, images: [big, big, big].map((b) => b.toString("base64")) };
+    expect(JSON.stringify(three).length).toBeGreaterThan(4096);
+    expect((await post("/api/edit", m, three)).statusCode).toBe(202);
+    // The global limit still applies to every other route.
+    expect((await post("/api/generate", m, { ...okGen, prompt: "x".repeat(5000) })).statusCode).toBe(413);
+    // Past what three maximal images and the prompt can need.
+    const huge = { ...okEdit, images: ["A".repeat(60_000)] };
+    const over = await post("/api/edit", m, huge);
+    expect(over.statusCode).toBe(413);
+    expect(over.json().error.code).toBe("body_too_large");
+  });
+
+  const bad: [string, Record<string, unknown>, string][] = [
+    ["empty prompt", { prompt: " " }, "invalid_prompt"],
+    ["long prompt", { prompt: "x".repeat(51) }, "prompt_too_long"],
+    ["unknown preset", { preset: "ultra" }, "unknown_preset"],
+    ["unknown resolution", { resolution: "4096" }, "unknown_resolution"],
+    ["bad seed", { seed: -1 }, "invalid_seed"],
+    ["no images", { images: [] }, "no_references"],
+    ["too many images", { images: [REF_A, REF_A, REF_A, REF_A].map((b) => b.toString("base64")) }, "too_many_references"],
+    ["not base64", { images: ["not base64!!"] }, "invalid_reference"],
+    ["not an image", { images: [Buffer.from("plain text, not an image").toString("base64")] }, "invalid_reference"],
+    ["a gif", { images: [Buffer.from("GIF89a\x01\x00\x01\x00\x00\x00\x00;", "latin1").toString("base64")] }, "invalid_reference"],
+    ["too many pixels", { images: [pngOf(5000, 5000).toString("base64")] }, "reference_too_many_pixels"],
+    ["too large", { images: [pngOf(8, 8, "y".repeat(4100)).toString("base64")] }, "reference_too_large"],
+  ];
+  it.each(bad)("400 %s, with nothing sent to ComfyUI", async (_name, over, code) => {
+    const res = await post("/api/edit", await member(), { ...okEdit, ...over });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("400 invalid_body for a wrong shape: extra fields, a missing field, images that are not an array", async () => {
+    const m = await member();
+    for (const body of [
+      { ...okEdit, filename: "../x.png" },
+      { ...okEdit, name: "x" },
+      { prompt: "x", preset: "preview", images: [] },
+      { ...okEdit, images: "AAAA" },
+      { ...okEdit, images: { 0: "AAAA" } },
+    ]) {
+      const res = await post("/api/edit", m, body);
+      expect(res.statusCode, JSON.stringify(body).slice(0, 80)).toBe(400);
+      expect(res.json().error.code).toBe("invalid_body");
+    }
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("409 while the instance is not ready, and nothing is uploaded", async () => {
+    h.setAgent((_s, res) => json(res, 200, agentStatus("downloading")));
+    const res = await post("/api/edit", await member(), okEdit);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("not_ready");
+    h = await harness({ ready: false });
+    expect((await post("/api/edit", await member(), okEdit)).statusCode).toBe(409);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("shares the per-identity generate rate limit", async () => {
+    h = await harness({ cfg: { webGenerateRateLimitPerHour: 2 } });
+    h.setComfy(comfyEdit());
+    const m = await member();
+    expect((await post("/api/edit", m, okEdit)).statusCode).toBe(202);
+    expect((await post("/api/generate", m, okGen)).statusCode).toBe(202);
+    const third = await post("/api/edit", m, okEdit);
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error.code).toBe("rate_limited");
+  });
+
+  it("502 when a reference cannot be uploaded, no job is created and nothing leaks", async () => {
+    let uploads = 0;
+    h.setComfy((s, res) => {
+      if (s.url === "/upload/image" && ++uploads === 2) return json(res, 500, { error: `disk full on ${HOST} ${TOKEN}` });
+      return comfyEdit()(s, res);
+    });
+    const m = await member();
+    const res = await post("/api/edit", m, { ...okEdit, images: [REF_A, REF_B].map((b) => b.toString("base64")) });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.code).toBe("comfy_unavailable");
+    for (const text of [res.body, h.logs.join("\n")]) {
+      for (const secret of [HOST, TOKEN, "disk full", "REF-A-UNIQUE-MARKER"]) expect(text).not.toContain(secret);
+    }
+    expect(h.comfySeen.some((s) => s.url === "/prompt")).toBe(false);
+    expect((await call("GET", "/api/generate/p-edit", m)).statusCode).toBe(404);
+  });
+
+  it("is off (404 edit_unavailable, edit null in the state) when the profile has no edit section or no template", async () => {
+    for (const opts of [{ profile: { ...profile, edit: null } }, { editTemplate: null }]) {
+      h = await harness(opts);
+      const m = await member();
+      expect((await call("GET", "/api/state", m)).json().edit).toBeNull();
+      const res = await post("/api/edit", m, okEdit);
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error.code).toBe("edit_unavailable");
+      expect(h.comfySeen).toHaveLength(0);
+    }
+  });
+
+  it("500 profile_mismatch when the edit workflow lacks a mapped node", async () => {
+    h = await harness({ editTemplate: { "1": { class_type: "KSampler", inputs: {} } } });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), okEdit);
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe("profile_mismatch");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("keeps the gates: 401 without a session, 403 for role none, 403 csrf, 415 for a non-JSON type", async () => {
+    expect((await post("/api/edit", {}, okEdit)).statusCode).toBe(401);
+    expect((await post("/api/edit", await cookieOf(["nobody"], "eve"), okEdit)).statusCode).toBe(403);
+    const m = await member();
+    const cross = await post("/api/edit", { cookie: m.cookie, origin: "https://evil.example.test" }, okEdit); // config-lint: ok (test fixture)
+    expect(cross.statusCode).toBe(403);
+    expect(cross.json().error.code).toBe("csrf");
+    const plain = await h.app.inject({ method: "POST", url: "/api/edit", headers: { ...m, "content-type": "text/plain" }, payload: JSON.stringify(okEdit) });
+    expect(plain.statusCode).toBe(415);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("never logs prompts or image data", async () => {
+    h.setComfy(comfyEdit());
+    await post("/api/edit", await member(), { ...okEdit, prompt: "SECRET-PROMPT-TEXT" });
+    const logs = h.logs.join("\n");
+    expect(logs).not.toContain("SECRET-PROMPT-TEXT");
+    expect(logs).not.toContain(REF_A.toString("base64").slice(0, 30));
+  });
+});
 
 describe("login flow", () => {
   it("login -> callback -> cookie -> /api/state 200 with role; /api/me shows only name, username and role", async () => {

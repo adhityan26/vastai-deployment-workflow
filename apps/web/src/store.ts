@@ -34,6 +34,9 @@ export type JobState =
   | { kind: "done"; images: ResultImage[] }
   | { kind: "failed"; message: string };
 
+/** Which workflow a job ran: its SaveImage node is looked up in that template when polling. */
+export type JobKind = "generate" | "edit";
+
 export interface Job {
   readonly id: string;
   /** Identity subject of the submitter: only they (or an admin) may read the job. */
@@ -41,6 +44,7 @@ export interface Job {
   readonly createdAt: number;
   /** Tailnet hostname of the instance that runs it; internal only, never sent to a client. */
   readonly hostname: string;
+  readonly kind: JobKind;
   state: JobState;
 }
 
@@ -59,7 +63,7 @@ export class JobStore {
     for (const [id, job] of this.jobs) if (t - job.createdAt >= this.ttlMs) this.jobs.delete(id);
   }
 
-  add(job: Omit<Job, "createdAt" | "state">): Job {
+  add(job: Omit<Job, "createdAt" | "state" | "kind"> & { kind?: JobKind }): Job {
     this.purge();
     // Map iteration is insertion order: forget the oldest jobs first.
     while (this.jobs.size >= this.max) {
@@ -67,7 +71,7 @@ export class JobStore {
       if (oldest === undefined) break;
       this.jobs.delete(oldest);
     }
-    const stored: Job = { ...job, createdAt: this.now(), state: { kind: "pending" } };
+    const stored: Job = { ...job, kind: job.kind ?? "generate", createdAt: this.now(), state: { kind: "pending" } };
     this.jobs.delete(stored.id);
     this.jobs.set(stored.id, stored);
     return stored;

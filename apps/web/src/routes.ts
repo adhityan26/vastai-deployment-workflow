@@ -14,17 +14,22 @@ import {
   ResponseTooLarge,
   StartError,
   Unreachable,
+  edit as runEdit,
   generate,
   labelHostname,
   pollResult,
+  referenceLimits,
   type AppsConfig,
   type CostEstimate,
+  type EditDeps,
+  type EditRequest,
   type GenerateDeps,
   type GenerateRequest,
+  type ReferenceLimits,
   type StartFailReason,
   type StatusView,
 } from "@vast-comfy/core";
-import { JobStore, RateLimiter, type Job } from "./store.js";
+import { JobStore, RateLimiter, type Job, type JobKind } from "./store.js";
 import { sendError } from "./reply.js";
 import type { ServerDeps } from "./server.js";
 
@@ -192,6 +197,27 @@ const GENERATE_BODY = {
   properties: { prompt: {}, preset: {}, size: {}, seed: {} },
 } as const;
 
+// Edit: the references travel as base64 text in the JSON body (so every gate for JSON bodies applies
+// unchanged); their number, size and type are validated by the edit service, which has the error codes.
+const EDIT_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["prompt", "preset", "resolution", "images"],
+  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" } },
+} as const;
+// JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
+const EDIT_JSON_OVERHEAD = 8;
+const PROMPT_ESCAPE_FACTOR = 6;
+const EDIT_BODY_SLACK = 1024;
+const BASE64_PER_BYTES = 3;
+const BASE64_CHARS_PER_GROUP = 4;
+
+/** Request body limit of POST /api/edit, derived from the reference limits (the global limit stays small). */
+function editBodyLimit(limits: ReferenceLimits, maxPromptChars: number): number {
+  const perImage = Math.ceil(limits.maxBytes / BASE64_PER_BYTES) * BASE64_CHARS_PER_GROUP + EDIT_JSON_OVERHEAD;
+  return limits.maxCount * perImage + maxPromptChars * PROMPT_ESCAPE_FACTOR + EDIT_BODY_SLACK;
+}
+
 export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => undefined);
@@ -219,12 +245,39 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const admin = { config: { access: "admin" as const } };
   const member = { config: { access: "member" as const } };
 
-  const generateDeps = (hostname: string): GenerateDeps => ({
+  // Edit is on only when the profile has an edit section AND its workflow template was loaded.
+  const editSpec = deps.profile.edit;
+  const editTemplate = deps.editTemplate ?? null;
+  const limits: ReferenceLimits | null = editSpec !== null && editTemplate !== null ? referenceLimits(cfg) : null;
+  const maxPromptChars = limits === null ? 0 : intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS");
+
+  const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
-    template: deps.template,
+    template: kind === "edit" ? editTemplate : deps.template,
     cfg,
   });
+  const editDeps = (hostname: string): EditDeps => ({
+    comfy: deps.comfyFor(hostname),
+    profile: deps.profile,
+    template: editTemplate,
+    cfg,
+  });
+
+  /** The reply for a job that could not be submitted (shared by generate and edit). */
+  const submitFailure = (reply: FastifyReply, err: unknown, what: string): FastifyReply => {
+    if (err instanceof GenerateInputError) {
+      if (err.code === "workflow_mismatch") {
+        log("error", "the profile does not match its workflow template");
+        return sendError(reply, 500, "profile_mismatch", "the server profile is misconfigured");
+      }
+      if (err.code === "edit_unavailable") return sendError(reply, 404, "edit_unavailable", "image edit is not available on this server");
+      return sendError(reply, 400, err.code, err.message);
+    }
+    log("warn", `${what} submit failed: ${errorName(err)}`);
+    if (err instanceof ResponseTooLarge) return tooLarge(reply);
+    return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not accept the job");
+  };
 
   /** The job if the caller may read it; otherwise null (unknown and foreign jobs look alike). */
   const ownJob = (req: FastifyRequest, id: string): Job | null => {
@@ -256,6 +309,17 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       role: req.role,
       presets: deps.profile.generate.qualityPresets.map((p) => ({ name: p.name, steps: p.steps })),
       sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
+      // What the page needs to offer edit; null when edit is off on this server.
+      edit:
+        limits === null || editSpec === null
+          ? null
+          : {
+              max_references: limits.maxCount,
+              max_bytes: limits.maxBytes,
+              max_pixels: limits.maxPixels,
+              types: [...limits.types],
+              resolutions: editSpec.resolutions.map((r) => ({ name: r.name, value: r.value })),
+            },
     };
   });
 
@@ -410,21 +474,39 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     try {
       ({ promptId } = await generate(generateDeps(hostname), req.body as GenerateRequest));
     } catch (err) {
-      if (err instanceof GenerateInputError) {
-        if (err.code === "workflow_mismatch") {
-          log("error", "the profile does not match its workflow template");
-          return sendError(reply, 500, "profile_mismatch", "the server profile is misconfigured");
-        }
-        return sendError(reply, 400, err.code, err.message);
-      }
-      log("warn", `generate submit failed: ${(err as Error).name}`);
-      if (err instanceof ResponseTooLarge) return tooLarge(reply);
-      return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not accept the job");
+      return submitFailure(reply, err, "generate");
     }
     if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
     jobs.add({ id: promptId, owner: identity.subject, hostname });
     return reply.code(202).send({ id: promptId });
   });
+
+  app.post(
+    "/api/edit",
+    // Own body limit, derived from the reference limits; every other route keeps WEB_BODY_LIMIT_BYTES.
+    { ...member, schema: { body: EDIT_BODY }, ...(limits === null ? {} : { bodyLimit: editBodyLimit(limits, maxPromptChars) }) },
+    async (req, reply) => {
+      const identity = req.identity!;
+      if (limits === null) return sendError(reply, 404, "edit_unavailable", "image edit is not available on this server");
+      const view = await deps.lifecycle.view();
+      const hostname = view.record?.tailnet_hostname;
+      if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
+        return sendError(reply, 409, "not_ready", "the instance is not ready");
+      }
+      if (!generateLimiter.take(identity.subject)) {
+        return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
+      }
+      let promptId: string;
+      try {
+        ({ promptId } = await runEdit(editDeps(hostname), req.body as EditRequest));
+      } catch (err) {
+        return submitFailure(reply, err, "edit");
+      }
+      if (!PROMPT_ID.test(promptId)) return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      jobs.add({ id: promptId, owner: identity.subject, hostname, kind: "edit" });
+      return reply.code(202).send({ id: promptId });
+    },
+  );
 
   app.get("/api/generate/:id", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -437,7 +519,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         job.state = { kind: "failed", message: "the instance that ran this job is gone" };
       } else {
         try {
-          const result = await pollResult(generateDeps(job.hostname), job.id);
+          const result = await pollResult(generateDeps(job.hostname, job.kind), job.id);
           if (result !== null) job.state = { kind: "done", images: result.images };
         } catch (err) {
           if (err instanceof GenerateFailed) {

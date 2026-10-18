@@ -41,10 +41,12 @@ export interface ServerDeps {
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
-  comfyFor(hostname: string): Pick<ComfyClient, "submit" | "history" | "view">;
+  comfyFor(hostname: string): Pick<ComfyClient, "submit" | "history" | "view" | "uploadImage">;
   profile: Profile;
   /** The workflow template JSON named by the profile. */
   template: unknown;
+  /** The edit workflow template named by the profile's edit section; absent or null turns edit off. */
+  editTemplate?: unknown;
   /** Directory of the static page (apps/web/public); may be empty or missing. */
   publicDir: string;
   /** Login routes; absent (or not configured) means /auth/login and /auth/callback answer 503. */

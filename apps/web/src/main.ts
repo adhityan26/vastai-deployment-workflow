@@ -58,6 +58,11 @@ async function main(): Promise<void> {
     readFileSync(join(repoDir, "instance", "workflows", profile.generate.workflow), "utf8"),
   );
 
+  // Edit with reference images is on only when the profile has an edit section; its workflow must load.
+  const editTemplate: unknown = profile.edit
+    ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.edit.workflow), "utf8"))
+    : null;
+
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
     // Fail closed: an empty allow-list no longer means "any GPU".
@@ -117,6 +122,7 @@ async function main(): Promise<void> {
     comfyFor: (hostname) => new ComfyClient(hostname, cfg),
     profile,
     template,
+    editTemplate,
     login: { configured: auth.configured, oidc, sessions },
     publicDir: PUBLIC_DIR,
     secrets: () => [...seenSecrets],
