@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import type { AppsConfig } from "@vast-comfy/core";
@@ -26,7 +29,7 @@ afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
 });
 
-async function server(): Promise<FastifyInstance> {
+async function server(dir: string = publicDir): Promise<FastifyInstance> {
   const app = buildServer({
     cfg,
     auth: { identify: async () => null, role: () => "none" },
@@ -35,7 +38,7 @@ async function server(): Promise<FastifyInstance> {
     comfyFor: () => ({}) as never,
     profile: {} as never,
     template: {},
-    publicDir,
+    publicDir: dir,
     secrets: () => [],
   });
   apps.push(app);
@@ -56,7 +59,8 @@ describe("GET / under the strict CSP", () => {
     expect(csp).toContain("style-src 'self'");
     expect(csp).not.toContain("unsafe-inline");
     expect(csp).not.toContain("unsafe-eval");
-    expect(res.body).toBe(html());
+    // Asset references carry a content hash; apart from that the page is the file as is.
+    expect(res.body.replace(/\?v=[0-9a-f]{10}"/g, '"')).toBe(html());
   });
 
   it("references only same-origin files, and the server can serve each of them", async () => {
@@ -116,5 +120,79 @@ describe("index.html is CSP-clean", () => {
     expect(doc).toContain('name="theme-color"');
     expect(doc).toContain('name="apple-mobile-web-app-capable"');
     expect(doc).toContain('rel="apple-touch-icon"');
+  });
+});
+
+const sha10 = (data: string | Buffer) => createHash("sha256").update(data).digest("hex").slice(0, 10);
+
+describe("cache-busted asset URLs in the index page", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function fixture(withApp: boolean): string {
+    const dir = mkdtempSync(join(tmpdir(), "vc-public-"));
+    tmpDirs.push(dir);
+    for (const f of ["index.html", "style.css", "manifest.webmanifest", "icon.svg"]) cpSync(join(publicDir, f), join(dir, f));
+    if (withApp) writeFileSync(join(dir, "app.js"), "console.log(1);\n");
+    return dir;
+  }
+
+  it("adds ?v=<sha256 prefix of the current file> to app.js, style.css, the manifest and the icon", async () => {
+    const dir = fixture(true);
+    const app = await server(dir);
+    const body = (await app.inject({ method: "GET", url: "/" })).body;
+    for (const f of ["app.js", "style.css", "manifest.webmanifest", "icon.svg"]) {
+      expect(body, f).toContain(`"/${f}?v=${sha10(readFileSync(join(dir, f)))}"`);
+    }
+    expect(body).toMatch(/<script src="\/app\.js\?v=[0-9a-f]{10}" defer>/);
+  });
+
+  it("changes the version when the file changes and keeps it stable otherwise", async () => {
+    const dir = fixture(true);
+    const app = await server(dir);
+    const ver = async () => /\/app\.js\?v=([0-9a-f]{10})"/.exec((await app.inject({ method: "GET", url: "/" })).body)![1]!;
+    const first = await ver();
+    expect(await ver()).toBe(first);
+    writeFileSync(join(dir, "app.js"), "console.log(2);\n");
+    const second = await ver();
+    expect(second).not.toBe(first);
+    expect(second).toBe(sha10("console.log(2);\n"));
+  });
+
+  it("leaves the login link and every other href untouched", async () => {
+    const app = await server(fixture(true));
+    const body = (await app.inject({ method: "GET", url: "/" })).body;
+    expect(body).toContain('href="/auth/login?next=/"');
+    const unversioned = [...html().matchAll(/(?:src|href)="([^"]+)"/g)].map((m) => m[1]!).filter((r) => !/^\/(app\.js|style\.css|manifest\.webmanifest|icon\.svg)$/.test(r));
+    for (const ref of unversioned) expect(body, ref).toContain(`"${ref}"`);
+    expect(body).not.toMatch(/\/auth\/login[^"]*\?v=/);
+  });
+
+  it("leaves the reference untouched when app.js is not built, and does not throw", async () => {
+    const app = await server(fixture(false));
+    const res = await app.inject({ method: "GET", url: "/" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('src="/app.js" defer');
+    expect(res.body).toMatch(/href="\/style\.css\?v=[0-9a-f]{10}"/);
+  });
+
+  it("keeps index no-cache and the CSP unchanged", async () => {
+    const app = await server(fixture(true));
+    const res = await app.inject({ method: "GET", url: "/" });
+    expect(res.headers["cache-control"]).toBe("no-cache");
+    expect(String(res.headers["content-security-policy"])).toContain("default-src 'none'");
+  });
+
+  it("serves static files when the URL carries a query string", async () => {
+    const dir = fixture(true);
+    const app = await server(dir);
+    const js = await app.inject({ method: "GET", url: "/app.js?v=abc" });
+    expect(js.statusCode).toBe(200);
+    expect(js.headers["content-type"]).toContain("javascript");
+    expect(js.body).toBe("console.log(1);\n");
+    const css = await app.inject({ method: "GET", url: "/style.css?v=abc" });
+    expect(css.statusCode).toBe(200);
+    expect(css.headers["content-type"]).toContain("text/css");
   });
 });

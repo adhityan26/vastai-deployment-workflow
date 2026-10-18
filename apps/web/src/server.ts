@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { createHash } from "node:crypto";
 import { readFile, realpath, lstat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import type {
@@ -167,6 +168,50 @@ export function registeredRoutes(app: FastifyInstance): { method: string; url: s
   return [...(routeLists.get(app) ?? [])];
 }
 
+/** Resolve a static file inside the public dir; null when missing, outside the dir or not a regular file. */
+async function resolveStatic(publicDir: string, segments: string[]): Promise<string | null> {
+  try {
+    const root = await realpath(publicDir);
+    const full = await realpath(resolve(root, ...segments));
+    if (!full.startsWith(root + sep)) return null;
+    if (!(await lstat(full)).isFile()) return null;
+    return full;
+  } catch {
+    return null;
+  }
+}
+
+// Exact attribute values only: the login link and any other href are never touched.
+const VERSIONED_ASSETS = ["app.js", "style.css", "manifest.webmanifest", "icon.svg"];
+const ASSET_REF = /\b(src|href)="\/(app\.js|style\.css|manifest\.webmanifest|icon\.svg)"/g;
+
+/**
+ * Content-based cache busting: append ?v=<first 10 hex of the SHA-256 of the file's current contents>
+ * to the static asset references in the index page, so a CDN that overrides cache-control still serves
+ * a new URL after a deploy. A missing or unreadable file leaves its reference untouched. Never throws.
+ */
+async function versionAssets(publicDir: string, page: string): Promise<string> {
+  try {
+    const versions = new Map<string, string>();
+    for (const name of VERSIONED_ASSETS) {
+      if (!page.includes(`"/${name}"`)) continue;
+      const full = await resolveStatic(publicDir, [name]);
+      if (full === null) continue;
+      try {
+        versions.set(name, createHash("sha256").update(await readFile(full)).digest("hex").slice(0, 10));
+      } catch {
+        // unreadable: leave the reference as is
+      }
+    }
+    return page.replace(ASSET_REF, (match, attr: string, name: string) => {
+      const v = versions.get(name);
+      return v === undefined ? match : `${attr}="/${name}?v=${v}"`;
+    });
+  } catch {
+    return page;
+  }
+}
+
 async function serveStatic(publicDir: string, rest: string, reply: FastifyReply): Promise<FastifyReply> {
   const rel = rest === "" ? STATIC_INDEX : rest;
   const segments = rel.split("/");
@@ -175,11 +220,10 @@ async function serveStatic(publicDir: string, rest: string, reply: FastifyReply)
     return sendError(reply, 404, "not_found", "not found");
   }
   try {
-    const root = await realpath(publicDir);
-    const full = await realpath(resolve(root, ...segments));
-    if (!full.startsWith(root + sep)) return sendError(reply, 404, "not_found", "not found");
-    if (!(await lstat(full)).isFile()) return sendError(reply, 404, "not_found", "not found");
-    const body = await readFile(full);
+    const full = await resolveStatic(publicDir, segments);
+    if (full === null) return sendError(reply, 404, "not_found", "not found");
+    let body: Buffer | string = await readFile(full);
+    if (rel === STATIC_INDEX) body = await versionAssets(publicDir, body.toString("utf8"));
     return reply.code(200).header("cache-control", "no-cache").type(type).send(body);
   } catch {
     return sendError(reply, 404, "not_found", "not found");
