@@ -7,7 +7,7 @@ import { CONSOLE_POLL_MS } from "../../public/model.js";
 
 const INDEX = readFileSync(join(import.meta.dirname, "../../public/index.html"), "utf8");
 
-interface Reply { status?: number; body: unknown }
+interface Reply { status?: number; body: unknown; gate?: Promise<void> }
 type Handler = Reply | ((n: number) => Reply);
 
 function apiState(over: Record<string, unknown> = {}) {
@@ -54,11 +54,13 @@ async function mount(over: { state?: Record<string, unknown>; console?: Handler[
       fetched.push(path);
       const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
       if (path === "/api/me") return json(over.me?.status ?? 200, over.me?.body ?? { name: "T", username: "t", role: stateBody["role"] });
+      if (path === "/auth/logout") return json(200, {});
       if (path === "/api/state") return json(200, stateBody);
       if (path.startsWith("/api/console")) {
         const h = consoleReplies[Math.min(consoleCalls, consoleReplies.length - 1)]!;
         consoleCalls++;
         const r = typeof h === "function" ? h(consoleCalls) : h;
+        if (r.gate) await r.gate;
         return json(r.status ?? 200, r.body);
       }
       return json(404, { error: { code: "not_found", message: "no" } });
@@ -149,11 +151,11 @@ describe("boot console card", () => {
   it("stops polling for good on 403 and hides the card", async () => {
     await mount({ console: [{ status: 403, body: { error: { code: "forbidden", message: "no" } } }] });
     expect(q("#console-card").hidden).toBe(true);
-    const before = timers.filter((t) => t.ms === CONSOLE_POLL_MS || t.ms > 3000 && t.ms !== 5000 && t.ms !== 1000).length;
+    expect(timers.some((t) => t.ms === CONSOLE_POLL_MS)).toBe(false);
     await app!.pollConsole();
     await app!.refresh();
     expect(consolePaths()).toHaveLength(1);
-    expect(before).toBe(0);
+    expect(timers.some((t) => t.ms === CONSOLE_POLL_MS)).toBe(false);
   });
 
   it("a 401 sends the page to the login screen and stops", async () => {
@@ -201,9 +203,53 @@ describe("boot console card", () => {
     expect(logLines()).toEqual(["01:00:09 [agent] fresh"]);
   });
 
-  it("shows a note when earlier lines were dropped", async () => {
-    await mount({ console: [{ body: consoleBody({ truncated: true }) }] });
+  it("shows a note when earlier lines were dropped and keeps it for the generation", async () => {
+    await mount({ console: [{ body: consoleBody({ truncated: true }) }, { body: consoleBody({ lines: [line(3)], last_seq: 3, truncated: false }) }, { body: consoleBody({ generation: 2, lines: [line(9)], last_seq: 9 }) }] });
     expect(q("#console-note").hidden).toBe(false);
+    await app!.pollConsole();
+    expect(q("#console-note").hidden).toBe(false);
+    await app!.pollConsole(); // a new Start: the note goes away
+    expect(q("#console-note").hidden).toBe(true);
+  });
+
+  it("an answer in flight at logout is discarded", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    await mount({ console: [{ body: consoleBody() }, { body: consoleBody({ lines: [line(3)], last_seq: 3 }), gate }] });
+    const inflight = app!.pollConsole();
+    await flush();
+    q<HTMLButtonElement>("#btn-logout").click();
+    await flush();
+    expect(q("#login-screen").hidden).toBe(false);
+    release();
+    await inflight;
+    await flush();
+    expect(q("#console-card").hidden).toBe(true);
+    expect(logLines()).toEqual([]);
+  });
+
+  it("never overlaps two polls", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    await mount({ console: [{ body: consoleBody() }, { body: consoleBody({ lines: [line(3)], last_seq: 3 }), gate }] });
+    const first = app!.pollConsole();
+    await flush();
+    await app!.pollConsole(); // ignored: one is in flight
+    expect(consolePaths()).toHaveLength(2);
+    release();
+    await first;
+  });
+
+  it("leaves no console timer behind after stop()", async () => {
+    await mount();
+    // The harness records timers; stop() must not leave a console poll that could still fire.
+    const pending = timers.filter((t) => t.ms === CONSOLE_POLL_MS);
+    expect(pending).toHaveLength(1);
+    app!.stop();
+    const before = consolePaths().length;
+    pending[0]!.fn();
+    await flush();
+    expect(consolePaths()).toHaveLength(before);
   });
 });
 
@@ -211,7 +257,7 @@ describe("boot console controls", () => {
   it("Pause stops polling and Resume polls again", async () => {
     await mount();
     q<HTMLButtonElement>("#console-pause").click();
-    expect(q("#console-pause").textContent).toBe("Resume");
+    expect(q("#console-pause").textContent).toBe("Pause"); // stable label, state in aria-pressed
     expect(q("#console-pause").getAttribute("aria-pressed")).toBe("true");
     const n = consolePaths().length;
     await app!.pollConsole();
@@ -219,7 +265,7 @@ describe("boot console controls", () => {
     q<HTMLButtonElement>("#console-pause").click();
     await flush();
     expect(consolePaths().length).toBe(n + 1);
-    expect(q("#console-pause").textContent).toBe("Pause");
+    expect(q("#console-pause").getAttribute("aria-pressed")).toBe("false");
   });
 
   it("Copy writes the visible lines and Clear view hides the old ones", async () => {

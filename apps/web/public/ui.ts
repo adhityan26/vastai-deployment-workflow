@@ -64,6 +64,8 @@ import {
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
 // never innerHTML. Decisions live in model.ts.
 
+const CONSOLE_REVOKE_MS = 1_000; // the browser needs a moment to start the download
+
 export interface Env {
   fetch: typeof fetch;
   now(): number;
@@ -139,6 +141,8 @@ export function mountApp(doc: Document, env: Env): App {
   let consoleStepsKey = "";
   let consoleRenderKey = "";
   let consoleRenderedSeq = 0;
+  let consoleTruncated = false; // sticky per generation: lines were dropped at some point
+  let consoleEpoch = 0; // bumped by resetConsole; an answer from an older epoch is discarded
   const history: HistoryEntry[] = [];
 
   // ---- requests ----
@@ -926,6 +930,8 @@ export function mountApp(doc: Document, env: Env): App {
   $("console-actions").append(consoleDownload);
 
   function resetConsole(): void {
+    consoleEpoch++;
+    consoleTruncated = false;
     if (consoleHandle !== null) env.clearTimeout(consoleHandle);
     consoleHandle = null;
     consoleView = EMPTY_CONSOLE_VIEW;
@@ -940,7 +946,6 @@ export function mountApp(doc: Document, env: Env): App {
     consoleRenderedSeq = 0;
     consoleLog.replaceChildren();
     consoleSteps.replaceChildren();
-    consolePauseBtn.textContent = "Pause";
     consolePauseBtn.setAttribute("aria-pressed", "false");
     consoleCard.hidden = true;
   }
@@ -999,8 +1004,8 @@ export function mountApp(doc: Document, env: Env): App {
     ended.textContent = p.instance.ended ? endedText(p.instance.ended_reason) : "";
     ended.hidden = !p.instance.ended;
     const note = $("console-note");
-    note.textContent = p.truncated ? "Earlier lines were dropped to keep the console short." : "";
-    note.hidden = !p.truncated;
+    note.textContent = consoleTruncated ? "Earlier lines were dropped to keep the console short." : "";
+    note.hidden = !consoleTruncated;
     const err = $("console-error");
     const text =
       consoleFailures > 0
@@ -1033,15 +1038,19 @@ export function mountApp(doc: Document, env: Env): App {
     if (consoleHandle !== null) env.clearTimeout(consoleHandle); // a manual poll replaces the timer
     consoleHandle = null;
     consoleBusy = true;
+    const epoch = consoleEpoch;
     try {
       const parsed = parseConsole(await call("GET", `${CONSOLE_PATH}?after=${consoleView.lastSeq}`));
+      if (epoch !== consoleEpoch) return; // logged out meanwhile: drop the answer
       if (parsed === null) throw new ApiError("The server sent a console this page cannot read.");
+      if (consoleView.generation !== null && consoleView.generation !== parsed.generation) consoleTruncated = false;
+      if (parsed.truncated) consoleTruncated = true;
       consoleView = mergeConsole(consoleView, parsed);
       consolePayload = parsed;
       consoleLoaded = true;
       consoleFailures = 0;
     } catch (err) {
-      if (err instanceof AuthLostError || !active) return;
+      if (err instanceof AuthLostError || !active || epoch !== consoleEpoch) return;
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
         consoleStopped = true;
         consolePayload = null;
@@ -1050,7 +1059,7 @@ export function mountApp(doc: Document, env: Env): App {
       }
       consoleFailures += 1;
     } finally {
-      consoleBusy = false;
+      if (epoch === consoleEpoch) consoleBusy = false;
     }
     renderConsole();
     scheduleConsole();
@@ -1070,7 +1079,6 @@ export function mountApp(doc: Document, env: Env): App {
   });
   consolePauseBtn.addEventListener("click", () => {
     consolePaused = !consolePaused;
-    consolePauseBtn.textContent = consolePaused ? "Resume" : "Pause";
     consolePauseBtn.setAttribute("aria-pressed", String(consolePaused));
     if (consolePaused) {
       if (consoleHandle !== null) env.clearTimeout(consoleHandle);
@@ -1107,8 +1115,10 @@ export function mountApp(doc: Document, env: Env): App {
       const a = make("a");
       a.href = url;
       a.download = consoleDownload.getAttribute("download") ?? "boot-console.txt";
+      doc.body.append(a);
       a.click();
-      env.setTimeout(() => win.URL.revokeObjectURL(url), 0);
+      a.remove();
+      env.setTimeout(() => win.URL.revokeObjectURL(url), CONSOLE_REVOKE_MS);
       setConsoleStatus("Downloaded.");
     } catch {
       setConsoleStatus("Could not create the download.");
