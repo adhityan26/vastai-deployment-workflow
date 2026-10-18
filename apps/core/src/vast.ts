@@ -433,6 +433,8 @@ export class VastClient {
     } catch {
       throw new VastError("request logs: the log download failed");
     }
+    // When reading stopped at LOG_READ_FACTOR, the kept tail is the end of that first 4x window,
+    // not the true end of the body.
     if (stopped) {
       abort.abort();
       await reader.cancel().catch(() => undefined);

@@ -102,17 +102,24 @@ const MIXED_CASE_DIGIT = (s: string) => /[a-z]/.test(s) && /[A-Z]/.test(s) && /[
 
 /** A '/'-separated part this long that mixes cases and digits marks a base64 string, not a path. */
 const BASE64_SEGMENT = 16;
+/** A '/'-containing run with at most this many parts (and no '_' or '-') is key-shaped. */
+const BASE64_MAX_PARTS = 3;
 
 /**
  * A long run of base64/base64url characters is a secret when it mixes upper case, lower case and
  * digits. With '/' in it (standard base64, unpadded) it could also be a path, so it then needs
  * padding or one '/'-separated part of BASE64_SEGMENT+ characters that mixes them itself (path
- * parts are short words; random base64 has a '/' only every 64 characters on average).
+ * parts are short words; random base64 has a '/' only every 64 characters on average), or be
+ * shaped like a short key: not starting with '/', no '_' or '-', at most BASE64_MAX_PARTS parts
+ * (e.g. an AWS secret key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`). Absolute paths and paths
+ * with '_' or '-' or many parts stay visible.
  */
 function maskBase64(m: string): string {
   if (!MIXED_CASE_DIGIT(m)) return m;
   if (!m.includes("/") || m.endsWith("=")) return REDACTED;
-  return m.split("/").some((part) => part.length >= BASE64_SEGMENT && MIXED_CASE_DIGIT(part)) ? REDACTED : m;
+  const parts = m.split("/");
+  if (!m.startsWith("/") && !/[_-]/.test(m) && parts.length <= BASE64_MAX_PARTS) return REDACTED;
+  return parts.some((part) => part.length >= BASE64_SEGMENT && MIXED_CASE_DIGIT(part)) ? REDACTED : m;
 }
 
 // Names whose value is a secret. Every name rule starts its match AT the name (literal text), not
@@ -124,9 +131,10 @@ const PASSWORD_NAMES = "password|passwd|passphrase";
 
 /** Generic secret patterns, applied in this order after the known secrets. All linear in the line length. */
 const PATTERNS: readonly [RegExp, string | ((match: string, ...groups: string[]) => string)][] = [
-  // Credentials in a URL: scheme://user:password@host. The scheme starts where no scheme
-  // character precedes it and is at most 32 characters (otherwise quadratic, as above).
-  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]+(?::[^\s/@]*)?@/gi, `$1${REDACTED}@`],
+  // Credentials in a URL: scheme://user:password@host. The scheme may start at any word boundary
+  // (also after `-`, `.` or a digit) and is at most 32 characters: the bound keeps it linear (an
+  // unbounded scheme was quadratic, as above); no anchor that could skip a real scheme.
+  [/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]+(?::[^\s/@]*)?@/gi, `$1${REDACTED}@`],
   // Tailscale keys (any case).
   [/\btskey-[a-z0-9-]+/gi, `tskey-${REDACTED}`],
   // Authorization header values: everything after the name.
@@ -673,16 +681,17 @@ export class ConsoleStore implements ConsoleStoreLike {
     try {
       if (!existsSync(this.filePath)) return null;
       fd = openSync(this.filePath, "r");
-      if (fstatSync(fd).size > this.maxFileBytes) return null;
+      const size = fstatSync(fd).size;
+      if (size > this.maxFileBytes) return null;
       // The read itself is capped too (the file may grow after the size check): one byte past
-      // the cap means the file is too large.
-      const buf = Buffer.alloc(this.maxFileBytes + 1);
+      // the size seen, or past the cap, means it changed or is too large.
+      const buf = Buffer.alloc(size + 1);
       let used = 0;
       for (;;) {
         const n = readSync(fd, buf, used, buf.length - used, null);
         if (n === 0) break;
         used += n;
-        if (used > this.maxFileBytes) return null;
+        if (used > size) return null;
       }
       return JSON.parse(buf.subarray(0, used).toString("utf8"));
     } catch {

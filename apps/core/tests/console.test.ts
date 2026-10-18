@@ -105,6 +105,26 @@ describe("maskLine", () => {
     }
   });
 
+  it("masks URL credentials whatever precedes the scheme", () => {
+    for (const [line, want] of [
+      ["clone -https://user:hunter2pass@github.com/x", "clone -https://[redacted]@github.com/x"],
+      ["1.https://user:hunter2pass@host", "1.https://[redacted]@host"],
+      [
+        "downloading-from-the-primary-mirror-https://user:hunter2pass@host",
+        "downloading-from-the-primary-mirror-https://[redacted]@host",
+      ],
+    ]) {
+      expect(maskLine(line!, [])).toBe(want);
+    }
+  });
+
+  it("masks short-part base64 with '/' (AWS-shaped) and leaves ordinary paths alone", () => {
+    expect(maskLine("aws_key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY end", [])).toBe("aws_key [redacted] end");
+    for (const path of ["/usr/local/bin", "cd /usr/local/bin/python3", "/workspace/ComfyUI/models3checkpointsdirectory"]) {
+      expect(maskLine(path, [])).toBe(path);
+    }
+  });
+
   it("masks a known secret split over three or more lines (a middle line that is only a fragment)", () => {
     const long = "Zq9SECRETvalue0123456789-and-more-and-more";
     const parts = [long.slice(0, 12), long.slice(12, 26), long.slice(26)];
