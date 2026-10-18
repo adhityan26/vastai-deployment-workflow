@@ -44,6 +44,7 @@ const BYTES_PER_KB = 1e3;
 const MAX_GPU_NAME = 64; // the API refuses longer names
 // Where the last GPU choice is remembered in the browser (only a model name, no secret).
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
+export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
 export const SPEED_WINDOW_SAMPLES = 6;
 export const SPEED_MAX_GAP_MS = 120_000;

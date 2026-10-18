@@ -254,6 +254,41 @@ describe("boot console card", () => {
 });
 
 describe("boot console controls", () => {
+  it("the log folds away with the toggle, the stepper stays, and the choice is remembered", async () => {
+    window.localStorage.removeItem("vast-comfy.console-collapsed");
+    await mount();
+    expect(q("#console-body").hidden).toBe(false);
+    expect(q("#console-toggle").getAttribute("aria-expanded")).toBe("true");
+    q<HTMLButtonElement>("#console-toggle").click();
+    expect(q("#console-body").hidden).toBe(true);
+    expect(q("#console-steps").childElementCount).toBeGreaterThan(0);
+    expect(q("#console-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(q("#console-toggle").textContent).toBe("Show log");
+    expect(window.localStorage.getItem("vast-comfy.console-collapsed")).toBe("1");
+    q<HTMLButtonElement>("#console-toggle").click();
+    expect(q("#console-body").hidden).toBe(false);
+    expect(q("#console-toggle").textContent).toBe("Hide log");
+    expect(window.localStorage.getItem("vast-comfy.console-collapsed")).toBe("0");
+  });
+
+  it("starts folded when it was left folded", async () => {
+    window.localStorage.setItem("vast-comfy.console-collapsed", "1");
+    await mount();
+    expect(q("#console-body").hidden).toBe(true);
+    window.localStorage.removeItem("vast-comfy.console-collapsed");
+  });
+
+  it("the toggle still works when storage refuses writes", async () => {
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    await mount();
+    q<HTMLButtonElement>("#console-toggle").click();
+    expect(q("#console-body").hidden).toBe(true);
+    spy.mockRestore();
+    window.localStorage.removeItem("vast-comfy.console-collapsed");
+  });
+
   it("Pause stops polling and Resume polls again", async () => {
     await mount();
     q<HTMLButtonElement>("#console-pause").click();

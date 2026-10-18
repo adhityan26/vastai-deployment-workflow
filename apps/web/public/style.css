@@ -141,6 +141,9 @@ ul { padding: 0; margin: 0; list-style: none; }
 .console-log .cl { white-space: pre-wrap; overflow-wrap: anywhere; }
 .console-log .ct, .console-log .cs { color: var(--muted); }
 .console-actions > * { flex: 1 1 6rem; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-head h2 { margin: 0; }
+#console-body[hidden] { display: none; }
 @media (min-width: 40rem) { .modal { align-items: center; } }
 @media (prefers-reduced-motion: no-preference) {
   button, .state, progress { transition: background-color 0.15s, opacity 0.15s; }

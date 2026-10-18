@@ -33,6 +33,7 @@ import {
   editLabel,
   pickReferences,
   referenceHint,
+  CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
   JOB_POLL_MAX_ERRORS,
   JOB_POLL_MS,
@@ -1109,6 +1110,34 @@ export function mountApp(doc: Document, env: Env): App {
   consoleDownload.href = "#";
   consoleDownload.setAttribute("download", "boot-console.txt");
   $("console-actions").append(consoleDownload);
+
+  // The log part can be folded away; the stepper and the ended notice stay visible. The choice is
+  // only a per-viewer convenience, so storage failures are ignored.
+  const consoleBody = $("console-body");
+  const consoleToggle = $<HTMLButtonElement>("console-toggle");
+  function setConsoleCollapsed(collapsed: boolean, remember: boolean): void {
+    consoleBody.hidden = collapsed;
+    consoleToggle.setAttribute("aria-expanded", String(!collapsed));
+    consoleToggle.textContent = collapsed ? "Show log" : "Hide log";
+    if (!remember) return;
+    try {
+      doc.defaultView?.localStorage.setItem(CONSOLE_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+  try {
+    setConsoleCollapsed(doc.defaultView?.localStorage.getItem(CONSOLE_COLLAPSED_KEY) === "1", false);
+  } catch {
+    // Storage unavailable: start expanded.
+  }
+  consoleToggle.addEventListener("click", () => {
+    setConsoleCollapsed(!consoleBody.hidden, true);
+    if (!consoleBody.hidden) {
+      consoleFollow = true;
+      renderConsoleLines();
+    }
+  });
 
   function resetConsole(): void {
     consoleEpoch++;
