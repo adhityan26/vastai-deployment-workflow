@@ -152,10 +152,15 @@ is_success_text() {
 }
 
 attempts=0
+# Why this failsafe destroys (fixed ids, mirrored into the agent state and its /status by the runner):
+# hard_cap when the hard cap (or the elapsed-time guard) was reached, else failsafe_deadline.
+REASON=failsafe_deadline
 destroy_once() {
   attempts=$((attempts + 1))
-  write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": true}"
+  write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": true, \"reason\": \"$REASON\"}"
   if [ "$attempts" -eq 1 ]; then
+    # One line for the logs, before anything is destroyed; it carries only the fixed reason id.
+    echo "[watchdog] destroying instance: reason=$REASON"
     run_with_timeout "$TIMEOUT_S" /dev/null "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" stop "$COMFY_PROGRAM" || true
   fi
   local yes_flag=()
@@ -171,7 +176,7 @@ destroy_once() {
   # decides: an OK or gone marker. 124 = killed by the timeout, 126/127 = could not execute: never a
   # success, whatever the output says.
   if [ "$rc" -ne 124 ] && [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ] && is_success_text "$scrubbed"; then
-    write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": false}"
+    write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": null, \"pending\": false, \"reason\": \"$REASON\"}"
     exit 0
   fi
   if [ "$rc" -eq 124 ]; then out="vastai call timed out"; fi
@@ -179,7 +184,7 @@ destroy_once() {
   # Keep printable ASCII only (drops control bytes 0-31, DEL and multi-byte text), then quotes and
   # backslashes, so last_error is always valid JSON; LC_ALL=C makes tr and cut work on plain bytes.
   out="$(printf '%s' "$out" | LC_ALL=C tr -cd ' -~' | LC_ALL=C tr -d '"\\' | LC_ALL=C cut -c1-200)"
-  write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": \"$out\", \"pending\": true}"
+  write_atomic "$STATE_DIR/destroy_failsafe.json" "{\"attempts\": $attempts, \"last_error\": \"$out\", \"pending\": true, \"reason\": \"$REASON\"}"
 }
 
 while true; do
@@ -190,6 +195,10 @@ while true; do
     limit="$deadline"
   fi
   if [ "$now" -ge "$limit" ] || [ "$SECONDS" -ge "$ELAPSED_LIMIT" ]; then
+    # The reason is fixed by the first attempt: a later deadline change must not rename it.
+    if [ "$attempts" -eq 0 ]; then
+      if [ "$SECONDS" -ge "$ELAPSED_LIMIT" ] || [ "$now" -ge "$HARD_CAP" ]; then REASON=hard_cap; fi
+    fi
     destroy_once
   fi
   sleep "$POLL_S"

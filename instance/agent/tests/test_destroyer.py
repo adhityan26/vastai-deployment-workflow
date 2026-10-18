@@ -144,6 +144,21 @@ def test_flow_success_leaves_state_stopping_with_reason(tmp_path):
     assert stopped == []
 
 
+def test_flow_prints_one_watchdog_line_with_the_reason_before_destroying(tmp_path, capsys):
+    states, destroyer, _, flow = flow_setup(tmp_path, True)
+    seen = []
+    destroyer.destroy = lambda: (seen.append(capsys.readouterr().out), True)[1]
+    flow.run("idle_timeout")
+    assert seen == ["[watchdog] destroying instance: reason=idle_timeout\n"]
+
+
+def test_flow_watchdog_line_never_echoes_an_unknown_reason(tmp_path, capsys):
+    states, _, _, flow = flow_setup(tmp_path, True)
+    flow.run("x --api-key secret")
+    out = capsys.readouterr().out
+    assert out == "[watchdog] destroying instance: reason=unknown\n"
+
+
 def test_flow_failure_marks_destroy_failed_and_stops_comfy(tmp_path):
     states, destroyer, stopped, flow = flow_setup(tmp_path, False)
     assert flow.run("manual") is False
