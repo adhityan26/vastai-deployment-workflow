@@ -287,6 +287,7 @@ async function harness(
     editMaxReferences: 3,
     editReferenceMaxBytes: 4096,
     editReferenceMaxPixels: 1_000_000,
+    editReferenceMaxSide: 8192,
     editReferenceTypes: ["png", "jpeg", "webp"],
     secretNames: ["VAST_API_KEY", "AUTHENTIK_CLIENT_SECRET", "WEB_SESSION_SECRET"],
     ...opts.cfg,

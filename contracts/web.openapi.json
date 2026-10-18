@@ -1958,7 +1958,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_type_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
             "content": {
               "application/json": {
                 "schema": {

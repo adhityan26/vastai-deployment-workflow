@@ -70,7 +70,78 @@ function webpExtended(width: number, height: number): Buffer {
   return b;
 }
 
-const limits: ReferenceLimits = { maxCount: 3, maxBytes: 4096, maxPixels: 1_000_000, types: ["png", "jpeg", "webp"] };
+// ---- multi-frame variants: ComfyUI LoadImage decodes every frame, so these must be refused ----
+
+function pngChunk(type: string, data: Buffer = Buffer.alloc(0)): Buffer {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(data.length, 0);
+  head.write(type, 4, "latin1");
+  return Buffer.concat([head, data, Buffer.alloc(4)]); // CRC is not checked by the sniffer
+}
+
+/** A PNG whose IHDR is followed by the given chunks, then IDAT and IEND. */
+function pngWith(before: Buffer[], after: Buffer[] = []): Buffer {
+  return Buffer.concat([png(4, 4), ...before, pngChunk("IDAT", Buffer.alloc(6)), ...after, pngChunk("IEND")]);
+}
+
+const acTL = () => pngChunk("acTL", Buffer.from([0, 0, 0, 60, 0, 0, 0, 0]));
+
+function jpegSegment(marker: number, data: Buffer): Buffer {
+  const head = Buffer.from([0xff, marker, 0, 0]);
+  head.writeUInt16BE(data.length + 2, 2);
+  return Buffer.concat([head, data]);
+}
+
+function sofData(width: number, height: number): Buffer {
+  const d = Buffer.alloc(9);
+  d[0] = 8;
+  d.writeUInt16BE(height, 1);
+  d.writeUInt16BE(width, 3);
+  d[5] = 1;
+  return d;
+}
+
+/** SOI, the given segments, a start of scan with one byte of entropy data, EOI. */
+function jpegWith(segments: Buffer[]): Buffer {
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    ...segments,
+    jpegSegment(0xda, Buffer.from([1, 1, 0, 0, 0x3f, 0])),
+    Buffer.from([0x12, 0xff, 0xd9]),
+  ]);
+}
+
+const app0 = () => jpegSegment(0xe0, Buffer.from("JFIF\0\x01\x02\0\0\x01\0\x01\0\0", "latin1"));
+const mpf = () => jpegSegment(0xe2, Buffer.concat([Buffer.from("MPF\0", "latin1"), Buffer.alloc(16)]));
+const icc = () => jpegSegment(0xe2, Buffer.concat([Buffer.from("ICC_PROFILE\0", "latin1"), Buffer.alloc(16)]));
+
+function riffChunk(type: string, data: Buffer): Buffer {
+  const head = Buffer.alloc(8);
+  head.write(type, 0, "latin1");
+  head.writeUInt32LE(data.length, 4);
+  return Buffer.concat([head, data, Buffer.alloc(data.length % 2)]);
+}
+
+/** A WebP container made of the given chunks, with a correct RIFF size. */
+function riff(chunks: Buffer[]): Buffer {
+  const body = Buffer.concat([Buffer.from("WEBP", "latin1"), ...chunks]);
+  const head = Buffer.alloc(8);
+  head.write("RIFF", 0, "latin1");
+  head.writeUInt32LE(body.length, 4);
+  return Buffer.concat([head, body]);
+}
+
+function vp8x(width: number, height: number, flags: number): Buffer {
+  const d = Buffer.alloc(10);
+  d[0] = flags;
+  d.writeUIntLE(width - 1, 4, 3);
+  d.writeUIntLE(height - 1, 7, 3);
+  return riffChunk("VP8X", d);
+}
+
+const vp8Frame = () => webpLossy(4, 4).subarray(12); // the "VP8 " chunk of a simple lossy file
+
+const limits: ReferenceLimits = { maxCount: 3, maxBytes: 4096, maxPixels: 1_000_000, maxSide: 8192, types: ["png", "jpeg", "webp"] };
 const b64 = (b: Buffer) => b.toString("base64");
 
 describe("inspectImage", () => {
@@ -107,6 +178,33 @@ describe("inspectImage", () => {
   it.each(Object.keys(garbage))("returns null for %s", (name) => {
     expect(inspectImage(garbage[name]!)).toBeNull();
   });
+
+  const singleFrame: Record<string, [Buffer, string]> = {
+    png_with_ancillary_chunks: [pngWith([pngChunk("tEXt", Buffer.from("a\0b", "latin1"))]), "png"],
+    png_actl_after_first_idat: [pngWith([], [acTL()]), "png"],
+    jpeg_with_scan_and_icc: [jpegWith([app0(), icc(), jpegSegment(0xc0, sofData(7, 9))]), "jpeg"],
+    webp_extended_static: [riff([vp8x(4, 4, 0x20), riffChunk("ICCP", Buffer.alloc(3)), vp8Frame()]), "webp"],
+  };
+  it.each(Object.keys(singleFrame))("reads a single-frame %s as not animated", (name) => {
+    const [bytes, type] = singleFrame[name]!;
+    const info = inspectImage(bytes);
+    expect(info).toMatchObject({ type });
+    expect(info!.animated).toBeFalsy();
+  });
+
+  const multiFrame: Record<string, [Buffer, string]> = {
+    apng: [pngWith([acTL()]), "png"],
+    apng_actl_after_other_chunks: [pngWith([pngChunk("tEXt", Buffer.alloc(4)), acTL()]), "png"],
+    mpo: [jpegWith([app0(), mpf(), jpegSegment(0xc0, sofData(7, 9))]), "jpeg"],
+    jpeg_two_frames: [jpegWith([jpegSegment(0xc0, sofData(7, 9)), jpegSegment(0xc2, sofData(9000, 9000))]), "jpeg"],
+    webp_animation_flag: [riff([vp8x(4, 4, 0x02)]), "webp"],
+    webp_anim_chunk: [riff([vp8x(4, 4, 0), riffChunk("ANIM", Buffer.alloc(6)), riffChunk("ANMF", Buffer.alloc(16))]), "webp"],
+    webp_simple_with_anmf: [riff([vp8Frame(), riffChunk("ANMF", Buffer.alloc(16))]), "webp"],
+  };
+  it.each(Object.keys(multiFrame))("flags %s as animated", (name) => {
+    const [bytes, type] = multiFrame[name]!;
+    expect(inspectImage(bytes)).toMatchObject({ type, animated: true });
+  });
 });
 
 describe("decodeReferences", () => {
@@ -128,10 +226,40 @@ describe("decodeReferences", () => {
     gif: [[b64(Buffer.from("GIF89a\x01\x00\x01\x00\x00\x00\x00;", "latin1"))], "invalid_reference"],
     too_large: [[b64(png(10, 10, limits.maxBytes))], "reference_too_large"],
     too_many_pixels: [[b64(png(2000, 2000))], "reference_too_many_pixels"],
+    side_too_long: [[b64(png(9000, 10))], "reference_side_too_long"],
+    apng: [[b64(pngWith([acTL()]))], "reference_animated"],
+    mpo: [[b64(jpegWith([mpf(), jpegSegment(0xc0, sofData(7, 9))]))], "reference_animated"],
+    jpeg_two_frames: [[b64(jpegWith([jpegSegment(0xc0, sofData(7, 9)), jpegSegment(0xc0, sofData(7, 9))]))], "reference_animated"],
+    animated_webp: [[b64(riff([vp8x(4, 4, 0x02), riffChunk("ANIM", Buffer.alloc(6))]))], "reference_animated"],
   };
   it.each(Object.keys(refused))("refuses %s", (name) => {
     const [items, code] = refused[name]!;
     expect(() => decodeReferences(items, limits)).toThrowError(expect.objectContaining({ name: "GenerateInputError", code }));
+  });
+
+  it("accepts static PNG, JPEG and WebP files with ancillary data", () => {
+    const items = [
+      pngWith([pngChunk("tEXt", Buffer.alloc(4))]),
+      jpegWith([app0(), icc(), jpegSegment(0xc0, sofData(7, 9))]),
+      riff([vp8x(4, 4, 0x20), riffChunk("ICCP", Buffer.alloc(3)), vp8Frame()]),
+    ].map(b64);
+    expect(decodeReferences(items, limits).map((r) => r.type)).toEqual(["png", "jpeg", "webp"]);
+  });
+
+  it("checks the side length against its own limit", () => {
+    const wide = { ...limits, maxPixels: 100_000_000, maxSide: 100 };
+    expect(decodeReferences([b64(png(100, 100))], wide)).toHaveLength(1);
+    expect(() => decodeReferences([b64(png(101, 1))], wide)).toThrowError(expect.objectContaining({ code: "reference_side_too_long" }));
+    expect(() => decodeReferences([b64(png(1, 101))], wide)).toThrowError(expect.objectContaining({ code: "reference_side_too_long" }));
+  });
+
+  it("names an animated reference by position only", () => {
+    try {
+      decodeReferences([b64(png(1, 1)), b64(pngWith([acTL()]))], limits);
+      expect.unreachable();
+    } catch (e) {
+      expect((e as Error).message).toBe("reference 2 is animated or has more than one frame");
+    }
   });
 
   it("refuses a type that is detected but not allowed", () => {
@@ -158,10 +286,10 @@ describe("decodeReferences", () => {
 
 describe("referenceLimits", () => {
   const cfg = (over: Record<string, unknown> = {}) =>
-    ({ editMaxReferences: 4, editReferenceMaxBytes: 8_388_608, editReferenceMaxPixels: 16_777_216, editReferenceTypes: ["png", "jpeg", "webp"], ...over }) as unknown as AppsConfig;
+    ({ editMaxReferences: 4, editReferenceMaxBytes: 8_388_608, editReferenceMaxPixels: 16_777_216, editReferenceMaxSide: 8192, editReferenceTypes: ["png", "jpeg", "webp"], ...over }) as unknown as AppsConfig;
 
   it("reads the limits from the configuration", () => {
-    expect(referenceLimits(cfg())).toEqual({ maxCount: 4, maxBytes: 8_388_608, maxPixels: 16_777_216, types: ["png", "jpeg", "webp"] });
+    expect(referenceLimits(cfg())).toEqual({ maxCount: 4, maxBytes: 8_388_608, maxPixels: 16_777_216, maxSide: 8192, types: ["png", "jpeg", "webp"] });
   });
 
   it("refuses an unknown type, an empty type list and non-positive numbers", () => {
@@ -169,5 +297,6 @@ describe("referenceLimits", () => {
     expect(() => referenceLimits(cfg({ editReferenceTypes: [] }))).toThrow(/EDIT_REFERENCE_TYPES/);
     expect(() => referenceLimits(cfg({ editMaxReferences: 0 }))).toThrow(/EDIT_MAX_REFERENCES/);
     expect(() => referenceLimits(cfg({ editReferenceMaxBytes: "8" }))).toThrow(/EDIT_REFERENCE_MAX_BYTES/);
+    expect(() => referenceLimits(cfg({ editReferenceMaxSide: 0 }))).toThrow(/EDIT_REFERENCE_MAX_SIDE/);
   });
 });
