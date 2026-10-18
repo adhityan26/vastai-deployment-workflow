@@ -1,5 +1,6 @@
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
-import type { ComfyPrompt } from "./profile.js";
+import { landsIn, type ComfyPrompt, type ModelEntry } from "./profile.js";
+import { FILE_NAME } from "./styles.js";
 
 // Upscale mode: one image in, the same image bigger out, through an upscale model. Declared in the
 // profile's `upscale:` section; OFF until `enabled: true` (the model file must be pinned first).
@@ -34,6 +35,7 @@ const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
 const SCALE_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._x-]{0,15}$/;
 const KEYS = new Set(["enabled", "workflow", "model", "model_factor", "model_loader", "image", "scale", "scales"]);
 const MAX_FACTOR = 16;
+const UPSCALE_FOLDER = "models/upscale_models";
 const MAX_MODEL_FACTOR = 8;
 // Tolerance when checking a declared factor against model_factor x value (values like 0.5 are exact; 1/3 is not).
 const FACTOR_EPSILON = 1e-9;
@@ -53,7 +55,7 @@ function ref(raw: unknown, what: string): { node: string; input: string } {
 }
 
 /** The upscale section when it is enabled, else null. Everything is validated even when disabled. */
-export function parseUpscale(raw: unknown, modelFiles: readonly string[]): UpscaleSpec | null {
+export function parseUpscale(raw: unknown, models: readonly ModelEntry[]): UpscaleSpec | null {
   if (raw === undefined || raw === null) return null;
   const m = mapping(raw, "upscale");
   const unknown = Object.keys(m).filter((k) => !KEYS.has(k));
@@ -62,7 +64,7 @@ export function parseUpscale(raw: unknown, modelFiles: readonly string[]): Upsca
   const workflow = m["workflow"];
   if (typeof workflow !== "string" || !WORKFLOW_NAME.test(workflow)) throw new ProfileError("upscale workflow is not a valid workflow name");
   const model = m["model"];
-  if (typeof model !== "string" || model === "") throw new ProfileError("upscale model must be a file name");
+  if (typeof model !== "string" || !FILE_NAME.test(model)) throw new ProfileError("upscale model must be one plain file name");
   const modelFactor = m["model_factor"];
   if (typeof modelFactor !== "number" || !Number.isInteger(modelFactor) || modelFactor < 1 || modelFactor > MAX_MODEL_FACTOR) {
     throw new ProfileError(`upscale model_factor must be the model's whole enlargement factor (1 to ${MAX_MODEL_FACTOR})`);
@@ -86,7 +88,10 @@ export function parseUpscale(raw: unknown, modelFiles: readonly string[]): Upsca
   if (new Set(scales.map((s) => s.name)).size !== scales.length) throw new ProfileError("upscale scale names must be unique");
   const spec: UpscaleSpec = { workflow, model, modelFactor, modelLoader: ref(m["model_loader"], "upscale model_loader"), image: ref(m["image"], "upscale image"), scale: ref(m["scale"], "upscale scale input"), scales };
   if (!m["enabled"]) return null;
-  if (!modelFiles.some((f) => f.split("/").pop() === model)) throw new ProfileError(`upscale model ${model} is not listed in models`);
+  const entry = models.find((f) => f.file.split("/").pop() === model);
+  if (entry === undefined) throw new ProfileError(`upscale model ${model} is not listed in models`);
+  // UpscaleModelLoader only lists ComfyUI's upscale_models folder.
+  if (!landsIn(entry, UPSCALE_FOLDER)) throw new ProfileError(`upscale: the models entry for ${model} must have dest ${UPSCALE_FOLDER}/`);
   return spec;
 }
 

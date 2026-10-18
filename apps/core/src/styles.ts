@@ -1,5 +1,5 @@
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
-import type { ComfyPrompt } from "./profile.js";
+import { landsIn, type ComfyPrompt, type ModelEntry } from "./profile.js";
 
 // Styles: a LoRA (or other workflow variation) with its own parameters, offered under a mode.
 // The profile declares them; the browser only ever sends a style id and parameter values, and
@@ -47,7 +47,9 @@ export interface ResolvedStyle {
 // Protocol/safety rules, not configuration.
 const STYLE_ID = /^[a-z][a-z0-9_]{0,31}$/;
 const PARAM_ID = /^[a-z][a-z0-9_]{0,31}$/;
-const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** One plain file name (no folder): LoRA files and the upscale model are checked against it. */
+export const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const LORA_FOLDER = "models/loras";
 const NODE_ID = /^[A-Za-z0-9_]{1,32}$/;
 const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
 const TITLE_MAX = 60;
@@ -130,7 +132,7 @@ function parseParam(raw: unknown, styleId: string): StyleParam {
   return { ...common, default: p["default"] };
 }
 
-function parseOne(raw: unknown, modelFiles: readonly string[]): { style: StyleSpec; enabled: boolean } {
+function parseOne(raw: unknown, models: readonly ModelEntry[]): { style: StyleSpec; enabled: boolean } {
   const s = mapping(raw, "style");
   noUnknownKeys(s, STYLE_KEYS, "style");
   const id = text(s["id"], "style id", 32);
@@ -161,8 +163,11 @@ function parseOne(raw: unknown, modelFiles: readonly string[]): { style: StyleSp
   if (params.filter((p) => p.target.kind === "lora_strength").length > 1) throw new ProfileError(`style ${id}: only one param may target lora_strength`);
 
   const enabled = s["enabled"];
-  if (enabled && !modelFiles.some((m) => m.split("/").pop() === file)) {
-    throw new ProfileError(`style ${id} is enabled but its LoRA file ${file} is not listed in models`);
+  if (enabled) {
+    const entry = models.find((m) => m.file.split("/").pop() === file);
+    if (entry === undefined) throw new ProfileError(`style ${id} is enabled but its LoRA file ${file} is not listed in models`);
+    // LoraLoaderModelOnly only lists ComfyUI's loras folder: anywhere else the style would fail at run time.
+    if (!landsIn(entry, LORA_FOLDER)) throw new ProfileError(`style ${id}: the models entry for ${file} must have dest ${LORA_FOLDER}/`);
   }
   return { style: { id, title, modes: modesRaw as StyleMode[], lora: { file, modelFrom, modelTo }, params }, enabled };
 }
@@ -170,12 +175,12 @@ function parseOne(raw: unknown, modelFiles: readonly string[]): { style: StyleSp
 /**
  * Parse and validate the profile's `styles:` list. Every entry is validated; only the enabled ones are
  * returned (a disabled style is documented in the profile but never offered, downloaded or accepted).
- * `modelFiles` are the `file` values of the profile's models.
+ * `models` are the profile's model entries (file and dest).
  */
-export function parseStyles(raw: unknown, modelFiles: readonly string[]): StyleSpec[] {
+export function parseStyles(raw: unknown, models: readonly ModelEntry[]): StyleSpec[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new ProfileError("styles must be a list");
-  const parsed = raw.map((item) => parseOne(item, modelFiles));
+  const parsed = raw.map((item) => parseOne(item, models));
   const ids = parsed.map((p) => p.style.id);
   if (new Set(ids).size !== ids.length) throw new ProfileError("style ids must be unique");
   return parsed.filter((p) => p.enabled).map((p) => p.style);

@@ -21,8 +21,10 @@ function raw(): Doc[] {
     },
   ];
 }
-const models = [LORA, "other.gguf"];
-const parse = (mutate?: (list: Doc[]) => void, files: readonly string[] = models) => {
+type Entry = { file: string; dest: string };
+const lora = (file: string): Entry => ({ file, dest: "models/loras/" });
+const models: Entry[] = [lora(LORA), { file: "other.gguf", dest: "models/diffusion_models/" }];
+const parse = (mutate?: (list: Doc[]) => void, files: readonly Entry[] = models) => {
   const list = raw();
   mutate?.(list);
   return parseStyles(list, files);
@@ -51,8 +53,15 @@ describe("parseStyles", () => {
   });
 
   it("an enabled style needs its LoRA file among the models (compared by file name)", () => {
-    expect(() => parse(undefined, ["other.gguf"])).toThrow(/anything2real.*models/);
-    expect(parse(undefined, [`loras/${LORA}`])).toHaveLength(1);
+    expect(() => parse(undefined, [{ file: "other.gguf", dest: "models/diffusion_models/" }])).toThrow(/anything2real.*models/);
+    expect(parse(undefined, [lora(`loras/${LORA}`)])).toHaveLength(1);
+  });
+
+  it("an enabled style needs that models entry to download into models/loras/", () => {
+    expect(() => parse(undefined, [{ file: LORA, dest: "models/upscale_models/" }])).toThrow(/models\/loras/);
+    expect(() => parse(undefined, [{ file: LORA }] as Entry[])).toThrow(/models\/loras/);
+    expect(parse(undefined, [{ file: LORA, dest: "models/loras" }])).toHaveLength(1);
+    expect(parse((l) => (l[0].enabled = false), [{ file: LORA, dest: "models/vae/" }])).toEqual([]); // only checked when enabled
   });
 
   it("supports all four param types and workflow-input targets", () => {

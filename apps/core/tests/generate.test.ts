@@ -108,7 +108,7 @@ describe("generate", () => {
         { id: "both", title: "Both", modes: ["generate", "edit"], enabled: true, lora: { file: "both.safetensors", model_from: "1", model_to: { node: "4", input: "model" } }, params: [{ id: "strength", title: "S", type: "float", min: 0, max: 1, step: 0.1, default: 0.5, target: "lora_strength" }] },
         { id: "editonly", title: "Edit only", modes: ["edit"], enabled: true, lora: { file: "e.safetensors", model_from: "1", model_to: { node: "4", input: "model" } } },
       ],
-      ["both.safetensors", "e.safetensors"],
+      [{ file: "both.safetensors", dest: "models/loras/" }, { file: "e.safetensors", dest: "models/loras/" }],
     );
     const { deps, seen } = await fake((_s, res) => json(res, 200, { prompt_id: "p1" }), { profile: { ...profile, styles } });
     await generate(deps, { ...ok, style: { id: "both", params: { strength: 0.3 } } });

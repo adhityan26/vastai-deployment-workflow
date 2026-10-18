@@ -24,7 +24,7 @@ function section(mutate?: (s: Doc) => void): Doc {
   mutate?.(s);
   return s;
 }
-const MODELS = [MODEL];
+const MODELS = [{ file: MODEL, dest: "models/upscale_models/" }];
 const spec = () => parseUpscale(section(), MODELS)!;
 
 function png(width: number, height: number): Buffer {
@@ -49,7 +49,12 @@ describe("parseUpscale", () => {
   });
 
   it("refuses an enabled section whose model is not listed in models", () => {
-    expect(() => parseUpscale(section(), ["other.pth"])).toThrow(ProfileError);
+    expect(() => parseUpscale(section(), [{ file: "other.pth", dest: "models/upscale_models/" }])).toThrow(ProfileError);
+  });
+
+  it("refuses an enabled section whose model entry is not downloaded into models/upscale_models/", () => {
+    expect(() => parseUpscale(section(), [{ file: MODEL, dest: "models/loras/" }])).toThrow(/upscale_models/);
+    expect(parseUpscale(section(), [{ file: MODEL, dest: "models/upscale_models" }])).not.toBeNull();
   });
 
   it("derives the final factor from the model factor when a scale leaves it out", () => {
@@ -68,6 +73,8 @@ describe("parseUpscale", () => {
     ["duplicate scale", (s) => (s.scales[1].name = "2x")],
     ["zero value", (s) => (s.scales[0].value = 0)],
     ["huge factor", (s) => (s.scales[0].factor = 1000)],
+    ["model with a path", (s) => (s.model = "../x.pth")],
+    ["model with a space", (s) => (s.model = "a b.pth")],
     ["factor that is not model_factor times value", (s) => (s.scales[0].factor = 3)],
     ["no model_factor", (s) => delete s.model_factor],
     ["zero model_factor", (s) => (s.model_factor = 0)],

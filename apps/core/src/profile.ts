@@ -67,6 +67,17 @@ export interface ModelSpec {
   readonly file: string;
   readonly size_bytes: number;
 }
+
+/** What styles and upscale check about a model entry: the file and the folder it lands in. */
+export interface ModelEntry {
+  readonly file: string;
+  readonly dest?: string;
+}
+
+/** True when `entry` downloads into the ComfyUI folder `folder` (e.g. "models/loras"), trailing slash or not. */
+export function landsIn(entry: ModelEntry, folder: string): boolean {
+  return (entry.dest ?? "").replace(/\/+$/, "") === folder;
+}
 export interface Profile {
   readonly name: string;
   readonly generate: GenerateSpec;
@@ -136,6 +147,16 @@ function parseModels(raw: unknown): ModelSpec[] {
       throw new ProfileError(`model ${file} size_bytes must be a positive integer`);
     }
     return { file, size_bytes: size };
+  });
+}
+
+/** File and dest of each model entry (already checked by parseModels), for the styles and upscale checks. */
+function modelEntries(raw: unknown): ModelEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const entry = item as Record<string, unknown>;
+    const dest = entry["dest"];
+    return { file: String(entry["file"]), ...(typeof dest === "string" ? { dest } : {}) };
   });
 }
 
@@ -239,8 +260,8 @@ export function loadProfile(path: string): Profile {
       name: required(raw["name"], "name"),
       generate: parseGenerate(raw["generate"]),
       edit: raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]),
-      styles: parseStyles(raw["styles"], models.map((m) => m.file)),
-      upscale: parseUpscale(raw["upscale"], models.map((m) => m.file)),
+      styles: parseStyles(raw["styles"], modelEntries(raw["models"])),
+      upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
       models,
     };
   } catch (e) {
