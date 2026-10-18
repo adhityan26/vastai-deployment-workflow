@@ -240,19 +240,19 @@ describe("styles in the profile", () => {
     const doc = parse(readFileSync(shipped, "utf8")) as Doc;
     expect(doc.styles[0].id).toBe("anything2real");
     expect(doc.styles[0].enabled).toBe(true);
-    expect(loadProfile(shipped).styles.map((s) => s.id)).toEqual(["anything2real"]);
+    expect(loadProfile(shipped).styles.map((s) => s.id)).toEqual(["anything2real", "faceswap"]);
     const entry = doc.models.find((m: Doc) => m.file === LORA);
     expect(entry).toMatchObject({ repo: "WarmBloodAban/Qwen-Image-2.1-LoRAs", dest: "models/loras/", size_bytes: 318820200 });
     expect(entry.revision).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("with the style off, its LoRA is not required among the models", () => {
-    expect(loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = false; })).styles).toEqual([]);
+    expect(loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = false; })).styles.map((s) => s.id)).toEqual(["faceswap"]);
   });
 
   it("turning the style on (model entry added, enabled true) offers it and counts its download", () => {
     const profile = loadProfile(writeProfile(enable));
-    expect(profile.styles.map((s) => s.id)).toEqual(["anything2real"]);
+    expect(profile.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap"]);
     expect(profile.models.map((m) => m.file)).toContain(LORA);
   });
 
@@ -265,8 +265,8 @@ describe("styles in the profile", () => {
     const style = profile.styles[0]!;
     for (const [workflow, mode] of [[template, "generate"], [editTemplate, "edit"]] as const) {
       const copy = structuredClone(workflow) as Record<string, { inputs: Record<string, unknown> }>;
-      expect(copy[style.lora.modelFrom]).toBeDefined();
-      expect(copy[style.lora.modelTo.node]!.inputs[style.lora.modelTo.input]).toEqual([style.lora.modelFrom, 0]);
+      expect(copy[style.lora!.modelFrom]).toBeDefined();
+      expect(copy[style.lora!.modelTo.node]!.inputs[style.lora!.modelTo.input]).toEqual([style.lora!.modelFrom, 0]);
       void mode;
     }
   });

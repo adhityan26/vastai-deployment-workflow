@@ -81,7 +81,18 @@ export interface StyleParam {
   choices?: string[];
   default: StyleValue;
 }
-export interface StyleInfo { id: string; title: string; modes: Mode[]; params: StyleParam[] }
+/** How many reference images an edit style needs and what each is for, in order. */
+export interface StyleReferences { min: number; max: number; labels: string[] }
+export interface StyleInfo {
+  id: string;
+  title: string;
+  modes: Mode[];
+  params: StyleParam[];
+  /** The style has its own prompt text: the user's prompt is optional notes. */
+  promptOptional: boolean;
+  references: StyleReferences | null;
+  hint: string | null;
+}
 /** What the server offers for upscale (null in the state when upscale is off). */
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
@@ -201,6 +212,18 @@ function parseStyleParam(v: unknown): StyleParam | null {
   return null;
 }
 
+const STYLE_REFERENCES_MAX = 16;
+
+/** A style's reference rule: null when it has none, undefined when it is unusable (the style is left out). */
+function parseStyleReferences(v: unknown): StyleReferences | null | undefined {
+  if (v === undefined || v === null) return null;
+  if (!isObj(v)) return undefined;
+  const { min, max, labels } = v;
+  if (!Number.isInteger(min) || !Number.isInteger(max) || (min as number) < 1 || (min as number) > (max as number) || (max as number) > STYLE_REFERENCES_MAX) return undefined;
+  const list = Array.isArray(labels) ? labels.filter((l): l is string => typeof l === "string").slice(0, max as number) : [];
+  return { min: min as number, max: max as number, labels: list };
+}
+
 function parseStyles(v: unknown): StyleInfo[] {
   if (!Array.isArray(v)) return [];
   return v.flatMap((st) => {
@@ -210,7 +233,17 @@ function parseStyles(v: unknown): StyleInfo[] {
     const params = rawParams.map(parseStyleParam);
     // A style whose panel cannot be drawn faithfully is left out rather than drawn wrong.
     if (modes.length === 0 || params.some((p) => p === null)) return [];
-    return [{ id: st["id"], title: st["title"], modes, params: params as StyleParam[] }];
+    const references = parseStyleReferences(st["references"]);
+    if (references === undefined) return [];
+    return [{
+      id: st["id"],
+      title: st["title"],
+      modes,
+      params: params as StyleParam[],
+      promptOptional: st["prompt_optional"] === true,
+      references,
+      hint: typeof st["hint"] === "string" && st["hint"] !== "" ? st["hint"] : null,
+    }];
   });
 }
 
@@ -695,6 +728,26 @@ export function editLabel(presetLabelText: string, resolution: string, reference
 /** The styles the server allows in a mode, in the order it lists them. */
 export function stylesForMode(styles: readonly StyleInfo[], mode: Mode): StyleInfo[] {
   return styles.filter((st) => st.modes.includes(mode));
+}
+
+/** The tag shown on the k-th attached reference: the style's label for it, else <imageK>. */
+export function referenceTag(style: StyleInfo | null, index: number): string {
+  return style?.references?.labels[index] ?? `<image${index + 1}>`;
+}
+
+/** What a style needs attached, in words; null when it has no rule. */
+export function referenceRuleText(style: StyleInfo | null): string | null {
+  const r = style?.references ?? null;
+  if (r === null) return null;
+  const count = r.min === r.max ? `exactly ${r.min}` : `${r.min} to ${r.max}`;
+  const order = r.labels.length > 0 ? ` in this order: ${r.labels.join(", ")}` : "";
+  return `${style!.title} needs ${count} image${r.max === 1 ? "" : "s"}${order}.`;
+}
+
+/** True when the number of attached references fits the style's rule (or it has none). */
+export function referencesFit(style: StyleInfo | null, count: number): boolean {
+  const r = style?.references ?? null;
+  return r === null || (count >= r.min && count <= r.max);
 }
 
 /** The parameter values a style panel starts with. */

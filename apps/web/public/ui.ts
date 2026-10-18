@@ -83,6 +83,9 @@ import {
   snapToStep,
   styleDefaults,
   styleRequest,
+  referenceRuleText,
+  referenceTag,
+  referencesFit,
   stylesForMode,
   type EditInfo,
   type Mode,
@@ -919,9 +922,13 @@ export function mountApp(doc: Document, env: Env): App {
     if (refRules !== null) {
       refInput.accept = acceptTypes(refRules);
       refInput.multiple = mode !== "upscale";
-      $("ref-hint").textContent = mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : s.edit ? referenceHint(s.edit) : "";
+      const rule = mode === "edit" ? referenceRuleText(currentStyle(s)) : null;
+      $("ref-hint").textContent = mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : rule ?? (s.edit ? referenceHint(s.edit) : "");
     }
     renderStyles(s);
+    // A style with its own prompt text takes the prompt as optional notes.
+    const notes = mode !== "upscale" && currentStyle(s)?.promptOptional === true;
+    $("prompt-label").textContent = notes ? "Notes (optional)" : "Prompt";
     const editing = mode === "edit";
     const upscaling = mode === "upscale";
     modeBox.hidden = s.edit === null && s.upscale === null;
@@ -936,7 +943,11 @@ export function mountApp(doc: Document, env: Env): App {
     promptRow.hidden = upscaling;
     samplingBox.hidden = upscaling;
     sizeBox.hidden = editing || upscaling;
-    promptBox.placeholder = editing ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>" : "";
+    promptBox.placeholder = notes
+      ? "Optional notes for this style"
+      : editing
+        ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>"
+        : "";
     const c = controls(s, busy, jobPending);
     const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : c.canGenerate;
     generateBtn.disabled = !allowed;
@@ -955,6 +966,7 @@ export function mountApp(doc: Document, env: Env): App {
   const styleBox = $("style-box");
   const stylesSeg = $("styles");
   const styleParamsBox = $("style-params");
+  const styleHint = $("style-hint");
   let styleKey = "";
 
   /** The style chosen for the current mode, only if the server still lists it for that mode. */
@@ -1012,12 +1024,22 @@ export function mountApp(doc: Document, env: Env): App {
   function renderStyles(s: ApiState): void {
     if (mode === "upscale") {
       styleBox.hidden = true;
+      if (styleKey !== "") {
+        styleKey = "";
+        renderReferences();
+      }
       return;
     }
     const m: Mode = mode;
     const list = stylesForMode(s.styles, m);
     styleBox.hidden = list.length === 0;
-    if (list.length === 0) return;
+    if (list.length === 0) {
+      if (styleKey !== "") {
+        styleKey = "";
+        renderReferences();
+      }
+      return;
+    }
     if (chosenStyle[m] !== null && !list.some((st) => st.id === chosenStyle[m])) chosenStyle[m] = null;
     const chosen = chosenStyle[m];
     // Rebuild only when the list or the choice changes, so a poll never resets a slider.
@@ -1034,6 +1056,9 @@ export function mountApp(doc: Document, env: Env): App {
     stylesSeg.replaceChildren(...buttons);
     const style = currentStyle(s);
     styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
+    styleHint.textContent = style?.hint ?? "";
+    styleHint.hidden = style?.hint == null;
+    renderReferences(); // the slots follow the style's labels
   }
 
   function selectStyle(id: string | null): void {
@@ -1050,6 +1075,7 @@ export function mountApp(doc: Document, env: Env): App {
     mode = next;
     formError.hidden = true;
     if (state) renderForm(state);
+    renderReferences();
   }
   modeGenerate.addEventListener("click", () => setMode("generate"));
   modeEdit.addEventListener("click", () => setMode("edit"));
@@ -1088,7 +1114,19 @@ export function mountApp(doc: Document, env: Env): App {
     refError.hidden = errors.length === 0;
   }
 
+  const refSwap = $<HTMLButtonElement>("ref-swap");
+  refSwap.addEventListener("click", () => {
+    if (references.length !== 2) return;
+    references.reverse();
+    renderReferences();
+  });
+
   function renderReferences(): void {
+    // A style with labelled references shows its slots in order, the missing ones as empty slots.
+    const style = mode === "edit" ? currentStyle(state) : null;
+    const labels = style?.references?.labels ?? [];
+    const empty = labels.slice(references.length).map((label) => make("li", `${label}: not attached yet`, "ref-empty"));
+    refSwap.hidden = !(style?.references != null && references.length === 2);
     refList.replaceChildren(
       ...references.map((r, i) => {
         const item = make("li");
@@ -1102,9 +1140,10 @@ export function mountApp(doc: Document, env: Env): App {
         remove.type = "button";
         remove.setAttribute("aria-label", `Remove reference ${i + 1}: ${r.file.name}`);
         remove.addEventListener("click", () => removeReference(r.id));
-        item.append(make("p", `<image${i + 1}>`, "ref-tag"), make("p", r.file.name, "ref-name"), remove);
+        item.append(make("p", referenceTag(style, i), "ref-tag"), make("p", r.file.name, "ref-name"), remove);
         return item;
       }),
+      ...empty,
     );
   }
 
@@ -1182,8 +1221,10 @@ export function mountApp(doc: Document, env: Env): App {
     formError.hidden = true;
     if (!controls(state, busy, jobPending).canEdit) return;
     const prompt = promptBox.value;
-    if (prompt.trim() === "") return formFail("Describe the change first.");
+    const chosen = currentStyle(state);
+    if (prompt.trim() === "" && chosen?.promptOptional !== true) return formFail("Describe the change first.");
     if (references.length === 0) return formFail("Attach at least one reference image.");
+    if (!referencesFit(chosen, references.length)) return formFail(referenceRuleText(chosen) ?? "Attach the images this style needs.");
     const seed = parseSeed($<HTMLInputElement>("seed").value);
     if (!seed.ok) return formFail(seed.message);
     if (selectedPreset === "" || resolutionSelect.value === "") return formFail("Choose a quality and a resolution.");
@@ -1202,7 +1243,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, "edit", prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
+      const entry = addEntry(id, "edit", prompt.trim() === "" && style ? style.title : prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;

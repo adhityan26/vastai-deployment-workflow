@@ -2340,22 +2340,36 @@ describe("styles", () => {
       {
         id: "anything2real",
         title: "Anything to Real",
+        kind: "lora",
         modes: ["edit"],
+        prompt_optional: false,
+        references: null,
+        hint: null,
         params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 }],
+      },
+      {
+        id: "faceswap",
+        title: "Face swap",
+        kind: "preset",
+        modes: ["edit"],
+        prompt_optional: true,
+        references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] },
+        hint: expect.stringContaining("consent"),
+        params: [],
       },
     ]);
     const text = JSON.stringify(body.styles);
-    for (const secret of [LORA, "model_from", "model_to", "lora", "target", "\"4\""]) expect(text).not.toContain(secret);
+    for (const secret of [LORA, "model_from", "model_to", '"lora":', "prompt_template", "target", "\"4\""]) expect(text).not.toContain(secret);
   });
 
   it("the shipped profile offers the style", async () => {
-    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real"]);
+    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
   });
 
   it("with the style off, state.styles is empty and the style is refused as unknown", async () => {
     h = await harness({ profile: styledProfile((doc) => (doc.styles[0].enabled = false)) });
     const m = await member();
-    expect((await call("GET", "/api/state", m)).json().styles).toEqual([]);
+    expect((await call("GET", "/api/state", m)).json().styles.map((s: { id: string }) => s.id)).toEqual(["faceswap"]);
     h.setComfy(comfyEdit());
     const res = await post("/api/edit", m, { ...okEdit, style: { id: "anything2real" } });
     expect(res.statusCode).toBe(400);
@@ -2684,5 +2698,37 @@ describe("live progress and previews", () => {
     const pending = doc.components.schemas.Job.oneOf.find((o: { properties: { status: { const: string } } }) => o.properties.status.const === "pending");
     expect(pending.required).toEqual(["status", "progress", "preview_seq"]);
     expect(pending.additionalProperties).toBe(false);
+  });
+});
+
+describe("face swap preset", () => {
+  const swap = (images: string[], prompt = "") => ({ ...okEdit, prompt, images, style: { id: "faceswap" } });
+  const two = [REF_A.toString("base64"), REF_A.toString("base64")];
+
+  it("refuses another number of references with a clear code and sends nothing", async () => {
+    h = await harness({ cfg: { generateMaxPromptChars: 2000 } });
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), swap([REF_A.toString("base64")]));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toEqual({ code: "style_reference_count", message: "this style needs exactly 2 reference images" });
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("submits the preset's own prompt with no LoRA, the prompt optional", async () => {
+    h = await harness({ cfg: { generateMaxPromptChars: 2000 } });
+    h.setComfy(comfyEdit([{ filename: "e.png", subfolder: "", type: "output" }]));
+    const m = await member();
+    const res = await post("/api/edit", m, swap(two));
+    expect(res.statusCode).toBe(202);
+    const sent = JSON.parse(h.comfySeen.at(-1)!.body).prompt;
+    expect(sent["6"].inputs.prompt).toMatch(/^Edit <image1>: replace only the face .* exactly one person\.$/);
+    expect(sent).not.toHaveProperty("style_lora");
+    expect(sent["6"].inputs["images.image_2"]).toEqual(["ref_2", 0]);
+  });
+
+  it("the whole prompt must fit GENERATE_MAX_PROMPT_CHARS", async () => {
+    const res = await post("/api/edit", await member(), swap(two)); // the default harness allows 50 characters
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("prompt_too_long");
   });
 });

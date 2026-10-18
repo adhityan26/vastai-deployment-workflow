@@ -134,7 +134,7 @@
     </div>
     <form id="gen-form" novalidate>
       <div id="prompt-box">
-        <label for="prompt">Prompt</label>
+        <label id="prompt-label" for="prompt">Prompt</label>
         <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
         <p id="prompt-count" class="muted">0 characters</p>
       </div>
@@ -145,6 +145,7 @@
         <input id="ref-input" name="references" type="file" multiple>
         <p id="ref-error" class="alert bad" role="alert" hidden></p>
         <ul id="ref-list" class="refs" aria-label="Attached images"></ul>
+        <button id="ref-swap" type="button" hidden>Swap order</button>
         <div id="resolution-box">
           <label for="resolution">Resolution</label>
           <select id="resolution" name="resolution"></select>
@@ -159,6 +160,7 @@
         <legend>Style</legend>
         <div id="styles" class="seg"></div>
         <div id="style-params" class="style-params"></div>
+        <p id="style-hint" class="muted" hidden></p>
       </fieldset>
 
       <div id="sampling-box">

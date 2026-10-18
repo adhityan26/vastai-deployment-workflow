@@ -58,7 +58,8 @@ edit:
   resolutions:
     - {name: "1024", value: 1024}
 
-# Styles: a LoRA with its own parameters, offered as a sub-menu of a mode (design:
+# Styles: a LoRA (kind: lora, the default) or a preset prompt (kind: preset) with its own parameters, offered as a
+# sub-menu of a mode (design:
 # docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md). A style is OFF until `enabled: true`, and an
 # enabled style needs its LoRA in `models:` with dest models/loras/ (pin it with scripts/pin_model.py).
 # "Anything to Real" is ON for the live test: its LoRA is pinned above and the agent downloads it at boot. `lora.model_from` is the node whose MODEL
@@ -75,6 +76,17 @@ styles:
       model_to: {node: "4", input: model}
     params:
       - {id: strength, title: LoRA strength, type: float, min: 0.4, max: 1.0, step: 0.05, default: 0.7, target: lora_strength}
+  # "Face swap": a preset (no LoRA, nothing to download), edit only. It sends the owner's tested instruction with the
+  # user's optional notes in place of {prompt}, and needs exactly two references: <image1> is the scene to keep, <image2>
+  # the face to use. The whole prompt must fit GENERATE_MAX_PROMPT_CHARS.
+  - id: faceswap
+    title: Face swap
+    kind: preset
+    modes: [edit]
+    enabled: true
+    prompt_template: "Edit <image1>: replace only the face of the person in <image1> with the face of the person in <image2>. Keep the body, pose, hair, clothing, background, lighting and camera framing of <image1> exactly the same. The result must contain exactly one person. {prompt}"
+    references: {min: 2, max: 2, labels: ["Scene to keep", "Face to use"]}
+    hint: "Results depend on the model. Only use a face with the consent of the person in the second photo."
 
 # Upscale mode (design: docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md, section 6): one image in,
 # a bigger one out through an upscale model (ImageUpscaleWithModel). ON for the live test with Real-ESRGAN x4plus

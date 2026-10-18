@@ -341,6 +341,22 @@ Live test (UNVERIFIED): edit an anime image with and without the style at streng
 "Use as reference" on a result downloads the image from `/api/image/...` into the page and attaches it as a reference
 in Edit (optionally with an edit style chosen). It goes through the same checks as an upload.
 
+### Face swap (a preset style)
+
+"Face swap" is a style without a LoRA (`kind: preset`, nothing to download), edit only. It sends the owner's tested
+instruction from `prompt_template` (in `instance/profiles/image.yaml`); the user's prompt becomes optional notes that
+replace `{prompt}` at its end, inserted once as plain text. The whole prompt must fit `GENERATE_MAX_PROMPT_CHARS`
+(default 2000; the instruction alone is about 290 characters), else `prompt_too_long`. Its `references` rule needs
+exactly two images: 1 = "Scene to keep" (body, pose, hair, clothes, background stay), 2 = "Face to use". The server
+refuses any other number with `style_reference_count` before anything is uploaded; the page shows the two labelled
+slots in order with a "Swap order" button and a hint that results depend on the model and that the person in the
+second photo must consent. The quality preset stays whatever the user chose.
+
+How to use: Edit images, choose "Face swap", attach the scene photo first and the face photo second (or press Swap
+order), optionally add notes, press Edit. To change the wording, edit `prompt_template` (keep exactly one `{prompt}`);
+to turn it off set `enabled: false`. Other presets can be added the same way: `kind: preset`, `prompt_template`
+and/or params with node targets, optional `references: {min, max, labels}` (edit styles only) and `hint`.
+
 ## Upscale
 
 A third mode, "Upscale": one image in, a bigger one out (`ImageUpscaleWithModel`, then `ImageScaleBy` to trim 4x to

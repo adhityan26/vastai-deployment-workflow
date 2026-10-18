@@ -3,7 +3,7 @@ import type { ComfyClient } from "./comfy.js";
 import type { AppsConfig } from "./config.js";
 import { buildEditPrompt, buildPrompt, GenerateInputError, type Profile } from "./profile.js";
 import { buildUpscalePrompt } from "./upscale.js";
-import { resolveStyle } from "./styles.js";
+import { checkStyleReferences, resolveStyle, stylePrompt } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
 
 export class GenerateTimeout extends Error {
@@ -70,6 +70,18 @@ function intKey(cfg: AppsConfig, key: string): number {
   return v;
 }
 
+/** checkPromptAndSeed, saying so when a style's own text made the prompt too long. */
+function checkStyledPrompt(cfg: AppsConfig, random: (() => number) | undefined, templated: boolean, input: { prompt: unknown; seed?: unknown }): number {
+  try {
+    return checkPromptAndSeed(cfg, random, input);
+  } catch (err) {
+    if (templated && err instanceof GenerateInputError && err.code === "prompt_too_long") {
+      throw new GenerateInputError("prompt_too_long", `the style's text and your notes exceed ${intKey(cfg, "generateMaxPromptChars")} characters`);
+    }
+    throw err;
+  }
+}
+
 /** The prompt and seed checks shared by generate and edit; returns the seed to use. */
 function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined, input: { prompt: unknown; seed?: unknown }): number {
   const maxChars = intKey(cfg, "generateMaxPromptChars");
@@ -91,10 +103,12 @@ function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined,
 
 /** Validate the request, then submit the filled workflow. Validation errors never reach ComfyUI. */
 export async function generate(deps: GenerateDeps, input: GenerateRequest): Promise<{ promptId: string }> {
-  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
   const style = resolveStyle(deps.profile.styles, "generate", input.style);
+  // A style with a prompt template makes the user's prompt optional notes; the whole text is checked.
+  const text = stylePrompt(style, input.prompt);
+  const seed = checkStyledPrompt(deps.cfg, deps.random, style?.style.promptTemplate != null, { prompt: text, seed: input.seed });
   const prompt = buildPrompt(deps.profile, deps.template, {
-    prompt: input.prompt,
+    prompt: text as string,
     preset: input.preset,
     size: input.size,
     seed,
@@ -144,12 +158,15 @@ const NAME_TOKEN_BYTES = 8;
  * failed upload (ComfyError, Unreachable, ResponseTooLarge) stops the job without submitting.
  */
 export async function edit(deps: EditDeps, input: EditRequest): Promise<{ promptId: string }> {
-  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
+  const style = resolveStyle(deps.profile.styles, "edit", input.style);
+  // A style with a prompt template makes the user's prompt optional notes; the whole text is checked.
+  const text = stylePrompt(style, input.prompt);
+  const seed = checkStyledPrompt(deps.cfg, deps.random, style?.style.promptTemplate != null, { prompt: text, seed: input.seed });
   const references = decodeReferences(input.images, referenceLimits(deps.cfg));
+  checkStyleReferences(style, references.length);
   // Dry run with placeholder names: preset, resolution, edit section and workflow mismatches
   // surface now, before anything is uploaded.
-  const style = resolveStyle(deps.profile.styles, "edit", input.style);
-  const fields = { prompt: input.prompt, preset: input.preset, resolution: input.resolution, seed, style };
+  const fields = { prompt: text as string, preset: input.preset, resolution: input.resolution, seed, style };
   buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: references.map((_r, i) => `check-${i}.png`) });
 
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));

@@ -489,7 +489,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       styles: deps.profile.styles.map((st) => ({
         id: st.id,
         title: st.title,
+        kind: st.kind,
         modes: [...st.modes],
+        // A style with a prompt template takes the prompt as optional notes.
+        prompt_optional: st.promptTemplate !== null,
+        references: st.references === null ? null : { min: st.references.min, max: st.references.max, labels: [...st.references.labels] },
+        hint: st.hint,
         params: st.params.map((p) => ({
           id: p.id,
           title: p.title,

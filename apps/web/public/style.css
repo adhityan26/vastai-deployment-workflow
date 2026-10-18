@@ -172,3 +172,5 @@ ul { padding: 0; margin: 0; list-style: none; }
 .live-preview { margin: 8px 0 0; max-width: min(100%, 16rem); }
 .live-preview img { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--bg); }
 .live-preview figcaption { margin-top: 4px; }
+.refs li.ref-empty { border: 1px dashed var(--border); border-radius: 8px; padding: 8px; color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+#ref-swap { margin-top: 8px; }

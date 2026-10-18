@@ -24,10 +24,22 @@ export interface StyleParam {
   readonly target: ParamTarget;
 }
 
+/** `lora`: a LoRA loader is inserted into the workflow. `preset`: no model at all, only a prompt template and rules. */
+export type StyleKind = "lora" | "preset";
+
+/** How many reference images an edit style takes, and what each one is for (in order). */
+export interface StyleReferences {
+  readonly min: number;
+  readonly max: number;
+  readonly labels: readonly string[];
+}
+
 export interface StyleSpec {
   readonly id: string;
   readonly title: string;
+  readonly kind: StyleKind;
   readonly modes: readonly StyleMode[];
+  /** Null for a preset. */
   readonly lora: {
     /** File name in ComfyUI's loras folder (the profile lists the same file in `models`). */
     readonly file: string;
@@ -35,8 +47,17 @@ export interface StyleSpec {
     readonly modelFrom: string;
     /** The node input that is rewired to the loader's output. */
     readonly modelTo: { readonly node: string; readonly input: string };
-  };
+  } | null;
   readonly params: readonly StyleParam[];
+  /**
+   * The prompt the style sends, with exactly one `{prompt}` where the user's optional notes go; null means
+   * the user's prompt is sent as it is (and is required).
+   */
+  readonly promptTemplate: string | null;
+  /** The reference images the style needs (edit only); null means the mode's usual rule. */
+  readonly references: StyleReferences | null;
+  /** A short note the page shows with the style; null for none. */
+  readonly hint: string | null;
 }
 
 export interface ResolvedStyle {
@@ -56,7 +77,15 @@ const TITLE_MAX = 60;
 const CHOICE_MAX = 64;
 const MODES: readonly StyleMode[] = ["generate", "edit"];
 const TYPES: readonly StyleParamType[] = ["float", "int", "choice", "bool"];
-const STYLE_KEYS = new Set(["id", "title", "modes", "enabled", "lora", "params"]);
+const STYLE_KEYS = new Set(["id", "title", "kind", "modes", "enabled", "lora", "params", "prompt_template", "references", "hint"]);
+const REFERENCE_KEYS = new Set(["min", "max", "labels"]);
+const KINDS: readonly StyleKind[] = ["lora", "preset"];
+/** The placeholder of a prompt template; replaced once, never re-expanded. */
+export const PROMPT_PLACEHOLDER = "{prompt}";
+const TEMPLATE_MAX = 4000;
+const HINT_MAX = 300;
+const LABEL_MAX = 40;
+const REFERENCES_MAX = 16;
 const LORA_KEYS = new Set(["file", "model_from", "model_to"]);
 const PARAM_KEYS = new Set(["id", "title", "type", "min", "max", "step", "choices", "default", "target"]);
 /** The node id of the LoRA loader the web app inserts. */
@@ -143,17 +172,25 @@ function parseOne(raw: unknown, models: readonly ModelEntry[]): { style: StyleSp
     throw new ProfileError(`style ${id}: modes must be a non-empty list of distinct values from ${MODES.join(", ")}`);
   }
   if (typeof s["enabled"] !== "boolean") throw new ProfileError(`style ${id}: enabled must be true or false`);
+  const kind = (s["kind"] ?? "lora") as StyleKind;
+  if (!KINDS.includes(kind)) throw new ProfileError(`style ${id}: kind must be one of ${KINDS.join(", ")}`);
 
-  const lora = mapping(s["lora"], `style ${id} lora`);
-  noUnknownKeys(lora, LORA_KEYS, `style ${id} lora`);
-  const file = text(lora["file"], `style ${id} lora file`, 128);
-  if (!FILE_NAME.test(file)) throw new ProfileError(`style ${id}: lora file must be one plain file name`);
-  const modelFrom = text(lora["model_from"], `style ${id} lora model_from`, 32);
-  const to = mapping(lora["model_to"], `style ${id} lora model_to`);
-  noUnknownKeys(to, new Set(["node", "input"]), `style ${id} lora model_to`);
-  const modelTo = { node: text(to["node"], `style ${id} lora model_to node`, 32), input: text(to["input"], `style ${id} lora model_to input`, 64) };
-  if (!NODE_ID.test(modelFrom) || !NODE_ID.test(modelTo.node) || !INPUT_NAME.test(modelTo.input)) {
-    throw new ProfileError(`style ${id}: lora model_from/model_to must be plain node ids and an input name`);
+  let lora: StyleSpec["lora"] = null;
+  if (kind === "preset") {
+    if (s["lora"] !== undefined) throw new ProfileError(`style ${id}: a preset has no lora`);
+  } else {
+    const l = mapping(s["lora"], `style ${id} lora`);
+    noUnknownKeys(l, LORA_KEYS, `style ${id} lora`);
+    const file = text(l["file"], `style ${id} lora file`, 128);
+    if (!FILE_NAME.test(file)) throw new ProfileError(`style ${id}: lora file must be one plain file name`);
+    const modelFrom = text(l["model_from"], `style ${id} lora model_from`, 32);
+    const to = mapping(l["model_to"], `style ${id} lora model_to`);
+    noUnknownKeys(to, new Set(["node", "input"]), `style ${id} lora model_to`);
+    const modelTo = { node: text(to["node"], `style ${id} lora model_to node`, 32), input: text(to["input"], `style ${id} lora model_to input`, 64) };
+    if (!NODE_ID.test(modelFrom) || !NODE_ID.test(modelTo.node) || !INPUT_NAME.test(modelTo.input)) {
+      throw new ProfileError(`style ${id}: lora model_from/model_to must be plain node ids and an input name`);
+    }
+    lora = { file, modelFrom, modelTo };
   }
 
   const paramsRaw = s["params"] === undefined ? [] : s["params"];
@@ -161,15 +198,40 @@ function parseOne(raw: unknown, models: readonly ModelEntry[]): { style: StyleSp
   const params = paramsRaw.map((p) => parseParam(p, id));
   if (new Set(params.map((p) => p.id)).size !== params.length) throw new ProfileError(`style ${id}: param ids must be unique`);
   if (params.filter((p) => p.target.kind === "lora_strength").length > 1) throw new ProfileError(`style ${id}: only one param may target lora_strength`);
+  if (lora === null && params.some((p) => p.target.kind === "lora_strength")) throw new ProfileError(`style ${id}: a preset has no LoRA strength`);
+
+  let promptTemplate: string | null = null;
+  if (s["prompt_template"] !== undefined) {
+    promptTemplate = text(s["prompt_template"], `style ${id} prompt_template`, TEMPLATE_MAX);
+    if (promptTemplate.split(PROMPT_PLACEHOLDER).length !== 2) throw new ProfileError(`style ${id}: prompt_template must contain ${PROMPT_PLACEHOLDER} exactly once`);
+  }
+
+  let references: StyleReferences | null = null;
+  if (s["references"] !== undefined) {
+    if (!(modesRaw as StyleMode[]).every((m) => m === "edit")) throw new ProfileError(`style ${id}: references are only for edit styles`);
+    const r = mapping(s["references"], `style ${id} references`);
+    noUnknownKeys(r, REFERENCE_KEYS, `style ${id} references`);
+    const min = r["min"];
+    const max = r["max"];
+    if (!Number.isInteger(min) || !Number.isInteger(max) || (min as number) < 1 || (min as number) > (max as number) || (max as number) > REFERENCES_MAX) {
+      throw new ProfileError(`style ${id}: references min and max must be whole numbers with 1 <= min <= max <= ${REFERENCES_MAX}`);
+    }
+    const labelsRaw = r["labels"] ?? [];
+    if (!Array.isArray(labelsRaw) || labelsRaw.length > (max as number)) throw new ProfileError(`style ${id}: references labels must be a list of at most max entries`);
+    const labels = labelsRaw.map((l) => text(l, `style ${id} references label`, LABEL_MAX));
+    references = { min: min as number, max: max as number, labels };
+  }
+  const hint = s["hint"] === undefined ? null : text(s["hint"], `style ${id} hint`, HINT_MAX);
+  if (kind === "preset" && promptTemplate === null && params.length === 0) throw new ProfileError(`style ${id}: a preset needs a prompt_template or params`);
 
   const enabled = s["enabled"];
-  if (enabled) {
-    const entry = models.find((m) => m.file.split("/").pop() === file);
-    if (entry === undefined) throw new ProfileError(`style ${id} is enabled but its LoRA file ${file} is not listed in models`);
+  if (enabled && lora !== null) {
+    const entry = models.find((m) => m.file.split("/").pop() === lora.file);
+    if (entry === undefined) throw new ProfileError(`style ${id} is enabled but its LoRA file ${lora.file} is not listed in models`);
     // LoraLoaderModelOnly only lists ComfyUI's loras folder: anywhere else the style would fail at run time.
-    if (!landsIn(entry, LORA_FOLDER)) throw new ProfileError(`style ${id}: the models entry for ${file} must have dest ${LORA_FOLDER}/`);
+    if (!landsIn(entry, LORA_FOLDER)) throw new ProfileError(`style ${id}: the models entry for ${lora.file} must have dest ${LORA_FOLDER}/`);
   }
-  return { style: { id, title, modes: modesRaw as StyleMode[], lora: { file, modelFrom, modelTo }, params }, enabled };
+  return { style: { id, title, kind, modes: modesRaw as StyleMode[], lora, params, promptTemplate, references, hint }, enabled };
 }
 
 /**
@@ -247,13 +309,17 @@ export function applyStyle(prompt: ComfyPrompt, resolved: ResolvedStyle): void {
   const mismatch = (what: string): never => {
     throw new GenerateInputError("workflow_mismatch", `style ${style.id}: ${what}`);
   };
-  const { modelFrom, modelTo, file } = style.lora;
-  if (STYLE_LORA_NODE in prompt) mismatch(`workflow already has a node ${STYLE_LORA_NODE}`);
-  if (!prompt[modelFrom]) mismatch(`workflow lacks node ${modelFrom}`);
-  const consumer = prompt[modelTo.node];
-  if (!consumer || typeof consumer.inputs !== "object" || consumer.inputs === null) mismatch(`workflow lacks node ${modelTo.node}`);
-  const link = consumer!.inputs[modelTo.input];
-  if (!Array.isArray(link) || link[0] !== modelFrom) mismatch(`node ${modelTo.node} input ${modelTo.input} is not fed by node ${modelFrom}`);
+  const lora = style.lora;
+  let consumer: ComfyPrompt[string] | undefined;
+  if (lora !== null) {
+    const { modelFrom, modelTo } = lora;
+    if (STYLE_LORA_NODE in prompt) mismatch(`workflow already has a node ${STYLE_LORA_NODE}`);
+    if (!prompt[modelFrom]) mismatch(`workflow lacks node ${modelFrom}`);
+    consumer = prompt[modelTo.node];
+    if (!consumer || typeof consumer.inputs !== "object" || consumer.inputs === null) mismatch(`workflow lacks node ${modelTo.node}`);
+    const link = consumer!.inputs[modelTo.input];
+    if (!Array.isArray(link) || link[0] !== modelFrom) mismatch(`node ${modelTo.node} input ${modelTo.input} is not fed by node ${modelFrom}`);
+  }
 
   let strength = 1;
   for (const param of style.params) {
@@ -268,6 +334,32 @@ export function applyStyle(prompt: ComfyPrompt, resolved: ResolvedStyle): void {
     }
     node!.inputs[param.target.input] = value;
   }
-  prompt[STYLE_LORA_NODE] = { class_type: LORA_CLASS, inputs: { model: [modelFrom, 0], lora_name: file, strength_model: strength } };
-  consumer!.inputs[modelTo.input] = [STYLE_LORA_NODE, 0];
+  if (lora === null) return;
+  prompt[STYLE_LORA_NODE] = { class_type: LORA_CLASS, inputs: { model: [lora.modelFrom, 0], lora_name: lora.file, strength_model: strength } };
+  consumer!.inputs[lora.modelTo.input] = [STYLE_LORA_NODE, 0];
+}
+
+/**
+ * The prompt a job sends: the user's prompt as it is, or, for a style with a prompt template, the
+ * template with the user's optional notes in place of `{prompt}` (trimmed; nothing when empty). The
+ * notes are inserted as plain text exactly once: a `{prompt}` or `$&` inside them stays literal. The
+ * caller checks the length of the result.
+ */
+export function stylePrompt(resolved: ResolvedStyle | null, userPrompt: unknown): unknown {
+  const template = resolved?.style.promptTemplate ?? null;
+  if (template === null) return userPrompt;
+  if (userPrompt !== undefined && userPrompt !== null && typeof userPrompt !== "string") {
+    throw new GenerateInputError("invalid_prompt", "prompt must be a string");
+  }
+  const notes = typeof userPrompt === "string" ? userPrompt.trim() : "";
+  const at = template.indexOf(PROMPT_PLACEHOLDER);
+  return `${template.slice(0, at)}${notes}${template.slice(at + PROMPT_PLACEHOLDER.length)}`.trim();
+}
+
+/** Refuse an edit whose number of references does not match what the style needs. */
+export function checkStyleReferences(resolved: ResolvedStyle | null, count: number): void {
+  const rule = resolved?.style.references ?? null;
+  if (rule === null || (count >= rule.min && count <= rule.max)) return;
+  const needs = rule.min === rule.max ? `exactly ${rule.min}` : `between ${rule.min} and ${rule.max}`;
+  throw new GenerateInputError("style_reference_count", `this style needs ${needs} reference images`);
 }

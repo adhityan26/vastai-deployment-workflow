@@ -444,3 +444,54 @@ def test_the_upscale_section_is_the_webs_business_and_its_workflow_ships_with_th
     assert model.repo == "Comfy-Org/Real-ESRGAN_repackaged" and model.size_bytes == 66857836
     graph = json.loads((root / "workflows" / "image-upscale.json").read_text())
     assert {n["class_type"] for n in graph.values()} >= {"LoadImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "SaveImage"}
+
+
+def _shipped_raw():
+    import yaml
+    from pathlib import Path
+
+    shipped = Path(__file__).resolve().parents[2] / "profiles" / "image.yaml"
+    return shipped, yaml.safe_load(shipped.read_text())
+
+
+def test_the_face_swap_preset_ships_enabled_and_needs_no_model():
+    shipped, raw = _shipped_raw()
+    swap = next(s for s in raw["styles"] if s["id"] == "faceswap")
+    assert swap["kind"] == "preset" and swap["enabled"] is True and swap["modes"] == ["edit"]
+    assert "lora" not in swap
+    assert swap["references"] == {"min": 2, "max": 2, "labels": ["Scene to keep", "Face to use"]}
+    assert swap["prompt_template"].count("{prompt}") == 1
+    profile = load_profile(shipped)
+    # Nothing in models belongs to the preset: every models/loras entry is a lora style's file.
+    lora_files = {s["lora"]["file"] for s in raw["styles"] if s.get("kind", "lora") == "lora"}
+    assert {m.file for m in profile.models if m.dest == "models/loras/"} == lora_files
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda s: s.update(kind="magic"), "kind must be one of lora, preset"),
+    (lambda s: s.update(lora={"file": "x.safetensors"}), "a preset has no lora"),
+    (lambda s: s.update(references={"min": 3, "max": 2}), "1 <= min <= max <= 16"),
+    (lambda s: s.update(references={"min": True, "max": 2}), "1 <= min <= max <= 16"),
+    (lambda s: s.update(references={"min": 2, "max": 2, "labels": ["a", "b", "c"]}), "labels must be at most max"),
+    (lambda s: s.update(references="two"), "references must be a mapping"),
+])
+def test_a_malformed_style_fails_the_profile(tmp_path, change, message):
+    import yaml
+
+    _, raw = _shipped_raw()
+    change(next(s for s in raw["styles"] if s["id"] == "faceswap"))
+    path = tmp_path / "image.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ProfileError, match=message):
+        load_profile(path)
+
+
+def test_a_lora_style_without_its_lora_section_fails_the_profile(tmp_path):
+    import yaml
+
+    _, raw = _shipped_raw()
+    del raw["styles"][0]["lora"]
+    path = tmp_path / "image.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ProfileError, match="a lora style needs a lora section"):
+        load_profile(path)

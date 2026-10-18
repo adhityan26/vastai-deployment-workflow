@@ -652,11 +652,22 @@ describe("gallery helpers", () => {
 describe("styles from the state", () => {
   const strength = { id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 };
   const style = { id: "anything2real", title: "Anything to Real", modes: ["edit"], params: [strength] };
+  const parsed = { ...style, promptOptional: false, references: null, hint: null };
 
   it("is an empty list when the server sends none or something unusable", () => {
     expect(parseState(base)!.styles).toEqual([]);
     expect(parseState({ ...base, styles: "x" })!.styles).toEqual([]);
-    expect(parseState({ ...base, styles: [style] })!.styles).toEqual([style]);
+    expect(parseState({ ...base, styles: [style] })!.styles).toEqual([parsed]);
+  });
+
+  it("reads a preset's reference rule, optional prompt and hint; leaves out a style with an unusable rule", () => {
+    const swap = { id: "faceswap", title: "Face swap", kind: "preset", modes: ["edit"], params: [], prompt_optional: true, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use", "extra"] }, hint: "Ask first." };
+    expect(parseState({ ...base, styles: [swap] })!.styles).toEqual([
+      { id: "faceswap", title: "Face swap", modes: ["edit"], params: [], promptOptional: true, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Ask first." },
+    ]);
+    for (const references of [{ min: 0, max: 2 }, { min: 3, max: 2 }, { min: 1, max: 99 }, { min: "2", max: 2 }, "two"]) {
+      expect(parseState({ ...base, styles: [{ ...swap, references }, style] })!.styles.map((s) => s.id)).toEqual(["anything2real"]);
+    }
   });
 
   it("leaves out a style whose panel cannot be drawn faithfully, keeps the others", () => {

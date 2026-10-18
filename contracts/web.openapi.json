@@ -684,13 +684,17 @@
           },
           "styles": {
             "type": "array",
-            "description": "Enabled styles (LoRA variations with their own parameters) the page may offer under the modes they list",
+            "description": "Enabled styles (a LoRA variation or a preset prompt) with their own parameters, offered under the modes they list",
             "items": {
               "type": "object",
               "required": [
                 "id",
                 "title",
+                "kind",
                 "modes",
+                "prompt_optional",
+                "references",
+                "hint",
                 "params"
               ],
               "additionalProperties": false,
@@ -701,6 +705,14 @@
                 "title": {
                   "type": "string"
                 },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "lora",
+                    "preset"
+                  ],
+                  "description": "lora inserts a LoRA; preset only sends the style's own prompt text and checks its rules"
+                },
                 "modes": {
                   "type": "array",
                   "items": {
@@ -710,6 +722,51 @@
                       "edit"
                     ]
                   }
+                },
+                "prompt_optional": {
+                  "type": "boolean",
+                  "description": "True when the style has its own prompt text: the user's prompt is optional notes added to it, and the whole must fit GENERATE_MAX_PROMPT_CHARS"
+                },
+                "references": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "min",
+                        "max",
+                        "labels"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "min": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "max": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "labels": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "What each reference is for, in order (image 1 first)"
+                        }
+                      }
+                    }
+                  ],
+                  "description": "How many reference images an edit with this style needs (the server refuses another count with code style_reference_count); null means the usual edit rule"
+                },
+                "hint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A short note to show with the style"
                 },
                 "params": {
                   "type": "array",
@@ -3345,7 +3402,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param); style_reference_count when a style needs another number of reference images",
             "content": {
               "application/json": {
                 "schema": {

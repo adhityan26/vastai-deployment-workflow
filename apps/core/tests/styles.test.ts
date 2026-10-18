@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GenerateInputError, ProfileError } from "../src/profile-errors.js";
-import { applyStyle, parseStyles, resolveStyle, type StyleSpec } from "../src/styles.js";
+import { applyStyle, checkStyleReferences, parseStyles, resolveStyle, stylePrompt, type StyleSpec } from "../src/styles.js";
 
 type Doc = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -242,5 +242,85 @@ describe("applyStyle", () => {
       l[0].params = [{ id: "mode", title: "M", type: "choice", choices: ["a"], default: "a", target: { node: "9", input: "x" } }];
     }) as StyleSpec[];
     expect(() => apply(base(), { mode: "a" }, list)).toThrowError(expect.objectContaining({ code: "workflow_mismatch" }));
+  });
+});
+
+describe("preset styles (no LoRA)", () => {
+  const TEMPLATE = "Edit <image1> with the face of <image2>. {prompt}";
+  const preset = (over: Doc = {}): Doc => ({
+    id: "faceswap",
+    title: "Face swap",
+    kind: "preset",
+    modes: ["edit"],
+    enabled: true,
+    prompt_template: TEMPLATE,
+    references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] },
+    hint: "Ask first.",
+    ...over,
+  });
+  const parseOne = (over: Doc = {}, files: readonly Entry[] = models) => parseStyles([preset(over)], files);
+
+  it("parses a preset that needs no model at all", () => {
+    const [style] = parseOne({}, []);
+    expect(style).toEqual({
+      id: "faceswap", title: "Face swap", kind: "preset", modes: ["edit"], lora: null, params: [],
+      promptTemplate: TEMPLATE, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Ask first.",
+    });
+    // The existing LoRA style keeps its kind and has no template or rules.
+    expect(parse()[0]).toMatchObject({ kind: "lora", promptTemplate: null, references: null, hint: null });
+  });
+
+  it("refuses a malformed preset", () => {
+    const bad: [Doc, RegExp][] = [
+      [{ kind: "magic" }, /kind must be one of lora, preset/],
+      [{ lora: { file: LORA, model_from: "1", model_to: { node: "4", input: "model" } } }, /a preset has no lora/],
+      [{ params: [{ id: "strength", title: "S", type: "float", min: 0, max: 1, step: 0.1, default: 0.5, target: "lora_strength" }] }, /a preset has no LoRA strength/],
+      [{ prompt_template: "no placeholder" }, /contain \{prompt\} exactly once/],
+      [{ prompt_template: "{prompt} and {prompt}" }, /contain \{prompt\} exactly once/],
+      [{ prompt_template: undefined, params: [] }, /needs a prompt_template or params/],
+      [{ modes: ["generate", "edit"] }, /references are only for edit styles/],
+      [{ references: { min: 3, max: 2 } }, /1 <= min <= max <= 16/],
+      [{ references: { min: 0, max: 2 } }, /1 <= min <= max <= 16/],
+      [{ references: { min: 1, max: 17 } }, /1 <= min <= max <= 16/],
+      [{ references: { min: 2, max: 2, labels: ["a", "b", "c"] } }, /at most max entries/],
+      [{ references: { min: 2, max: 2, extra: 1 } }, /unknown keys: extra/],
+      [{ references: { min: 2, max: 2, labels: ["x".repeat(41), "b"] } }, /label must be a non-empty string/],
+      [{ hint: "" }, /hint must be a non-empty string/],
+    ];
+    for (const [over, message] of bad) expect(() => parseOne(over), JSON.stringify(over)).toThrow(message);
+    expect(() => parseOne({ references: undefined, modes: ["generate", "edit"] })).not.toThrow();
+  });
+
+  it("puts the user's notes into the template once, as plain text", () => {
+    const [style] = parseOne();
+    const resolved = resolveStyle([style!], "edit", { id: "faceswap" });
+    expect(stylePrompt(resolved, "  keep the earrings ")).toBe("Edit <image1> with the face of <image2>. keep the earrings");
+    expect(stylePrompt(resolved, "")).toBe("Edit <image1> with the face of <image2>.");
+    expect(stylePrompt(resolved, undefined)).toBe("Edit <image1> with the face of <image2>.");
+    expect(stylePrompt(resolved, "$& {prompt} $1")).toBe("Edit <image1> with the face of <image2>. $& {prompt} $1");
+    expect(() => stylePrompt(resolved, 5)).toThrow(new GenerateInputError("invalid_prompt", "prompt must be a string"));
+    // Without a template the prompt goes through unchanged (and is checked by the caller).
+    expect(stylePrompt(null, "x")).toBe("x");
+    expect(stylePrompt(resolveStyle(parse(), "edit", { id: "anything2real" }), 5)).toBe(5);
+  });
+
+  it("checks the exact number of references a style needs", () => {
+    const [style] = parseOne();
+    const resolved = resolveStyle([style!], "edit", { id: "faceswap" });
+    for (const n of [0, 1, 3]) {
+      expect(() => checkStyleReferences(resolved, n)).toThrow(new GenerateInputError("style_reference_count", "this style needs exactly 2 reference images"));
+    }
+    expect(() => checkStyleReferences(resolved, 2)).not.toThrow();
+    const [range] = parseOne({ references: { min: 1, max: 3 } });
+    expect(() => checkStyleReferences(resolveStyle([range!], "edit", { id: "faceswap" }), 4)).toThrow(/between 1 and 3/);
+    expect(() => checkStyleReferences(null, 9)).not.toThrow();
+  });
+
+  it("adds no LoRA loader to the workflow", () => {
+    const [style] = parseOne();
+    const prompt: Doc = { "1": { class_type: "UnetLoaderGGUF", inputs: {} }, "4": { class_type: "KSampler", inputs: { model: ["1", 0] } } };
+    applyStyle(prompt, { style: style!, values: {} });
+    expect(Object.keys(prompt).sort()).toEqual(["1", "4"]);
+    expect(prompt["4"].inputs.model).toEqual(["1", 0]);
   });
 });

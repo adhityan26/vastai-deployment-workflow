@@ -188,6 +188,43 @@ def _parse_node_classes(raw: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+_STYLE_KINDS = ("lora", "preset")
+_STYLE_REFERENCES_MAX = 16
+
+
+def _check_styles(raw) -> None:
+    """The web app owns `styles:` (apps/core/src/styles.ts validates it fully); the agent only downloads what
+    `models:` lists. This checks the part that decides downloads: a `preset` style uses no LoRA (so nothing is
+    downloaded for it) and its reference rule is well formed, so a broken profile fails at boot, not mid-job."""
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        raise ProfileError("styles must be a list")
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ProfileError("a style must be a mapping")
+        name = item.get("id", "?")
+        kind = item.get("kind", "lora")
+        if kind not in _STYLE_KINDS:
+            raise ProfileError(f"style {name}: kind must be one of {', '.join(_STYLE_KINDS)}")
+        if kind == "preset" and "lora" in item:
+            raise ProfileError(f"style {name}: a preset has no lora")
+        if kind == "lora" and not isinstance(item.get("lora"), dict):
+            raise ProfileError(f"style {name}: a lora style needs a lora section")
+        refs = item.get("references")
+        if refs is not None:
+            if not isinstance(refs, dict):
+                raise ProfileError(f"style {name}: references must be a mapping")
+            low, high = refs.get("min"), refs.get("max")
+            if not all(isinstance(v, int) and not isinstance(v, bool) for v in (low, high)) or not (
+                    1 <= low <= high <= _STYLE_REFERENCES_MAX):
+                raise ProfileError(f"style {name}: references need whole min and max with 1 <= min <= max <= "
+                                   f"{_STYLE_REFERENCES_MAX}")
+            labels = refs.get("labels", [])
+            if not isinstance(labels, list) or len(labels) > high or not all(isinstance(x, str) and x for x in labels):
+                raise ProfileError(f"style {name}: references labels must be at most max non-empty strings")
+
+
 def load_profile(path: Path) -> Profile:
     try:
         raw = yaml.safe_load(Path(path).read_text())
@@ -208,6 +245,7 @@ def load_profile(path: Path) -> Profile:
         nodes = tuple(
             NodeSpec(_required(n["repo"], "node repo"), _required(n["commit"], "node commit")) for n in raw["nodes"]
         )
+        _check_styles(raw.get("styles"))
         return Profile(
             name=_required(raw["name"], "name"),
             requires_vram_gb=int(raw["requires"]["vram_gb"]),

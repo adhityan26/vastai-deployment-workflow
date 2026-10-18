@@ -237,3 +237,43 @@ describe("edit with a style", () => {
     expect(JSON.parse(seen[seen.length - 1]!.body.toString("utf8")).prompt["style_lora"]).toBeUndefined();
   });
 });
+
+describe("edit with the Face swap preset", () => {
+  const swap = { id: "faceswap" };
+  const TEXT = "Edit <image1>: replace only the face of the person in <image1> with the face of the person in <image2>.";
+
+  it("is in the shipped profile as a preset with exactly two labelled references and no model", () => {
+    const style = profile.styles.find((st) => st.id === "faceswap")!;
+    expect(style).toMatchObject({ kind: "preset", title: "Face swap", modes: ["edit"], lora: null, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] } });
+    expect(style.promptTemplate!.startsWith(TEXT)).toBe(true);
+    expect(style.promptTemplate!.endsWith("The result must contain exactly one person. {prompt}")).toBe(true);
+    expect(style.hint).toContain("consent");
+  });
+
+  it("refuses another number of references before anything is uploaded", async () => {
+    const { deps, seen } = await fake(comfy(), { generateMaxPromptChars: 2000 });
+    for (const images of [[b64(png(8, 8))], [b64(png(8, 8)), b64(png(8, 8)), b64(png(8, 8))]]) {
+      await expect(edit(deps, request({ prompt: "", images, style: swap }))).rejects.toMatchObject({ code: "style_reference_count" });
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("sends the template with the optional notes; the prompt may be empty", async () => {
+    const { deps, seen } = await fake(comfy(), { generateMaxPromptChars: 2000 });
+    await edit(deps, request({ prompt: "", style: swap }));
+    const sent = JSON.parse(seen.at(-1)!.body.toString("utf8")).prompt;
+    expect(sent["6"].inputs.prompt).toBe(profile.styles.find((st) => st.id === "faceswap")!.promptTemplate!.replace(" {prompt}", ""));
+    expect(sent).not.toHaveProperty("style_lora");
+    await edit(deps, request({ prompt: "keep the earrings", style: swap }));
+    expect(JSON.parse(seen.at(-1)!.body.toString("utf8")).prompt["6"].inputs.prompt).toMatch(/exactly one person\. keep the earrings$/);
+  });
+
+  it("checks the whole prompt against the limit, with a message that says why", async () => {
+    const { deps, seen } = await fake(comfy(), { generateMaxPromptChars: 200 });
+    await expect(edit(deps, request({ prompt: "x".repeat(10), style: swap }))).rejects.toMatchObject({
+      code: "prompt_too_long",
+      message: "the style's text and your notes exceed 200 characters",
+    });
+    expect(seen).toEqual([]);
+  });
+});

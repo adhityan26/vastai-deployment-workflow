@@ -1300,6 +1300,63 @@ describe("styles and chaining", () => {
     window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
   });
 
+  describe("face swap", () => {
+    const faceswap = {
+      id: "faceswap", title: "Face swap", kind: "preset", modes: ["edit"], params: [], prompt_optional: true,
+      references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Results depend on the model. Only use a face with consent.",
+    };
+    const attach = (...names: string[]) => {
+      const input = q<HTMLInputElement>("#ref-input")!;
+      Object.defineProperty(input, "files", { value: names.map((n) => new File(["PNGDATA"], n, { type: "image/png" })), configurable: true });
+      input.dispatchEvent(new Event("change"));
+    };
+    const slots = () => [...document.querySelectorAll("#ref-list li")].map((li) => li.querySelector(".ref-tag")?.textContent ?? li.textContent);
+    const names = () => [...document.querySelectorAll("#ref-list .ref-name")].map((n) => n.textContent);
+
+    it("shows the two labelled slots in order, a Swap order button, the hint, and makes the prompt optional", async () => {
+      await mount({ edit: editInfo, styles: [a2r, faceswap] });
+      chooseEdit();
+      expect(q("#prompt-label")!.textContent).toBe("Prompt");
+      click("Face swap");
+      expect(q("#prompt-label")!.textContent).toBe("Notes (optional)");
+      expect(q("#style-hint")!.hidden).toBe(false);
+      expect(q("#style-hint")!.textContent).toContain("consent");
+      expect(q("#ref-hint")!.textContent).toBe("Face swap needs exactly 2 images in this order: Scene to keep, Face to use.");
+      expect(slots()).toEqual(["Scene to keep: not attached yet", "Face to use: not attached yet"]);
+      attach("scene.png");
+      expect(slots()).toEqual(["Scene to keep", "Face to use: not attached yet"]);
+      expect(q("#ref-swap")!.hidden).toBe(true);
+      attach("face.png");
+      expect(slots()).toEqual(["Scene to keep", "Face to use"]);
+      expect(names()).toEqual(["scene.png", "face.png"]);
+      q<HTMLButtonElement>("#ref-swap")!.click();
+      expect(names()).toEqual(["face.png", "scene.png"]);
+      click("Standard"); // back to the plain edit: plain <imageN> tags, no swap, prompt required
+      expect(slots()).toEqual(["<image1>", "<image2>"]);
+      expect(q("#ref-swap")!.hidden).toBe(true);
+      expect(q("#style-hint")!.hidden).toBe(true);
+      expect(q("#prompt-label")!.textContent).toBe("Prompt");
+    });
+
+    it("refuses a submit without both images, and sends an empty prompt with the style when both are there", async () => {
+      await mount({ edit: editInfo, styles: [faceswap] }, { "POST /api/edit": { status: 202, body: { id: "swap-1" } }, "GET /api/generate/swap-1": { body: { status: "pending" } } });
+      chooseEdit();
+      click("Face swap");
+      attach("scene.png");
+      q<HTMLFormElement>("#gen-form")!.requestSubmit();
+      await flush();
+      expect(q("#form-error")!.textContent).toBe("Face swap needs exactly 2 images in this order: Scene to keep, Face to use.");
+      expect(posts("/api/edit")).toHaveLength(0);
+      attach("face.png");
+      q<HTMLFormElement>("#gen-form")!.requestSubmit();
+      await flush();
+      const body = posts("/api/edit")[0]!.body as Record<string, unknown>;
+      expect(body).toMatchObject({ prompt: "", style: { id: "faceswap", params: {} } });
+      expect(body["images"]).toHaveLength(2);
+      expect(q(".job .job-prompt")!.textContent).toBe("Face swap");
+    });
+  });
+
   it("hides the style box when no style is listed for the mode, and lists Standard first otherwise", async () => {
     await mount({ edit: editInfo, styles: [a2r] });
     expect(q("#style-box")!.hidden).toBe(true); // generate: the style is edit-only
