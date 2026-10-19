@@ -80,6 +80,17 @@ export interface StyleParam {
   default: StyleValue;
 }
 export interface StyleInfo { id: string; title: string; modes: Mode[]; params: StyleParam[] }
+/** The guidance (cfg) range the server accepts; null in the state when it offers none. */
+export interface GuidanceInfo { min: number; max: number; step: number; default: number }
+/** A ready-made recipe as the server lists it: what to show, never the template itself. */
+export interface RecipeInfo {
+  id: string;
+  title: string;
+  description: string;
+  modes: Mode[];
+  promptOptional: boolean;
+  references: { min: number; max: number } | null;
+}
 /** What the server offers for upscale (null in the state when upscale is off). */
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
@@ -106,6 +117,10 @@ export interface ApiState {
   gallery: boolean;
   styles: StyleInfo[];
   upscale: UpscaleInfo | null;
+  guidance: GuidanceInfo | null;
+  /** The server accepts a negative prompt. */
+  negativePrompt: boolean;
+  recipes: RecipeInfo[];
 }
 
 export interface Estimate { gpu_name: string | null; dph: number; horizon_hours: number; max_cost: number }
@@ -174,6 +189,32 @@ function parseUpscale(v: unknown): UpscaleInfo | null {
   if (!Array.isArray(scales) || scales.length === 0 || !scales.every((x) => typeof x === "string" && x !== "")) return null;
   if (!Array.isArray(types) || types.length === 0 || !types.every((t) => typeof t === "string" && EDIT_TYPES.includes(t))) return null;
   return { scales: scales as string[], max_bytes: v["max_bytes"], max_pixels: v["max_pixels"], types: types as string[] };
+}
+
+function parseGuidance(v: unknown): GuidanceInfo | null {
+  if (!isObj(v)) return null;
+  const [min, max, step, def] = [num(v["min"]), num(v["max"]), num(v["step"]), num(v["default"])];
+  if (min === null || max === null || step === null || def === null || step <= 0 || min > max || def < min || def > max) return null;
+  return { min, max, step, default: def };
+}
+
+function parseRecipes(v: unknown): RecipeInfo[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((r) => {
+    if (!isObj(r) || typeof r["id"] !== "string" || r["id"] === "" || typeof r["title"] !== "string" || !Array.isArray(r["modes"])) return [];
+    const modes = r["modes"].filter((m): m is Mode => m === "generate" || m === "edit");
+    if (modes.length === 0) return [];
+    const refs = r["references"];
+    const references = isObj(refs) && posInt(refs["min"]) && posInt(refs["max"]) && refs["min"] <= refs["max"] ? { min: refs["min"], max: refs["max"] } : null;
+    return [{
+      id: r["id"],
+      title: r["title"],
+      description: typeof r["description"] === "string" ? r["description"] : "",
+      modes,
+      promptOptional: r["prompt_optional"] === true,
+      references,
+    }];
+  });
 }
 
 function parseDownload(v: unknown): Download | null {
@@ -250,6 +291,9 @@ export function parseState(json: unknown): ApiState | null {
     gallery: json["gallery"] === true,
     styles: parseStyles(json["styles"]),
     upscale: parseUpscale(json["upscale"]),
+    guidance: parseGuidance(json["guidance"]),
+    negativePrompt: json["negative_prompt"] === true,
+    recipes: parseRecipes(json["recipes"]),
   };
 }
 
@@ -652,6 +696,44 @@ export function isChainableUrl(url: string): boolean {
   if (/^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url)) return true;
   const saved = /^\/api\/gallery\/([^/]+)\/image$/.exec(url);
   return saved !== null && isGalleryId(saved[1]);
+}
+
+// ---- recipes, negative prompt and guidance ----
+
+/** The recipes the server allows in a mode, in its order. */
+export function recipesForMode(recipes: readonly RecipeInfo[], mode: Mode): RecipeInfo[] {
+  return recipes.filter((r) => r.modes.includes(mode));
+}
+
+/** Why a recipe cannot be submitted with this many reference images; null when it can. */
+export function recipeReferenceProblem(recipe: RecipeInfo | null, count: number): string | null {
+  const need = recipe?.references;
+  if (!recipe || !need) return null;
+  const plural = (n: number): string => `${n} image${n === 1 ? "" : "s"}`;
+  if (count < need.min) return `${recipe.title} needs ${need.min === need.max ? plural(need.min) : `at least ${plural(need.min)}`}.`;
+  if (count > need.max) return `${recipe.title} takes at most ${plural(need.max)}.`;
+  return null;
+}
+
+/** A guidance slider value kept inside the range and on the step grid. */
+export function snapGuidance(g: GuidanceInfo, value: number): number {
+  if (!Number.isFinite(value)) return g.default;
+  const clamped = Math.min(g.max, Math.max(g.min, value));
+  return Math.min(g.max, Number((g.min + Math.round((clamped - g.min) / g.step) * g.step).toFixed(6)));
+}
+
+/** The extra members of a generate or edit body: only what the user chose, so a recipe's own defaults still apply. */
+export function advancedRequest(opts: {
+  recipe: RecipeInfo | null;
+  negative: string;
+  guidance: GuidanceInfo | null;
+  guidanceValue: number | null;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (opts.recipe) out["recipe"] = opts.recipe.id;
+  if (opts.negative.trim() !== "") out["negative_prompt"] = opts.negative.trim();
+  if (opts.guidance && opts.guidanceValue !== null) out["cfg"] = snapGuidance(opts.guidance, opts.guidanceValue);
+  return out;
 }
 
 // ---- upscale ----

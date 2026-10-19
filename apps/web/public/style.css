@@ -168,3 +168,7 @@ ul { padding: 0; margin: 0; list-style: none; }
 .style-params .style-value { font-weight: 600; }
 .chain { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .chain button { min-height: 44px; }
+#advanced-box { margin: 12px 0; }
+#advanced-box summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+#advanced-box input[type="range"] { width: 100%; min-height: 44px; }
+#advanced-box textarea { width: 100%; }

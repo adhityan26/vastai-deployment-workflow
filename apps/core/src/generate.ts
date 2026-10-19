@@ -3,6 +3,8 @@ import type { ComfyClient } from "./comfy.js";
 import type { AppsConfig } from "./config.js";
 import { buildEditPrompt, buildPrompt, GenerateInputError, type Profile } from "./profile.js";
 import { buildUpscalePrompt } from "./upscale.js";
+import { resolveCfg, resolveNegative } from "./guidance.js";
+import { checkRecipeReferences, composePrompt, resolveRecipe } from "./recipes.js";
 import { resolveStyle } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
 
@@ -40,6 +42,12 @@ export interface GenerateRequest {
   seed?: number;
   /** Optional `{id, params}` of one of the profile's styles; checked against the profile. */
   style?: unknown;
+  /** Optional recipe id (a ready-made prompt template); the prompt may then be short or empty. */
+  recipe?: unknown;
+  /** Optional extra negative prompt; only has an effect with guidance above 1. */
+  negativePrompt?: unknown;
+  /** Optional guidance (cfg), checked against the profile range. */
+  cfg?: unknown;
 }
 
 export interface ResultImage {
@@ -59,12 +67,18 @@ function intKey(cfg: AppsConfig, key: string): number {
 }
 
 /** The prompt and seed checks shared by generate and edit; returns the seed to use. */
-function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined, input: { prompt: unknown; seed?: unknown }): number {
+function checkPromptAndSeed(
+  cfg: AppsConfig,
+  random: (() => number) | undefined,
+  input: { prompt: unknown; seed?: unknown },
+  promptOptional = false,
+): number {
   const maxChars = intKey(cfg, "generateMaxPromptChars");
-  if (typeof input.prompt !== "string" || input.prompt.trim() === "") {
+  const empty = input.prompt === undefined || input.prompt === null || (typeof input.prompt === "string" && input.prompt.trim() === "");
+  if (!(promptOptional && empty) && (typeof input.prompt !== "string" || input.prompt.trim() === "")) {
     throw new GenerateInputError("invalid_prompt", "prompt must be a non-empty string");
   }
-  if (input.prompt.length > maxChars) {
+  if (typeof input.prompt === "string" && input.prompt.length > maxChars) {
     throw new GenerateInputError("prompt_too_long", `prompt exceeds ${maxChars} characters`);
   }
   if (input.seed === undefined || input.seed === null) {
@@ -79,13 +93,17 @@ function checkPromptAndSeed(cfg: AppsConfig, random: (() => number) | undefined,
 
 /** Validate the request, then submit the filled workflow. Validation errors never reach ComfyUI. */
 export async function generate(deps: GenerateDeps, input: GenerateRequest): Promise<{ promptId: string }> {
-  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
+  const recipe = resolveRecipe(deps.profile.recipes, "generate", input.recipe);
+  const seed = checkPromptAndSeed(deps.cfg, deps.random, input, recipe?.promptOptional ?? false);
   const style = resolveStyle(deps.profile.styles, "generate", input.style);
+  const negativePrompt = resolveNegative(recipe?.negativePrompt ?? "", input.negativePrompt, intKey(deps.cfg, "generateMaxPromptChars"));
   const prompt = buildPrompt(deps.profile, deps.template, {
-    prompt: input.prompt,
+    prompt: recipe ? composePrompt(recipe, typeof input.prompt === "string" ? input.prompt : "") : input.prompt,
     preset: input.preset,
     size: input.size,
     seed,
+    ...(negativePrompt === undefined ? {} : { negativePrompt }),
+    cfg: resolveCfg(deps.profile.guidance, input.cfg, recipe?.cfg ?? null),
     style,
   });
   return deps.comfy.submit(prompt);
@@ -114,6 +132,9 @@ export interface EditRequest {
   images: unknown;
   /** Optional `{id, params}` of one of the profile's styles; checked against the profile. */
   style?: unknown;
+  recipe?: unknown;
+  negativePrompt?: unknown;
+  cfg?: unknown;
 }
 
 const FILE_TYPES: Record<ReferenceType, { ext: string; contentType: string }> = {
@@ -130,12 +151,23 @@ const NAME_TOKEN_BYTES = 8;
  * failed upload (ComfyError, Unreachable, ResponseTooLarge) stops the job without submitting.
  */
 export async function edit(deps: EditDeps, input: EditRequest): Promise<{ promptId: string }> {
-  const seed = checkPromptAndSeed(deps.cfg, deps.random, input);
+  const recipe = resolveRecipe(deps.profile.recipes, "edit", input.recipe);
+  const seed = checkPromptAndSeed(deps.cfg, deps.random, input, recipe?.promptOptional ?? false);
   const references = decodeReferences(input.images, referenceLimits(deps.cfg));
+  checkRecipeReferences(recipe, references.length);
   // Dry run with placeholder names: preset, resolution, edit section and workflow mismatches
   // surface now, before anything is uploaded.
   const style = resolveStyle(deps.profile.styles, "edit", input.style);
-  const fields = { prompt: input.prompt, preset: input.preset, resolution: input.resolution, seed, style };
+  const negativePrompt = resolveNegative(recipe?.negativePrompt ?? "", input.negativePrompt, intKey(deps.cfg, "generateMaxPromptChars"));
+  const fields = {
+    prompt: recipe ? composePrompt(recipe, typeof input.prompt === "string" ? input.prompt : "") : input.prompt,
+    preset: input.preset,
+    resolution: input.resolution,
+    seed,
+    ...(negativePrompt === undefined ? {} : { negativePrompt }),
+    cfg: resolveCfg(deps.profile.guidance, input.cfg, recipe?.cfg ?? null),
+    style,
+  };
   buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: references.map((_r, i) => `check-${i}.png`) });
 
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));

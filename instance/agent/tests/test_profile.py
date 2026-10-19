@@ -306,7 +306,9 @@ def _mutate(fn):
 
 
 BAD_GENERATE = {
-    "unknown_param": lambda g: g["params"].update(cfg={"node": "8", "input": "cfg"}),
+    "unknown_param": lambda g: g["params"].update(scheduler={"node": "8", "input": "scheduler"}),
+    "optional_param_without_node": lambda g: g["params"].update(cfg={"input": "cfg"}),
+    "optional_param_not_a_mapping": lambda g: g["params"].update(negative_prompt="6"),
     "missing_param": lambda g: g["params"].pop("seed"),
     "missing_node": lambda g: g["params"]["prompt"].pop("node"),
     "missing_input": lambda g: g["params"]["prompt"].pop("input"),
@@ -440,3 +442,12 @@ def test_the_upscale_section_is_the_webs_business_and_its_workflow_ships_with_th
     assert "image-upscale.json" in raw["workflows"]
     graph = json.loads((root / "workflows" / "image-upscale.json").read_text())
     assert {n["class_type"] for n in graph.values()} >= {"LoadImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "SaveImage"}
+
+
+def test_the_optional_negative_prompt_and_cfg_params_are_accepted(tmp_path):
+    """The web app maps them; the agent only checks their shape, so a profile that has them must still load."""
+    generate = copy.deepcopy(GENERATE)
+    generate["params"].update(negative_prompt={"node": "6", "input": "text"}, cfg={"node": "8", "input": "cfg"})
+    profile = load_profile(write_with_generate(tmp_path, generate))
+    assert profile.generate is not None
+    assert not hasattr(profile.generate.params, "cfg")

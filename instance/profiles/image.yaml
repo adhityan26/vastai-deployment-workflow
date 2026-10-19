@@ -22,6 +22,9 @@ generate:
     width: {node: "7", input: width}
     height: {node: "7", input: height}
     seed: {node: "8", input: seed}
+    # Optional: where a negative prompt and the sampler's cfg go. A negative prompt only has an effect when cfg > 1.
+    negative_prompt: {node: "6", input: text}
+    cfg: {node: "8", input: cfg}
   quality_presets:
     preview: {steps: 10}
     standard: {steps: 25}
@@ -43,12 +46,85 @@ edit:
     steps: {node: "7", input: steps}
     seed: {node: "7", input: seed}
     resolution: {node: "6", input: resolution}
+    negative_prompt: {node: "6", input: negative_prompt}
+    cfg: {node: "7", input: cfg}
   references:
     node_class: LoadImage
     image_input: image
     encoder: {node: "6", input_prefix: "images.image_"}
   resolutions:
     - {name: "1024", value: 1024}
+
+# Guidance (the sampler's cfg) the page may offer. The workflows ship with cfg 1.0 (no negative prompt effect);
+# 1.0 stays the default. Raising it makes the negative prompt count but costs about twice the sampling time. UNVERIFIED
+# for this model: compare a few values on the same seed before changing a default.
+guidance: {min: 1.0, max: 6.0, step: 0.5, default: 1.0}
+
+# Recipes: ready-made starting points so the user can type a short prompt. `{prompt}` is replaced by what the user
+# typed (without it, the text follows the recipe). `prompt_optional` lets the user leave the prompt empty. `cfg` must
+# lie on the guidance grid; the edit recipes leave it out because guidance on the edit encoder is untested. `references`
+# (edit only) is how many images the recipe needs. The wording is a first draft, NOT yet compared on real output.
+recipes:
+  - id: portrait_photo
+    title: Portrait photo
+    description: A realistic portrait with natural skin and light.
+    enabled: false
+    modes: [generate]
+    prompt: "A realistic portrait photograph. {prompt}. Natural skin texture with fine pores and small imperfections, soft natural light, shallow depth of field, 85mm lens, true-to-life colors, sharp eyes."
+    negative_prompt: "plastic skin, airbrushed, waxy, oversmoothed, uncanny face, deformed hands, extra fingers, blurry, low quality, watermark, text, oversaturated"
+    cfg: 3.0
+  - id: family_photo
+    title: Family photo
+    description: A warm, candid group photo.
+    enabled: false
+    modes: [generate]
+    prompt: "A warm, candid family photograph, everyone looking natural and relaxed. {prompt}. Realistic faces and hands, natural daylight, 50mm lens, true-to-life colors, detailed clothing."
+    negative_prompt: "plastic skin, distorted faces, merged people, extra fingers, deformed hands, extra limbs, blurry, low quality, watermark, text"
+    cfg: 3.0
+  - id: anime
+    title: Anime illustration
+    description: Clean anime art with detailed shading.
+    enabled: false
+    modes: [generate]
+    prompt: "A high-quality anime illustration with clean line art, expressive eyes, detailed cel shading and a balanced color palette. {prompt}"
+    negative_prompt: "photorealistic, 3d render, blurry, low quality, jpeg artifacts, bad anatomy, extra fingers, watermark, text"
+    cfg: 3.0
+  - id: face_swap
+    title: Face swap
+    description: "Put the face from the second image onto the person in the first. Attach 2 images: <image1> the photo to change, <image2> the face."
+    enabled: false
+    modes: [edit]
+    prompt_optional: true
+    prompt: "Replace the face of the person in <image1> with the face of the person in <image2>. Keep the pose, hair, clothing, lighting, background and composition of <image1> unchanged, and blend the new face naturally with the skin tone and lighting. {prompt}"
+    negative_prompt: "mismatched skin tone, blurry face, distorted features, double face, visible seams"
+    references: {min: 2, max: 2}
+  - id: outfit_swap
+    title: Outfit swap
+    description: "Dress the person in the first image with the clothing from the second. Attach 2 images: <image1> the person, <image2> the clothing."
+    enabled: false
+    modes: [edit]
+    prompt_optional: true
+    prompt: "Make the person in <image1> wear the clothing from <image2>. Keep the face, pose, background and lighting of <image1> unchanged. {prompt}"
+    negative_prompt: "changed face, changed pose, mismatched lighting, blurry, distorted clothing"
+    references: {min: 2, max: 2}
+  - id: photo_restore
+    title: Restore old photo
+    description: "Clean up a scratched or faded photo. Attach 1 image."
+    enabled: false
+    modes: [edit]
+    prompt_optional: true
+    prompt: "Restore this old photograph: remove scratches, dust and noise, repair damaged areas, correct the faded colors and sharpen the detail while keeping every face and the identity of every person exactly the same. {prompt}"
+    negative_prompt: "changed faces, new people, over-smoothed skin, artifacts"
+    references: {min: 1, max: 1}
+  - id: to_anime
+    title: Photo to anime
+    description: "Redraw a photo as anime art. Attach 1 image."
+    enabled: false
+    modes: [edit]
+    prompt_optional: true
+    prompt: "Redraw <image1> as a high-quality anime illustration with clean line art and cel shading, keeping the identity, pose and composition. {prompt}"
+    negative_prompt: "photorealistic, 3d render, blurry, low quality"
+    references: {min: 1, max: 1}
 
 # Styles: a LoRA with its own parameters, offered as a sub-menu of a mode (design:
 # docs/superpowers/plans/2026-10-18-styles-and-chaining-design.md). A style is OFF until `enabled: true`.

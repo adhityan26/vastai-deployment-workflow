@@ -45,7 +45,8 @@ describe("loadProfile", () => {
 
   // Mirrors BAD_GENERATE in instance/agent/tests/test_profile.py: both loaders reject the same inputs.
   const bad: Record<string, (g: Doc) => void> = {
-    unknown_param: (g) => (g.params.cfg = { node: "8", input: "cfg" }),
+    unknown_param: (g) => (g.params.scheduler = { node: "8", input: "scheduler" }),
+    optional_param_without_node: (g) => (g.params.cfg = { input: "cfg" }),
     missing_param: (g) => delete g.params.seed,
     missing_node: (g) => delete g.params.prompt.node,
     missing_input: (g) => delete g.params.prompt.input,
@@ -154,7 +155,8 @@ describe("edit section", () => {
     not_a_mapping: (e) => Object.keys(e).forEach((k) => delete e[k]),
     missing_workflow: (e) => delete e.workflow,
     workflow_path: (e) => (e.workflow = "../x.json"),
-    unknown_param: (e) => (e.params.cfg = { node: "7", input: "cfg" }),
+    unknown_param: (e) => (e.params.scheduler = { node: "7", input: "scheduler" }),
+    optional_param_without_node: (e) => (e.params.cfg = { input: "cfg" }),
     missing_param: (e) => delete e.params.resolution,
     missing_param_node: (e) => delete e.params.seed.node,
     missing_references: (e) => delete e.references,

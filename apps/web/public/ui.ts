@@ -74,6 +74,11 @@ import {
   type EditInfo,
   type Mode,
   type PageMode,
+  type RecipeInfo,
+  advancedRequest,
+  recipeReferenceProblem,
+  recipesForMode,
+  snapGuidance,
   upscaleAsEdit,
   upscaleHint,
   upscaleLabel,
@@ -181,6 +186,8 @@ export function mountApp(doc: Document, env: Env): App {
   let creditRunning = false;
   let mode: PageMode = "generate";
   const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
+  const chosenRecipe: Record<Mode, string | null> = { generate: null, edit: null }; // null = no preset
+  let guidanceValue: number | null = null; // null until the user moves the slider, so a recipe's own cfg applies
   const styleValues: Record<string, Record<string, StyleValue>> = {};
   let refSeq = 0;
   const references: Reference[] = [];
@@ -891,6 +898,7 @@ export function mountApp(doc: Document, env: Env): App {
       $("ref-hint").textContent = mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : s.edit ? referenceHint(s.edit) : "";
     }
     renderStyles(s);
+    renderRecipes(s);
     const editing = mode === "edit";
     const upscaling = mode === "upscale";
     modeBox.hidden = s.edit === null && s.upscale === null;
@@ -905,7 +913,12 @@ export function mountApp(doc: Document, env: Env): App {
     promptRow.hidden = upscaling;
     samplingBox.hidden = upscaling;
     sizeBox.hidden = editing || upscaling;
-    promptBox.placeholder = editing ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>" : "";
+    const recipe = currentRecipe(s);
+    promptBox.placeholder = recipe?.promptOptional
+      ? "Optional: add details"
+      : editing
+        ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>"
+        : "";
     const c = controls(s, busy, jobPending);
     const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : c.canGenerate;
     generateBtn.disabled = !allowed;
@@ -1004,6 +1017,76 @@ export function mountApp(doc: Document, env: Env): App {
     const style = currentStyle(s);
     styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
   }
+
+  // ---- recipes (ready-made prompt presets), negative prompt and guidance ----
+
+  const recipeBox = $("recipe-box");
+  const recipesSeg = $("recipes");
+  const recipeHint = $("recipe-hint");
+  const advancedBox = $("advanced-box");
+  const negativeRow = $("negative-row");
+  const guidanceRow = $("guidance-row");
+  const negativeBox = $<HTMLTextAreaElement>("negative");
+  const guidanceInput = $<HTMLInputElement>("guidance");
+  const guidanceOut = $("guidance-value");
+  let recipeKey = "";
+  let guidanceKey = "";
+
+  /** The recipe chosen for the current mode, only if the server still lists it for that mode. */
+  function currentRecipe(s: ApiState | null): RecipeInfo | null {
+    if (s === null || mode === "upscale") return null;
+    const id = chosenRecipe[mode];
+    return id === null ? null : recipesForMode(s.recipes, mode).find((r) => r.id === id) ?? null;
+  }
+
+  function renderRecipes(s: ApiState): void {
+    advancedBox.hidden = mode === "upscale" || (!s.negativePrompt && s.guidance === null);
+    negativeRow.hidden = !s.negativePrompt;
+    guidanceRow.hidden = s.guidance === null;
+    if (s.guidance !== null) {
+      const key = JSON.stringify(s.guidance);
+      if (key !== guidanceKey) {
+        guidanceKey = key;
+        guidanceInput.min = String(s.guidance.min);
+        guidanceInput.max = String(s.guidance.max);
+        guidanceInput.step = String(s.guidance.step);
+        guidanceInput.value = String(guidanceValue === null ? s.guidance.default : snapGuidance(s.guidance, guidanceValue));
+        guidanceOut.textContent = guidanceInput.value;
+      }
+    }
+    if (mode === "upscale") {
+      recipeBox.hidden = true;
+      return;
+    }
+    const m: Mode = mode;
+    const list = recipesForMode(s.recipes, m);
+    recipeBox.hidden = list.length === 0;
+    if (list.length === 0) return;
+    if (chosenRecipe[m] !== null && !list.some((r) => r.id === chosenRecipe[m])) chosenRecipe[m] = null;
+    const chosen = chosenRecipe[m];
+    const key = JSON.stringify([m, chosen, s.recipes]);
+    if (key === recipeKey) return;
+    recipeKey = key;
+    recipesSeg.replaceChildren(
+      ...[{ id: null as string | null, title: "None" }, ...list].map((r) => {
+        const b = make("button", r.title);
+        b.type = "button";
+        b.setAttribute("aria-pressed", String(r.id === chosen));
+        b.addEventListener("click", () => {
+          chosenRecipe[m] = r.id;
+          recipeKey = "";
+          if (state) renderForm(state);
+        });
+        return b;
+      }),
+    );
+    recipeHint.textContent = list.find((r) => r.id === chosen)?.description ?? "";
+  }
+
+  guidanceInput.addEventListener("input", () => {
+    guidanceValue = Number(guidanceInput.value);
+    guidanceOut.textContent = guidanceInput.value;
+  });
 
   function selectStyle(id: string | null): void {
     if (mode === "upscale") return;
@@ -1122,12 +1205,14 @@ export function mountApp(doc: Document, env: Env): App {
     formError.hidden = true;
     if (!controls(state, busy, jobPending).canGenerate) return;
     const prompt = promptBox.value;
-    if (prompt.trim() === "") return formFail("Write a prompt first.");
+    const recipe = currentRecipe(state);
+    if (prompt.trim() === "" && !recipe?.promptOptional) return formFail("Write a prompt first.");
     const seed = parseSeed($<HTMLInputElement>("seed").value);
     if (!seed.ok) return formFail(seed.message);
     if (selectedPreset === "" || sizeSelect.value === "") return formFail("Choose a quality and a size.");
     const body: Record<string, unknown> = { prompt, preset: selectedPreset, size: sizeSelect.value };
     if (seed.value !== undefined) body["seed"] = seed.value;
+    Object.assign(body, advancedRequest({ recipe, negative: negativeBox.value, guidance: state?.guidance ?? null, guidanceValue }));
     const style = currentStyle(state);
     const styleBody = styleRequest(style, style ? (styleValues[style.id] ??= styleDefaults(style)) : {});
     if (styleBody) body["style"] = styleBody;
@@ -1138,7 +1223,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${style ? `, ${style.title}` : ""}`);
+      const entry = addEntry(id, prompt, `${preset ? presetLabel(preset) : selectedPreset}, ${sizeSelect.selectedOptions[0]?.textContent ?? ""}${recipe ? `, ${recipe.title}` : ""}${style ? `, ${style.title}` : ""}`);
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;
@@ -1151,8 +1236,11 @@ export function mountApp(doc: Document, env: Env): App {
     formError.hidden = true;
     if (!controls(state, busy, jobPending).canEdit) return;
     const prompt = promptBox.value;
-    if (prompt.trim() === "") return formFail("Describe the change first.");
+    const recipe = currentRecipe(state);
+    if (prompt.trim() === "" && !recipe?.promptOptional) return formFail("Describe the change first.");
     if (references.length === 0) return formFail("Attach at least one reference image.");
+    const refProblem = recipeReferenceProblem(recipe, references.length);
+    if (refProblem !== null) return formFail(refProblem);
     const seed = parseSeed($<HTMLInputElement>("seed").value);
     if (!seed.ok) return formFail(seed.message);
     if (selectedPreset === "" || resolutionSelect.value === "") return formFail("Choose a quality and a resolution.");
@@ -1166,12 +1254,13 @@ export function mountApp(doc: Document, env: Env): App {
       for (const file of files) images.push(await readBase64(file));
       const body: Record<string, unknown> = { prompt, preset: selectedPreset, resolution: resolutionSelect.value, images };
       if (seed.value !== undefined) body["seed"] = seed.value;
+      Object.assign(body, advancedRequest({ recipe, negative: negativeBox.value, guidance: state?.guidance ?? null, guidanceValue }));
       if (styleBody) body["style"] = styleBody;
       const res = await call("POST", API.edit, body);
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : ""));
+      const entry = addEntry(id, prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (recipe ? `, ${recipe.title}` : "") + (style ? `, ${style.title}` : ""));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;

@@ -246,7 +246,7 @@ const GENERATE_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "size"],
-  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {} },
+  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {}, recipe: {}, negative_prompt: {}, cfg: {} },
 } as const;
 
 // Edit: the references travel as base64 text in the JSON body (so every gate for JSON bodies applies
@@ -255,7 +255,7 @@ const EDIT_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "resolution", "images"],
-  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {} },
+  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {}, recipe: {}, negative_prompt: {}, cfg: {} },
 } as const;
 // Upscale: one base64 image and a scale name; the service validates both and has the error codes.
 const UPSCALE_BODY = {
@@ -271,10 +271,17 @@ const EDIT_BODY_SLACK = 1024;
 const BASE64_PER_BYTES = 3;
 const BASE64_CHARS_PER_GROUP = 4;
 
+/** The service request from a body: the API spells it negative_prompt, the services negativePrompt. */
+function withNegative<T extends object>(body: T): T & { negativePrompt?: unknown } {
+  const raw = (body as { negative_prompt?: unknown }).negative_prompt;
+  return raw === undefined ? body : { ...body, negativePrompt: raw };
+}
+
 /** Request body limit of POST /api/edit, derived from the reference limits (the global limit stays small). */
 function editBodyLimit(limits: ReferenceLimits, maxPromptChars: number): number {
   const perImage = Math.ceil(limits.maxBytes / BASE64_PER_BYTES) * BASE64_CHARS_PER_GROUP + EDIT_JSON_OVERHEAD;
-  return limits.maxCount * perImage + maxPromptChars * PROMPT_ESCAPE_FACTOR + EDIT_BODY_SLACK;
+  // The prompt and the negative prompt are both bounded by maxPromptChars.
+  return limits.maxCount * perImage + 2 * maxPromptChars * PROMPT_ESCAPE_FACTOR + EDIT_BODY_SLACK;
 }
 
 export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void {
@@ -339,6 +346,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     template: editTemplate,
     cfg,
   });
+
+  /** ", <recipe title>" for the label of a job that used a recipe (validated before submit). */
+  const recipeSuffix = (recipe: unknown): string => {
+    const found = deps.profile.recipes.find((r) => r.id === recipe);
+    return found ? `, ${found.title}` : "";
+  };
 
   /** ", <style title>" for the label of a job that ran with a style (it was validated before submit). */
   const styleSuffix = (style: unknown): string => {
@@ -411,6 +424,26 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           ...(p.choices === undefined ? {} : { choices: [...p.choices] }),
           default: p.default,
         })),
+      })),
+      // Guidance (cfg) limits and the negative prompt, only when the profile maps them. Never node ids.
+      guidance:
+        deps.profile.guidance === null
+          ? null
+          : {
+              min: deps.profile.guidance.min,
+              max: deps.profile.guidance.max,
+              step: deps.profile.guidance.step,
+              default: deps.profile.guidance.default,
+            },
+      negative_prompt: deps.profile.generate.optional.negativePrompt !== null,
+      // The enabled recipes. The template text, the negative prompt and the cfg stay on the server.
+      recipes: deps.profile.recipes.map((r) => ({
+        id: r.id,
+        title: r.title,
+        description: r.description,
+        modes: [...r.modes],
+        prompt_optional: r.promptOptional,
+        references: r.references === null ? null : { min: r.references.min, max: r.references.max },
       })),
       // Upscale for the page: the scale names and the image limits; null when upscale is off here.
       upscale:
@@ -623,7 +656,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     }
     let promptId: string;
     try {
-      ({ promptId } = await generate(generateDeps(hostname), req.body as GenerateRequest));
+      ({ promptId } = await generate(generateDeps(hostname), withNegative(req.body as GenerateRequest)));
     } catch (err) {
       return submitFailure(reply, err, "generate");
     }
@@ -634,7 +667,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       owner: identity.subject,
       hostname,
       prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-      label: `${asked.preset}, ${asked.size}`.slice(0, JOB_LABEL_KEPT),
+      label: `${asked.preset}, ${asked.size}${recipeSuffix(asked.recipe)}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
     });
     return reply.code(202).send({ id: promptId });
   });
@@ -656,7 +689,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       let promptId: string;
       try {
-        ({ promptId } = await runEdit(editDeps(hostname), req.body as EditRequest));
+        ({ promptId } = await runEdit(editDeps(hostname), withNegative(req.body as EditRequest)));
       } catch (err) {
         return submitFailure(reply, err, "edit");
       }
@@ -669,7 +702,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         hostname,
         kind: "edit",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}`.slice(0, JOB_LABEL_KEPT),
+        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${recipeSuffix(asked.recipe)}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
       });
       return reply.code(202).send({ id: promptId });
     },

@@ -133,7 +133,9 @@ def _parse_generate(raw: object) -> GenerateSpec:
         raise ProfileError(f"generate workflow is not a valid workflow name: {workflow!r}")
     params_raw = _mapping(gen.get("params"), "generate params")
     keys = GenerateParams.__dataclass_fields__.keys()
-    unknown = sorted(str(k) for k in params_raw if k not in keys)
+    # `negative_prompt` and `cfg` are the web app's optional knobs: checked for shape here, not stored.
+    optional = ("negative_prompt", "cfg")
+    unknown = sorted(str(k) for k in params_raw if k not in keys and k not in optional)
     if unknown:
         raise ProfileError(f"generate params has unknown keys: {', '.join(unknown)}")
     refs = {}
@@ -145,6 +147,11 @@ def _parse_generate(raw: object) -> GenerateSpec:
             _required(ref.get("node"), f"generate param {key} node"),
             _required(ref.get("input"), f"generate param {key} input"),
         )
+    for key in optional:
+        if key in params_raw:
+            ref = _mapping(params_raw[key], f"generate param {key}")
+            _required(ref.get("node"), f"generate param {key} node")
+            _required(ref.get("input"), f"generate param {key} input")
     presets_raw = _mapping(gen.get("quality_presets"), "generate quality_presets")
     if not presets_raw:
         raise ProfileError("generate quality_presets must not be empty")
