@@ -95,3 +95,21 @@ describe("LiveProgress", () => {
     expect(store.get("e")?.live).toBe(e.l);
   });
 });
+
+describe("JobStore.endLiveExcept", () => {
+  it("closes only the sockets of jobs on another instance", () => {
+    const store = new JobStore(10, 1000, () => 0);
+    const closed: string[] = [];
+    const mk = (id: string, hostname: string) => {
+      const l = new LiveProgress(() => 0);
+      l.socket = { setPromptId: () => undefined, close: () => void closed.push(id) };
+      store.add({ id, owner: "u", hostname, live: l });
+    };
+    mk("a", "h1");
+    mk("b", "h2");
+    store.endLiveExcept("h1");
+    expect(closed).toEqual(["b"]);
+    store.endLiveExcept(null);
+    expect(closed).toEqual(["b", "a"]);
+  });
+});

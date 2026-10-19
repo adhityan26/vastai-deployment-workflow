@@ -164,6 +164,14 @@ export class JobStore {
     for (const job of this.jobs.values()) job.live?.end();
   }
 
+  /**
+   * Close the progress sockets of every job that ran on another instance than `hostname` (null: none is
+   * active), for example after an idle, failsafe or hard-cap destroy or a stuck start was released.
+   */
+  endLiveExcept(hostname: string | null): void {
+    for (const job of this.jobs.values()) if (job.hostname !== hostname) job.live?.end();
+  }
+
   get(id: string): Job | null {
     this.purge();
     return this.jobs.get(id) ?? null;

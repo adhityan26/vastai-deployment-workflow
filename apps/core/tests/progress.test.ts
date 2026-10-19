@@ -255,6 +255,68 @@ describe("progress socket", () => {
   });
 });
 
+describe("fragmented messages", () => {
+  const start = (text: string) => serverFrame(0x1, Buffer.from(text), { fin: false });
+  const cont = (text: string, fin = false) => serverFrame(0x0, Buffer.from(text), { fin });
+
+  it("closes on a flood of zero-length continuation frames", async () => {
+    const { socket, sink, peer } = await connected({ maxTextBytes: 1024 });
+    const empty = cont("");
+    peer.send(Buffer.concat([start("{"), ...Array.from({ length: 5000 }, () => empty)]));
+    await until(() => socket.closed);
+    expect(sink.steps).toEqual([]);
+  });
+
+  it("counts a per-frame overhead against the cap: many tiny fragments close the socket", async () => {
+    const { socket, peer } = await connected({ maxTextBytes: 1024 });
+    peer.send(Buffer.concat([start("{"), ...Array.from({ length: 100 }, () => cont(" "))]));
+    await until(() => socket.closed);
+  });
+
+  it("closes on a continuation with no start, a new message inside a fragmented one, and fragments past the cap", async () => {
+    for (const frames of [
+      [cont("x", true)],
+      [start("{"), serverFrame(0x1, Buffer.from("{}"))],
+      [start("{"), serverFrame(0x2, Buffer.from("x"))],
+      [start("x".repeat(600)), cont("x".repeat(600), true)],
+    ]) {
+      const { socket, peer } = await connected({ maxTextBytes: 1024 });
+      peer.send(Buffer.concat(frames));
+      await until(() => socket.closed);
+      await fake!.close();
+      fake = null;
+    }
+  });
+
+  it("answers a ping inside a fragmented message and still completes the message", async () => {
+    const { socket, sink, peer } = await connected();
+    const whole = JSON.stringify({ type: "progress", data: { value: 2, max: 7 } });
+    peer.send(start(whole.slice(0, 12)));
+    peer.send(serverFrame(0x9, Buffer.from("mid")));
+    peer.send(cont(whole.slice(12), true));
+    await until(() => sink.steps.length === 1 && peer.frames().some((f) => f.op === 0xa));
+    expect(sink.steps).toEqual([[2, 7]]);
+    expect(peer.frames().find((f) => f.op === 0xa)!.payload.toString()).toBe("mid");
+    expect(socket.closed).toBe(false);
+  });
+
+  it("ignores a text frame that is not valid UTF-8 and keeps listening", async () => {
+    const { socket, sink, peer } = await connected();
+    peer.send(serverFrame(0x1, Buffer.from([0x7b, 0xff, 0xfe, 0x7d])));
+    peer.send(progress(1, 3));
+    await until(() => sink.steps.length === 1);
+    expect(socket.closed).toBe(false);
+  });
+
+  it("closes when the peer stops reading and pong replies pile up", async () => {
+    const { socket, peer } = await connected({ lifetimeMs: 60_000 });
+    peer.socket.pause(); // the fake never reads again: our pongs queue up locally
+    const ping = serverFrame(0x9, Buffer.alloc(125, 0x61));
+    for (let i = 0; i < 40; i++) peer.send(Buffer.concat(Array.from({ length: 1000 }, () => ping)));
+    await until(() => socket.closed, 8_000);
+  }, 15_000);
+});
+
 describe("preview parsing", () => {
   it("sniffs only JPEG and PNG", () => {
     expect(sniffPreview(JPEG())).toBe("image/jpeg");

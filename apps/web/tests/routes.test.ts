@@ -2691,6 +2691,21 @@ describe("live progress and previews", () => {
     await until(() => peer.frames().some((f) => f.op === 0x8));
   });
 
+  it("closes the sockets of jobs whose instance the registry shows gone (idle, failsafe, hard cap, stuck release)", async () => {
+    h = await harness({ cfg: PROGRESS_CFG });
+    h.setComfy(comfyJobs(new Set()).handler);
+    const peerP = h.comfyWs.nextPeer();
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    const peer = await peerP;
+    expect((await call("GET", "/api/state", m)).statusCode).toBe(200);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(peer.frames().some((f) => f.op === 0x8)).toBe(false); // still the active instance: kept open
+    await h.registry.update(HOST, { status: "gone" });
+    await call("GET", "/api/state", m);
+    await until(() => peer.frames().some((f) => f.op === 0x8));
+  });
+
   it("documents the preview route and the pending fields", () => {
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     const op = doc.paths["/api/generate/{id}/preview"].get;

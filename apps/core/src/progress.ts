@@ -65,6 +65,11 @@ const OP_PONG = 0xa;
 const CONTROL_MAX = 125;
 const CLOSE_NORMAL = 1000;
 const CLOSE_GRACE_MS = 1000;
+const WRITE_BACKLOG_MAX = 64 * 1024; // bytes of our own frames (pongs) waiting for the peer
+/** Fragments one message may have, and the bytes each frame counts for on top of its payload (so empty or
+ * tiny continuation frames cannot grow the fragment list for free). */
+const FRAGMENTS_MAX = 1024;
+const FRAME_OVERHEAD = 16;
 const PREVIEW_EVENT = 1; // BinaryEventTypes.PREVIEW_IMAGE: u32 event, u32 format, image bytes
 const PREVIEW_HEADER = 8;
 const FORMAT_JPEG = 1;
@@ -111,19 +116,26 @@ export function watchProgress(opts: ProgressOptions, sink: ProgressSink): Progre
   const ready = new Promise<void>((resolve) => (readyResolve = resolve));
   const timers: ReturnType<typeof setTimeout>[] = [];
 
-  const close = (): void => {
+  /** `hard`: the peer is not reading (our writes pile up), so nothing more is queued for it. */
+  const close = (hard = false): void => {
     if (closed) return;
     closed = true;
     readyResolve();
     for (const t of timers) clearTimeout(t);
     try {
-      if (socket !== null && !socket.destroyed) {
+      if (socket !== null) {
         const s = socket;
-        // A polite close frame, then the TCP end; destroyed shortly after whatever the peer does.
-        s.end(frame(OP_CLOSE, Buffer.from([CLOSE_NORMAL >> 8, CLOSE_NORMAL & 0xff])));
-        setTimeout(() => s.destroy(), CLOSE_GRACE_MS).unref();
+        if (hard) s.destroy();
+        else if (!s.destroyed) {
+          // A polite close frame, then the TCP end; destroyed after a short grace whatever the peer does.
+          s.end(frame(OP_CLOSE, Buffer.from([CLOSE_NORMAL >> 8, CLOSE_NORMAL & 0xff])));
+          setTimeout(() => s.destroy(), CLOSE_GRACE_MS).unref();
+        }
+      } else {
+        // Not upgraded yet: abort the handshake. After the upgrade the request owns the same socket, so
+        // destroying it then would cut the grace above short.
+        req?.destroy();
       }
-      req?.destroy();
     } catch {
       // closing is best effort
     }
@@ -209,7 +221,10 @@ export function watchProgress(opts: ProgressOptions, sink: ProgressSink): Progre
   req.end();
 
   function send(op: number, payload: Buffer): void {
-    if (socket !== null && !socket.destroyed && !closed) socket.write(frame(op, payload));
+    if (socket === null || socket.destroyed || closed) return;
+    socket.write(frame(op, payload));
+    // A peer that pings but never reads our pongs would grow this queue without bound.
+    if (socket.writableLength > WRITE_BACKLOG_MAX) close(true);
   }
 
   function onControl(op: number, payload: Buffer): void {
@@ -292,7 +307,9 @@ class FrameReader {
   private buf: Buffer = Buffer.alloc(0);
   private fragments: Buffer[] = [];
   private fragmentOp = -1;
+  /** Payload bytes plus FRAME_OVERHEAD per frame of the message being reassembled. */
   private fragmentBytes = 0;
+  private fragmentFrames = 0;
   private failed = false;
 
   constructor(
@@ -341,9 +358,11 @@ class FrameReader {
       if (isControl) {
         if (!fin || len > CONTROL_MAX || (op !== OP_CLOSE && op !== OP_PING && op !== OP_PONG)) return this.stop();
       } else if (op === OP_CONTINUATION) {
-        if (this.fragmentOp === -1 || this.fragmentBytes + len > this.capFor(this.fragmentOp)) return this.stop();
+        if (this.fragmentOp === -1 || this.fragmentFrames + 1 > FRAGMENTS_MAX) return this.stop();
+        if (this.fragmentBytes + len + FRAME_OVERHEAD > this.capFor(this.fragmentOp)) return this.stop();
       } else if (op === OP_TEXT || op === OP_BINARY) {
         if (this.fragmentOp !== -1 || len > this.capFor(op)) return this.stop();
+        if (!fin && len + FRAME_OVERHEAD > this.capFor(op)) return this.stop();
       } else {
         return this.stop();
       }
@@ -359,14 +378,16 @@ class FrameReader {
         continue;
       }
       if (op !== OP_CONTINUATION) this.fragmentOp = op;
-      this.fragments.push(Buffer.from(payload));
-      this.fragmentBytes += len;
+      if (len > 0) this.fragments.push(Buffer.from(payload));
+      this.fragmentBytes += len + FRAME_OVERHEAD;
+      this.fragmentFrames += 1;
       if (fin) {
-        const whole = Buffer.concat(this.fragments, this.fragmentBytes);
+        const whole = Buffer.concat(this.fragments);
         const kind = this.fragmentOp;
         this.fragments = [];
         this.fragmentOp = -1;
         this.fragmentBytes = 0;
+        this.fragmentFrames = 0;
         this.message(kind, whole);
       }
     }

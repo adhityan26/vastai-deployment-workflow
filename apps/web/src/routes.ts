@@ -474,6 +474,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
 
   app.get("/api/state", member, async (req) => {
     const view = await deps.lifecycle.view();
+    // An instance destroyed without the Destroy button (idle, failsafe, hard cap, stuck release): every page
+    // polls this, so no job's progress socket outlives its instance by more than one poll.
+    const activeHost = view.record !== null && view.record.status !== "gone" ? view.record.tailnet_hostname : null;
+    jobs.endLiveExcept(activeHost);
     const isAdmin = req.role === "admin";
     // The view passes agent-provided text (reason) through unscrubbed: remove the token too.
     const token = (await deps.registry.active())?.agent_token ?? "";
