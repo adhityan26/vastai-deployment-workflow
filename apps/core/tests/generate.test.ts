@@ -13,10 +13,13 @@ const profile: Profile = {
   name: "t",
   edit: null,
   styles: [],
+  guidance: null,
+  recipes: [],
   upscale: null,
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",
+    optional: { negativePrompt: null, cfg: null },
     params: {
       prompt: { node: "5", input: "text" },
       steps: { node: "8", input: "steps" },

@@ -2777,3 +2777,89 @@ describe("anime / cartoon to real (a LoRA style with its own prompt)", () => {
     expect(two.json().error.code).toBe("style_reference_count");
   });
 });
+
+describe("recipes, negative prompt and guidance", () => {
+  const RECIPES = ["portrait_photo", "family_photo", "anime", "face_swap", "outfit_swap", "photo_restore", "to_anime"];
+  const sentPrompt = () => JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+
+  /** The shipped profile with every sample recipe switched on (they ship off). */
+  function recipeProfile(): typeof profile {
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    for (const r of doc.recipes) r.enabled = true;
+    const dir = mkdtempSync(join(tmpdir(), "recipe-profile-"));
+    tempDirs.push(dir);
+    const path = join(dir, "image.yaml");
+    writeFileSync(path, stringifyYaml(doc));
+    return loadProfile(path);
+  }
+  beforeEach(async () => {
+    h = await harness({ profile: recipeProfile() });
+  });
+
+  it("offers no recipe by default: the shipped profile has them off", async () => {
+    h = await harness();
+    expect((await call("GET", "/api/state", await member())).json().recipes).toEqual([]);
+  });
+
+  it("lists the recipes, the guidance range and the negative prompt flag, and nothing of the templates", async () => {
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.guidance).toEqual({ min: 1, max: 6, step: 0.5, default: 1 });
+    expect(body.negative_prompt).toBe(true);
+    expect(body.recipes.map((r: { id: string }) => r.id)).toEqual(RECIPES);
+    expect(body.recipes.find((r: { id: string }) => r.id === "face_swap")).toEqual({
+      id: "face_swap",
+      title: "Face swap",
+      description: expect.stringContaining("<image2>"),
+      modes: ["edit"],
+      prompt_optional: true,
+      references: { min: 2, max: 2 },
+    });
+    const text = JSON.stringify(body.recipes);
+    for (const secret of ["Replace the face", "mismatched skin tone", "plastic skin", "\"cfg\"", "negative_prompt\":\""]) expect(text).not.toContain(secret);
+  });
+
+  it("generate: a recipe, a negative prompt and a cfg reach the workflow; the label names the recipe", async () => {
+    h.setComfy(comfyDone([{ filename: "a.png", subfolder: "", type: "output" }]));
+    const res = await post("/api/generate", await member(), { ...okGen, recipe: "anime", negative_prompt: "hat", cfg: 4.5 });
+    expect(res.statusCode).toBe(202);
+    const p = sentPrompt();
+    expect(p["5"].inputs.text).toMatch(/^A high-quality anime illustration .* a fox$/);
+    expect(p["6"].inputs.text).toMatch(/^photorealistic.*, hat$/);
+    expect(p["8"].inputs.cfg).toBe(4.5);
+  });
+
+  it("edit: a two-reference recipe may have an empty prompt", async () => {
+    h.setComfy(comfyEdit());
+    const two = [REF_A.toString("base64"), REF_B.toString("base64")];
+    const res = await post("/api/edit", await member(), { prompt: "", preset: "preview", resolution: "1024", images: two, recipe: "face_swap" });
+    expect(res.statusCode).toBe(202);
+    expect(sentPrompt()["6"].inputs.prompt).toMatch(/^Replace the face of the person in <image1>/);
+  });
+
+  const bad: [string, string, Record<string, unknown>, string][] = [
+    ["an unknown recipe", "/api/generate", { ...okGen, recipe: "nope" }, "unknown_recipe"],
+    ["an edit recipe in generate", "/api/generate", { ...okGen, recipe: "face_swap" }, "recipe_not_for_mode"],
+    ["a cfg off the grid", "/api/generate", { ...okGen, cfg: 2.25 }, "invalid_cfg"],
+    ["a cfg above the range", "/api/generate", { ...okGen, cfg: 9 }, "invalid_cfg"],
+    ["a negative prompt over the limit", "/api/generate", { ...okGen, negative_prompt: "x".repeat(51) }, "negative_prompt_too_long"],
+    ["a non-text negative prompt", "/api/generate", { ...okGen, negative_prompt: 5 }, "invalid_negative_prompt"],
+    ["a recipe with too few references", "/api/edit", { ...okEdit, recipe: "face_swap" }, "recipe_references"],
+    ["a generate recipe in edit", "/api/edit", { ...okEdit, recipe: "anime" }, "recipe_not_for_mode"],
+  ];
+  it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_n, url, body, code) => {
+    h.setComfy(comfyEdit());
+    const res = await post(url, await member(), body);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("the shipped OpenAPI document knows the new request members", async () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    for (const path of ["/api/generate", "/api/edit"]) {
+      const props = doc.paths[path].post.requestBody.content["application/json"].schema.properties;
+      expect(Object.keys(props)).toEqual(expect.arrayContaining(["recipe", "negative_prompt", "cfg"]));
+    }
+    expect(doc.components.schemas.State.required).toEqual(expect.arrayContaining(["guidance", "negative_prompt", "recipes"]));
+  });
+});

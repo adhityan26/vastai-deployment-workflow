@@ -311,7 +311,9 @@ def _mutate(fn):
 
 
 BAD_GENERATE = {
-    "unknown_param": lambda g: g["params"].update(cfg={"node": "8", "input": "cfg"}),
+    "unknown_param": lambda g: g["params"].update(scheduler={"node": "8", "input": "scheduler"}),
+    "optional_param_without_node": lambda g: g["params"].update(cfg={"input": "cfg"}),
+    "optional_param_not_a_mapping": lambda g: g["params"].update(negative_prompt="6"),
     "missing_param": lambda g: g["params"].pop("seed"),
     "missing_node": lambda g: g["params"]["prompt"].pop("node"),
     "missing_input": lambda g: g["params"]["prompt"].pop("input"),
@@ -507,3 +509,12 @@ def test_anime_to_real_is_a_lora_style_with_its_own_prompt_and_one_reference():
     assert style["params"][0]["min"] == 0.0 and style["params"][0]["max"] == 1.0
     # Its LoRA is still pinned and downloaded at boot (strength 0 only leaves the loader out of the workflow).
     assert any(m.file == style["lora"]["file"] and m.dest == "models/loras/" for m in load_profile(shipped).models)
+
+
+def test_the_optional_negative_prompt_and_cfg_params_are_accepted(tmp_path):
+    """The web app maps them; the agent only checks their shape, so a profile that has them must still load."""
+    generate = copy.deepcopy(GENERATE)
+    generate["params"].update(negative_prompt={"node": "6", "input": "text"}, cfg={"node": "8", "input": "cfg"})
+    profile = load_profile(write_with_generate(tmp_path, generate))
+    assert profile.generate is not None
+    assert not hasattr(profile.generate.params, "cfg")

@@ -428,6 +428,18 @@ supervisord runs ComfyUI as root. Boot writes a new `/workspace/.env` with mode 
 ran as another user it could not read the file and would start without previews. Check once on the first live boot
 (SSH into the instance): `ps aux | grep main.py` must show `--preview-method latent2rgb` (or the configured method).
 
+## Negative prompt, guidance and presets (recipes)
+
+The Advanced section of the form has a negative prompt and a guidance (cfg) slider, driven by the profile
+(`generate.params.negative_prompt` / `cfg`, `guidance:`). The workflows ship with cfg 1.0, where the negative prompt
+has no effect; raising guidance makes it count but roughly doubles sampling time. UNVERIFIED for this model: compare
+a few values on the same seed before changing a default.
+
+Recipes (`recipes:` in `instance/profiles/image.yaml`) are ready-made prompt templates (portrait, family photo, anime,
+face swap, ...). The page shows a "Preset" menu per mode; the user types a short prompt and the server wraps it in the
+template and adds the recipe's negative prompt and guidance. The templates stay on the server. ALL SAMPLE RECIPES SHIP
+OFF (`enabled: false`) until the owner chooses which to offer; their wording is a first draft, not compared on real output.
+
 ## Vast credit (admin)
 
 Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a

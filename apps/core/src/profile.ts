@@ -2,12 +2,16 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
 import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./styles.js";
+import { parseGuidance, type GuidanceSpec } from "./guidance.js";
+import { parseRecipes, type RecipeSpec } from "./recipes.js";
 import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
 const PARAM_KEYS = ["prompt", "steps", "width", "height", "seed"] as const;
 type ParamKey = (typeof PARAM_KEYS)[number];
+// Optional knobs: a profile without them simply does not offer a negative prompt or guidance for that workflow.
+const OPTIONAL_PARAM_KEYS = ["negative_prompt", "cfg"] as const;
 const EDIT_PARAM_KEYS = ["prompt", "steps", "seed", "resolution"] as const;
 type EditParamKey = (typeof EDIT_PARAM_KEYS)[number];
 // Plain identifiers only: these end up in a workflow graph that ComfyUI executes.
@@ -35,9 +39,15 @@ export interface SizeSpec {
   readonly width: number;
   readonly height: number;
 }
+/** Where the optional negative prompt and cfg go in a workflow; null when the workflow has no such input. */
+export interface OptionalParams {
+  readonly negativePrompt: ParamRef | null;
+  readonly cfg: ParamRef | null;
+}
 export interface GenerateSpec {
   readonly workflow: string;
   readonly params: Readonly<Record<ParamKey, ParamRef>>;
+  readonly optional: OptionalParams;
   readonly qualityPresets: readonly QualityPreset[];
   readonly sizes: readonly SizeSpec[];
 }
@@ -58,6 +68,7 @@ export interface ReferenceSpec {
 export interface EditSpec {
   readonly workflow: string;
   readonly params: Readonly<Record<EditParamKey, ParamRef>>;
+  readonly optional: OptionalParams;
   readonly references: ReferenceSpec;
   readonly resolutions: readonly ResolutionSpec[];
 }
@@ -85,6 +96,10 @@ export interface Profile {
   readonly edit: EditSpec | null;
   /** The enabled styles (LoRA variations with their own parameters); empty when the profile has none. */
   readonly styles: readonly StyleSpec[];
+  /** The allowed guidance (cfg) range; null when the profile offers no guidance setting. */
+  readonly guidance: GuidanceSpec | null;
+  /** The enabled recipes (ready-made prompt templates); empty when the profile has none. */
+  readonly recipes: readonly RecipeSpec[];
   /** The upscale mode when the profile enables it; null otherwise. */
   readonly upscale: UpscaleSpec | null;
   readonly models: readonly ModelSpec[];
@@ -97,6 +112,9 @@ export interface GenerateInput {
   preset: string;
   size: string;
   seed: number;
+  /** Already checked by the caller (resolveNegative / resolveCfg); absent leaves the workflow's own value. */
+  negativePrompt?: string;
+  cfg?: number | null;
   /** A style already checked by resolveStyle; null or absent for the plain workflow. */
   style?: ResolvedStyle | null;
 }
@@ -110,6 +128,8 @@ export interface EditInput {
   seed: number;
   /** Names of the already uploaded references, in order: the first one is image_1. */
   imageNames: readonly string[];
+  negativePrompt?: string;
+  cfg?: number | null;
   /** A style already checked by resolveStyle; null or absent for the plain workflow. */
   style?: ResolvedStyle | null;
 }
@@ -160,13 +180,18 @@ function modelEntries(raw: unknown): ModelEntry[] {
   });
 }
 
+function parseOptional(paramsRaw: Record<string, unknown>, section: string): OptionalParams {
+  const ref = (key: string): ParamRef | null => (key in paramsRaw ? paramRef(paramsRaw[key], `${section} param ${key}`) : null);
+  return { negativePrompt: ref("negative_prompt"), cfg: ref("cfg") };
+}
+
 function parseGenerate(raw: unknown): GenerateSpec {
   const gen = mapping(raw, "generate");
   const workflow = required(gen["workflow"], "generate workflow");
   if (!WORKFLOW_NAME.test(workflow)) throw new ProfileError(`generate workflow is not a valid workflow name: ${workflow}`);
 
   const paramsRaw = mapping(gen["params"], "generate params");
-  const unknown = Object.keys(paramsRaw).filter((k) => !(PARAM_KEYS as readonly string[]).includes(k));
+  const unknown = Object.keys(paramsRaw).filter((k) => !(PARAM_KEYS as readonly string[]).includes(k) && !(OPTIONAL_PARAM_KEYS as readonly string[]).includes(k));
   if (unknown.length > 0) throw new ProfileError(`generate params has unknown keys: ${unknown.sort().join(", ")}`);
   const params = {} as Record<ParamKey, ParamRef>;
   for (const key of PARAM_KEYS) {
@@ -199,7 +224,7 @@ function parseGenerate(raw: unknown): GenerateSpec {
     if (sizes.some((s) => s.name === name)) throw new ProfileError(`duplicate size name '${name}'`);
     sizes.push({ name, width, height });
   }
-  return { workflow, params, qualityPresets, sizes };
+  return { workflow, params, optional: parseOptional(paramsRaw, "generate"), qualityPresets, sizes };
 }
 
 function paramRef(raw: unknown, what: string): ParamRef {
@@ -213,7 +238,7 @@ function parseEdit(raw: unknown): EditSpec {
   if (!WORKFLOW_NAME.test(workflow)) throw new ProfileError(`edit workflow is not a valid workflow name: ${workflow}`);
 
   const paramsRaw = mapping(edit["params"], "edit params");
-  const unknown = Object.keys(paramsRaw).filter((k) => !(EDIT_PARAM_KEYS as readonly string[]).includes(k));
+  const unknown = Object.keys(paramsRaw).filter((k) => !(EDIT_PARAM_KEYS as readonly string[]).includes(k) && !(OPTIONAL_PARAM_KEYS as readonly string[]).includes(k));
   if (unknown.length > 0) throw new ProfileError(`edit params has unknown keys: ${unknown.sort().join(", ")}`);
   const params = {} as Record<EditParamKey, ParamRef>;
   for (const key of EDIT_PARAM_KEYS) {
@@ -245,6 +270,7 @@ function parseEdit(raw: unknown): EditSpec {
   return {
     workflow,
     params,
+    optional: parseOptional(paramsRaw, "edit"),
     references: { nodeClass, imageInput, encoderNode: required(encoder["node"], "edit references encoder node"), inputPrefix },
     resolutions,
   };
@@ -256,10 +282,18 @@ export function loadProfile(path: string): Profile {
     const raw = mapping(parse(readFileSync(path, "utf8")), "profile");
     if (raw["generate"] === undefined || raw["generate"] === null) throw new ProfileError("profile has no generate section");
     const models = parseModels(raw["models"]);
+    const generate = parseGenerate(raw["generate"]);
+    const edit = raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]);
+    const guidance = parseGuidance(raw["guidance"]);
+    if (guidance === null && (generate.optional.cfg !== null || edit?.optional.cfg != null)) {
+      throw new ProfileError("a cfg param needs a guidance section (min, max, step, default)");
+    }
     return {
       name: required(raw["name"], "name"),
-      generate: parseGenerate(raw["generate"]),
-      edit: raw["edit"] === undefined || raw["edit"] === null ? null : parseEdit(raw["edit"]),
+      generate,
+      edit,
+      guidance,
+      recipes: parseRecipes(raw["recipes"], guidance),
       styles: parseStyles(raw["styles"], modelEntries(raw["models"])),
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
       models,
@@ -268,6 +302,20 @@ export function loadProfile(path: string): Profile {
     if (e instanceof ProfileError) throw new ProfileError(`${path}: ${e.message}`);
     throw new ProfileError(`${path}: invalid profile (${(e as Error).message})`);
   }
+}
+
+/** Set the optional negative prompt and cfg inputs of a copied workflow. */
+function applyOptional(copy: ComfyPrompt, optional: OptionalParams, input: { negativePrompt?: string; cfg?: number | null }): void {
+  const put = (ref: ParamRef | null, value: string | number, code: string, what: string): void => {
+    if (ref === null) throw new GenerateInputError(code, `this server does not offer ${what}`);
+    const node = copy[ref.node];
+    if (!node || typeof node.inputs !== "object" || node.inputs === null || !(ref.input in node.inputs)) {
+      throw new GenerateInputError("workflow_mismatch", `workflow lacks node ${ref.node} input ${ref.input}`);
+    }
+    node.inputs[ref.input] = value;
+  };
+  if (input.negativePrompt !== undefined) put(optional.negativePrompt, input.negativePrompt, "negative_prompt_unavailable", "a negative prompt");
+  if (input.cfg !== undefined && input.cfg !== null) put(optional.cfg, input.cfg, "cfg_unavailable", "a guidance setting");
 }
 
 /** Fill the workflow template: a deep copy with only the mapped inputs changed. */
@@ -299,6 +347,7 @@ export function buildPrompt(profile: Profile, workflowJson: unknown, input: Gene
     }
     node.inputs[ref.input] = values[key];
   }
+  applyOptional(copy, generate.optional, input);
   if (input.style) applyStyle(copy, input.style);
   return copy;
 }
@@ -349,6 +398,7 @@ export function buildEditPrompt(profile: Profile, workflowJson: unknown, input: 
     copy[id] = { class_type: edit.references.nodeClass, inputs: { [edit.references.imageInput]: name } };
     encoder.inputs[`${edit.references.inputPrefix}${i + 1}`] = [id, 0];
   });
+  applyOptional(copy, edit.optional, input);
   if (input.style) applyStyle(copy, input.style);
   return copy;
 }

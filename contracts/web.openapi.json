@@ -293,7 +293,10 @@
           "edit",
           "gallery",
           "styles",
-          "upscale"
+          "upscale",
+          "guidance",
+          "negative_prompt",
+          "recipes"
         ],
         "properties": {
           "state": {
@@ -871,6 +874,105 @@
               }
             ],
             "description": "Null when upscale is off on this server"
+          },
+          "guidance": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "min",
+                  "max",
+                  "step",
+                  "default"
+                ],
+                "properties": {
+                  "min": {
+                    "type": "number"
+                  },
+                  "max": {
+                    "type": "number"
+                  },
+                  "step": {
+                    "type": "number"
+                  },
+                  "default": {
+                    "type": "number"
+                  }
+                }
+              }
+            ],
+            "description": "The allowed cfg range; null when the server offers no guidance setting"
+          },
+          "negative_prompt": {
+            "type": "boolean",
+            "description": "Whether the server accepts a negative prompt"
+          },
+          "recipes": {
+            "type": "array",
+            "description": "Enabled recipes (ready-made prompt templates). Only what the page needs: the template text, negative prompt and cfg stay on the server.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title",
+                "description",
+                "modes",
+                "prompt_optional",
+                "references"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "modes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "generate",
+                      "edit"
+                    ]
+                  }
+                },
+                "prompt_optional": {
+                  "type": "boolean"
+                },
+                "references": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "min",
+                        "max"
+                      ],
+                      "properties": {
+                        "min": {
+                          "type": "integer"
+                        },
+                        "max": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           }
         }
       },
@@ -3159,6 +3261,27 @@
                         }
                       }
                     }
+                  },
+                  "recipe": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A recipe id from recipes in /api/state; wraps the prompt in the recipe's template and adds its negative prompt and guidance. The prompt may then be short, or empty when the recipe has prompt_optional."
+                  },
+                  "negative_prompt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Things to avoid. Only has an effect with cfg above 1; at most GENERATE_MAX_PROMPT_CHARS. Added after the recipe's own negative prompt."
+                  },
+                  "cfg": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Guidance, within guidance.min..max in steps of guidance.step from /api/state"
                   }
                 }
               }
@@ -3356,6 +3479,27 @@
                         }
                       }
                     }
+                  },
+                  "recipe": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A recipe id from recipes in /api/state; wraps the prompt in the recipe's template and adds its negative prompt and guidance. The prompt may then be short, or empty when the recipe has prompt_optional."
+                  },
+                  "negative_prompt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Things to avoid. Only has an effect with cfg above 1; at most GENERATE_MAX_PROMPT_CHARS. Added after the recipe's own negative prompt."
+                  },
+                  "cfg": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Guidance, within guidance.min..max in steps of guidance.step from /api/state"
                   }
                 }
               }
