@@ -55,6 +55,11 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
     (c) Camera angle (AnyAngle): its mechanism is not documented in this repo
    (a LoRA plus extra 3D models, per the design), three licenses are unchecked and the Anything to Real live test comes
    first, so guessing a workflow would be fiction.
+   Also on branch `feat/recipes-merge` (local commits, not pushed or deployed): branch `feat/recipes-negative-prompt`
+   merged and reworked. One preset mechanism (styles; recipes folded in as style `defaults`, samples ported as disabled
+   preset styles), an "Advanced" section with negative prompt and guidance (cfg) for generate and edit, validated
+   against the profile mapping and `GENERATE_MAX_NEGATIVE_PROMPT_CHARS`; untouched it sends exactly the old body.
+   Their effect on this model is UNVERIFIED (README "Negative prompt, guidance and style defaults").
 3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
    `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
    a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).

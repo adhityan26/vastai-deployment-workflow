@@ -369,7 +369,8 @@ second photo must consent. The quality preset stays whatever the user chose.
 How to use: Edit images, choose "Face swap", attach the scene photo first and the face photo second (or press Swap
 order), optionally add notes, press Edit. To change the wording, edit `prompt_template` (keep exactly one `{prompt}`);
 to turn it off set `enabled: false`. Other presets can be added the same way: `kind: preset`, `prompt_template`
-and/or params with node targets, optional `references: {min, max, labels}` (edit styles only) and `hint`.
+and/or params with node targets, optional `references: {min, max, labels}` (edit styles only), `hint` and
+`defaults` (values the page pre-fills; see "Negative prompt, guidance and style defaults").
 
 ## Upscale
 
@@ -428,17 +429,54 @@ supervisord runs ComfyUI as root. Boot writes a new `/workspace/.env` with mode 
 ran as another user it could not read the file and would start without previews. Check once on the first live boot
 (SSH into the instance): `ps aux | grep main.py` must show `--preview-method latent2rgb` (or the configured method).
 
-## Negative prompt, guidance and presets (recipes)
+## Negative prompt, guidance and style defaults (Advanced)
 
-The Advanced section of the form has a negative prompt and a guidance (cfg) slider, driven by the profile
-(`generate.params.negative_prompt` / `cfg`, `guidance:`). The workflows ship with cfg 1.0, where the negative prompt
-has no effect; raising guidance makes it count but roughly doubles sampling time. UNVERIFIED for this model: compare
-a few values on the same seed before changing a default.
+The form has a collapsible "Advanced" section with a negative prompt and a guidance (cfg) slider. Both are optional
+knobs of the profile: `generate.params` and `edit.params` may each map `negative_prompt` and `cfg` to a node input
+(the shipped profile maps both in both workflows: generate node 6 `text`, the empty negative CLIPTextEncode, and
+KSampler 8 `cfg`; edit `TextEncodeQwenImage21` 6 `negative_prompt` and KSampler 7 `cfg`), and `guidance: {min, max,
+step, default}` bounds the slider (1.0 to 6.0 in steps of 0.5). `/api/state` says per mode which knobs exist
+(`advanced.generate` / `advanced.edit`), and the page shows only those (nothing in Upscale).
 
-Recipes (`recipes:` in `instance/profiles/image.yaml`) are ready-made prompt templates (portrait, family photo, anime,
-face swap, ...). The page shows a "Preset" menu per mode; the user types a short prompt and the server wraps it in the
-template and adds the recipe's negative prompt and guidance. The templates stay on the server. ALL SAMPLE RECIPES SHIP
-OFF (`enabled: false`) until the owner chooses which to offer; their wording is a first draft, not compared on real output.
+Rules (decisions):
+- **Untouched means unchanged.** The page sends no `negative_prompt` while the box is blank and no `cfg` while the
+  slider sits at `guidance.default`; the server leaves the workflow's own values when a knob is absent, null or a
+  blank text. `guidance.default` must equal the cfg in the workflows (1.0): the server refuses to start otherwise. So
+  a user who does not open Advanced gets exactly the jobs of before.
+- **Validated server side.** cfg must be a number on the guidance grid (`invalid_cfg`); the negative prompt must be
+  text of at most `GENERATE_MAX_NEGATIVE_PROMPT_CHARS` (default 1000) after trimming (`invalid_negative_prompt`,
+  `negative_prompt_too_long`). A knob the mode's workflow does not map is refused (`negative_prompt_unavailable`,
+  `cfg_unavailable`), never silently dropped. Where a value goes always comes from the profile; a profile that maps a
+  knob onto an input another param already fills is refused at load. The edit body limit counts both texts.
+- **What is kept.** The job label (shown in the history and stored with a saved gallery image) gets ", guidance N"
+  and ", negative prompt" when they were set. The negative text itself is not stored in the gallery metadata (the
+  metadata is small and already holds the prompt; the label records that one was used).
+
+UNVERIFIED: what guidance above 1 or a negative prompt does to Qwen-Image 2.1 (GGUF Q4) in generate or edit has not
+been tried on a real instance. Only ComfyUI's mechanics are known: at cfg 1.0 it skips the negative branch (so the
+negative prompt is ignored there), and above 1.0 every step runs the model for both branches, so a job takes longer.
+Compare a few values on the same seed before recommending any value or changing a default.
+
+### Presets: one mechanism (styles), recipes folded in
+
+Branch `feat/recipes-negative-prompt` (commit bf26818) added "recipes", a second preset system next to styles (its
+own `recipe` request field, "Preset" menu, reference rule and a second face swap). There is now ONE: styles. The
+`recipe` field is gone (a body that sends it is refused as `invalid_body`). What recipes had beyond styles became the
+optional style `defaults`: `negative_prompt`, `cfg`, `preset`, `size` (generate styles) and `resolution` (edit
+styles). They are checked at load (names offered by the profile, cfg on the grid, and for an enabled style the knob
+mapped in every mode it is offered in; a default negative prompt longer than the request limit stops the server at
+startup), listed in `/api/state` under each style, and the page pre-fills them when the style is chosen; the user can
+change each. Leaving the style (or the mode) puts back what the fields held before, except the ones the user
+changed. The server never applies defaults by itself: a job runs with what the request sends, so the request, the
+label and what a user saw are the same thing.
+
+The sample recipes are now sample preset styles, ALL OFF (`enabled: false`): Portrait photo, Family photo and Anime
+illustration (generate; negative prompt and guidance 3.0 as defaults), Outfit swap (2 images), Restore old photo and
+Photo to anime (1 image; a negative prompt default). Their wording is a first draft never compared on real output;
+the generate templates were reordered so `{prompt}` is at the end (an empty note then leaves no stray punctuation).
+The recipe "Face swap" was not ported: the live `faceswap` style (the owner's tested instruction) replaces it.
+`anything2real` and `faceswap` are unchanged and have no defaults. To offer a sample: set `enabled: true`, try it on a
+real instance, and adjust its `defaults`.
 
 ## Vast credit (admin)
 
@@ -502,6 +540,9 @@ checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- Negative prompt and guidance above 1 on Qwen-Image 2.1 (generate and edit): mapped and validated, never run
+  on a real instance; see "Negative prompt, guidance and style defaults".
 
 - Saving to and listing from a real MinIO: only a fake S3 server and an in-memory store were used. The
   first real Save is the check (path-style addressing, the checksum settings and the bucket-only policy).
