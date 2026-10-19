@@ -68,7 +68,9 @@ def test_boot_comfy_args_writes_the_workspace_env(tmp_path):
     assert (tmp_path / ".env").read_text() == 'COMFYUI_ARGS="--disable-auto-launch --port 18188 --preview-method latent2rgb"\n'
 
 
-def test_boot_comfy_args_failure_self_destroys_as_a_comfyui_start_failure(tmp_path, monkeypatch):
+def test_boot_comfy_args_write_failure_only_warns_and_keeps_the_instance(tmp_path, monkeypatch, capsys):
+    """A failed write (read-only, full disk) must not destroy a paid instance: ComfyUI restarts with its old
+    arguments, so only the previews are missing."""
     prepared(tmp_path)
     ef = env_file(tmp_path)
     run_boot(tmp_path, ["begin", "--env-file", ef])
@@ -78,5 +80,36 @@ def test_boot_comfy_args_failure_self_destroys_as_a_comfyui_start_failure(tmp_pa
 
     monkeypatch.setattr("vastcomfy_agent.boot.write_image_env", broken)
     code, runner = run_boot(tmp_path, ["comfy-args", "--env-file", ef])
+    assert code == 0
+    assert not any(c[0] == "vastai" for c in runner.cmds)
+    assert states(tmp_path).get().reason is None
+    err = capsys.readouterr().err
+    assert "warning" in err and "without previews" in err
+    assert "ck" not in err.replace("check", "")  # no container key
+
+
+def test_boot_comfy_args_config_error_self_destroys_as_a_comfyui_start_failure(tmp_path, monkeypatch):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+
+    def bad(cfg):
+        raise comfy_args.ConfigError("COMFY_PREVIEW_METHOD: must be one of none, latent2rgb, taesd, auto")
+
+    monkeypatch.setattr("vastcomfy_agent.boot.render_args", bad)
+    code, runner = run_boot(tmp_path, ["comfy-args", "--env-file", ef])
     assert code == 12 and states(tmp_path).get().reason == "comfyui_start_failed"
     assert any(c[0] == "vastai" for c in runner.cmds)
+
+
+def test_the_web_and_the_instance_send_the_same_base_arguments(make_cfg):
+    """apps/core/src/lifecycle.ts sets COMFYUI_ARGS for the first start; boot rewrites it before the restart.
+    Both must agree on everything except the preview method, or the restart would change ComfyUI's behaviour."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[3] / "apps" / "core" / "src" / "lifecycle.ts").read_text()
+    match = re.search(r"COMFYUI_ARGS: `([^`]*)`", source)
+    assert match, "lifecycle.ts no longer sets COMFYUI_ARGS as a template string"
+    web = match.group(1).replace("${comfyPort}", "18190")
+    assert comfy_args.render_args(make_cfg(COMFY_PREVIEW_METHOD="none", COMFY_PORT="18190")) == web

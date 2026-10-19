@@ -173,13 +173,20 @@ def cmd_copy_workflows(b: Boot) -> int:
 
 def cmd_comfy_args(b: Boot) -> int:
     """Before the ComfyUI restart: write its arguments (with COMFY_PREVIEW_METHOD) where the image's start script
-    reads them. A failure here means ComfyUI could not be started as configured."""
+    reads them. An invalid configuration fails the boot; a failed write only costs the previews (ComfyUI restarts
+    with the arguments it already had), so it is a warning and never destroys the instance."""
     try:
         args = render_args(b.cfg)
-        write_image_env(image_env_file(b.cfg), args)
-    except (ConfigError, OSError) as exc:
-        print(f"boot: ComfyUI arguments could not be written: {exc}", file=sys.stderr)
+    except ConfigError as exc:
+        print(f"boot: ComfyUI arguments are invalid: {exc}", file=sys.stderr)
         return b.fail("comfyui_start_failed")
+    try:
+        write_image_env(image_env_file(b.cfg), args)
+    except OSError as exc:
+        # The error class only: a path or message is not needed to act on it.
+        print(f"boot: warning: ComfyUI arguments could not be written ({type(exc).__name__}); "
+              "ComfyUI restarts with its old arguments, without previews", file=sys.stderr)
+        return EXIT_OK
     print(f"boot: ComfyUI arguments: {args}", file=sys.stderr)
     return EXIT_OK
 

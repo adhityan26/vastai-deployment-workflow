@@ -403,9 +403,16 @@ needs no extra model and gives rough colour previews; `none` turns previews off 
 Follow-up: find an official, licensed source for that file, pin it in `models:` with dest `models/vae_approx/`, then
 set `COMFY_PREVIEW_METHOD=taesd`.
 
+If that write fails (read-only or full disk), boot only logs a warning and ComfyUI restarts with its old arguments:
+no previews, but the instance is not destroyed. An invalid `COMFY_PREVIEW_METHOD` still fails the boot.
+
 UNVERIFIED live: the websocket through the tailnet (userspace Tailscale forwards plain TCP, so it should work), how
 useful `latent2rgb` previews of Qwen-Image 2.1 look, and whether ComfyUI's step progress comes only from the sampler
-node of our workflows.
+node of our workflows. Also assumed from reading the image (vastai/comfy v0.41.0), not seen working: that
+`/opt/supervisor-scripts/comfyui.sh` sources `${WORKSPACE}/.env` with `set -a` on every (re)start, and that
+supervisord runs ComfyUI as root. Boot writes a new `/workspace/.env` with mode 0600 owned by root, so if the program
+ran as another user it could not read the file and would start without previews. Check once on the first live boot
+(SSH into the instance): `ps aux | grep main.py` must show `--preview-method latent2rgb` (or the configured method).
 
 ## Vast credit (admin)
 

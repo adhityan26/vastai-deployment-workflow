@@ -254,7 +254,8 @@ boot install-models --env-file "$ENV_FILE" || exit $?
 # running since the entrypoint) once so it loads the new nodes and the preview method.
 boot copy-workflows --env-file "$ENV_FILE" || exit $?
 # ComfyUI's arguments with the preview method (COMFY_PREVIEW_METHOD) go where the image's start script reads them,
-# so the restart below runs with previews.
+# so the restart below runs with previews. Only an invalid configuration fails here; a failed write is a warning
+# (the restart then runs with the old arguments, without previews).
 boot comfy-args --env-file "$ENV_FILE" || exit $?
 disable_comfy_manager || die_with comfyui_start_failed
 ctl restart "$COMFY_PROGRAM" || die_with comfyui_start_failed
