@@ -1,0 +1,16 @@
+import { it } from "vitest";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { loadProfile } from "../../src/profile.js";
+import { capture, cases, type Captured } from "./cases.js";
+
+// Writes golden-prompts.json from the code of the checkout it runs in (meant for the reference commit).
+const repo = (p: string) => fileURLToPath(new URL(`../../../../${p}`, import.meta.url));
+it("captures the golden prompts", async () => {
+  const profile = loadProfile(repo("instance/profiles/image.yaml"));
+  const read = (f: string) => JSON.parse(readFileSync(repo(`instance/workflows/${f}`), "utf8"));
+  const templates = { generate: read("qwen-image-t2i.json"), edit: read("qwen-image-edit.json"), upscale: read("image-upscale.json") };
+  const out: Captured[] = [];
+  for (const c of cases(profile)) out.push({ ...c, prompt: await capture(c, profile, templates) });
+  writeFileSync(process.env["GOLDEN_OUT"]!, `${JSON.stringify(out, null, 1)}\n`);
+});

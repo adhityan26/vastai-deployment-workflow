@@ -286,10 +286,10 @@ describe("generate and edit services", () => {
   const base = { prompt: "two kids on a beach", preset: "preview", size: "1:1", seed: 1 };
   const editBase = () => ({ prompt: "make it night", preset: "preview", resolution: "1024", seed: 1, images: [png(64, 64).toString("base64")] });
 
-  it("a request without knobs sends exactly the workflow a request before this feature sent", async () => {
+  it("a request without knobs keeps the workflow's own negative prompt and cfg", async () => {
+    // Byte-identity with master for untouched requests is checked against captured fixtures in golden/golden.test.ts.
     const { gen, sent } = await fake();
     await generate(gen, base);
-    expect(sent()).toEqual(buildPrompt(shipped, t2i, base));
     expect(sent()["6"].inputs.text).toBe("");
     expect(sent()["8"].inputs.cfg).toBe(1);
   });

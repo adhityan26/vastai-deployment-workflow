@@ -452,8 +452,19 @@ Rules (decisions):
   and ", negative prompt" when they were set. The negative text itself is not stored in the gallery metadata (the
   metadata is small and already holds the prompt; the label records that one was used).
 
+The two fields are one set of values for the page, shared between Generate and Edit (switching the mode keeps what
+was typed; a style's pre-fill is undone when the mode changes, see below). Each mode only sends a knob its workflow
+takes. A style that pre-fills the negative prompt or guidance opens the Advanced section, so a pre-filled value is
+never sent unseen; the page never closes it by itself.
+
+Untouched requests are pinned by golden fixtures: `apps/core/tests/golden/golden-prompts.json` holds the exact
+prompts master d929a9f submitted for every preset and size, edit with two references, "Anime / cartoon to real" at
+0.7 and 0, face swap and upscale 2x/4x; the test fails on any byte of drift.
+
 UNVERIFIED: what guidance above 1 or a negative prompt does to Qwen-Image 2.1 (GGUF Q4) in generate or edit has not
-been tried on a real instance. Only ComfyUI's mechanics are known: at cfg 1.0 it skips the negative branch (so the
+been tried on a real instance. In particular the edit workflow puts `QwenImage21Cache` (node 4) between the model
+and the sampler: whether that cache behaves correctly when cfg above 1 makes the sampler run the conditional and the
+negative branch every step (results, speed, VRAM) is unknown. Only ComfyUI's mechanics are known: at cfg 1.0 it skips the negative branch (so the
 negative prompt is ignored there), and above 1.0 every step runs the model for both branches, so a job takes longer.
 Compare a few values on the same seed before recommending any value or changing a default.
 

@@ -1,0 +1,258 @@
+[
+ {
+  "name": "generate preview 1:1",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "preview",
+   "size": "1:1",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate preview 3:4",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "preview",
+   "size": "3:4",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":896,\"height\":1152,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate preview 4:3",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "preview",
+   "size": "4:3",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1152,\"height\":896,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate preview 16:9",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "preview",
+   "size": "16:9",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1344,\"height\":768,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate preview 9:16",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "preview",
+   "size": "9:16",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":768,\"height\":1344,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate standard 1:1",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate standard 3:4",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "standard",
+   "size": "3:4",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":896,\"height\":1152,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate standard 4:3",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "standard",
+   "size": "4:3",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1152,\"height\":896,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate standard 16:9",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "standard",
+   "size": "16:9",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1344,\"height\":768,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate standard 9:16",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "standard",
+   "size": "9:16",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":768,\"height\":1344,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate high 1:1",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "high",
+   "size": "1:1",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":40,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate high 3:4",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "high",
+   "size": "3:4",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":896,\"height\":1152,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":40,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate high 4:3",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "high",
+   "size": "4:3",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1152,\"height\":896,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":40,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate high 16:9",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "high",
+   "size": "16:9",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1344,\"height\":768,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":40,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "generate high 9:16",
+  "kind": "generate",
+  "request": {
+   "prompt": "A red fox in the snow",
+   "preset": "high",
+   "size": "9:16",
+   "seed": 42
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A red fox in the snow\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":768,\"height\":1344,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":40,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "edit 2 references",
+  "kind": "edit",
+  "request": {
+   "prompt": "Make the girl in <image1> wear the jacket from <image2>.",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ==",
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAAAAAAAAAAAAQg=="
+   ]
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Make the girl in <image1> wear the jacket from <image2>.\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0],\"images.image_2\":[\"ref_2\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}},\"ref_2\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n2.png\"}}}"
+ },
+ {
+  "name": "edit anything2real 0.7",
+  "kind": "edit",
+  "request": {
+   "prompt": "keep the freckles",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 9,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAyAAAAJYAAAAAAAAAAAAQw=="
+   ],
+   "style": {
+    "id": "anything2real",
+    "params": {
+     "strength": 0.7
+    }
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"style_lora\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Convert this anime or cartoon illustration into a realistic photograph of a real person. Keep the same pose, facial expression, hairstyle and hair color, outfit, background and composition. Natural skin texture and realistic lighting. keep the freckles\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":9,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}},\"style_lora\":{\"class_type\":\"LoraLoaderModelOnly\",\"inputs\":{\"model\":[\"1\",0],\"lora_name\":\"Qwen2.1_Anything2RealCharacters.safetensors\",\"strength_model\":0.7}}}"
+ },
+ {
+  "name": "edit anything2real 0",
+  "kind": "edit",
+  "request": {
+   "prompt": "keep the freckles",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 9,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAyAAAAJYAAAAAAAAAAAAQw=="
+   ],
+   "style": {
+    "id": "anything2real",
+    "params": {
+     "strength": 0
+    }
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Convert this anime or cartoon illustration into a realistic photograph of a real person. Keep the same pose, facial expression, hairstyle and hair color, outfit, background and composition. Natural skin texture and realistic lighting. keep the freckles\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":9,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}}}"
+ },
+ {
+  "name": "edit faceswap",
+  "kind": "edit",
+  "request": {
+   "prompt": "",
+   "preset": "preview",
+   "resolution": "1024",
+   "seed": 11,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ==",
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAAAAAAAAAAAAQg=="
+   ],
+   "style": {
+    "id": "faceswap"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Edit <image1>: replace only the face of the person in <image1> with the face of the person in <image2>. Keep the body, pose, hair, clothing, background, lighting and camera framing of <image1> exactly the same. The result must contain exactly one person.\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0],\"images.image_2\":[\"ref_2\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":11,\"steps\":10,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}},\"ref_2\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n2.png\"}}}"
+ },
+ {
+  "name": "upscale 2x",
+  "kind": "upscale",
+  "request": {
+   "image": "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAAAAAAAAAAAARA==",
+   "scale": "2x"
+  },
+  "prompt": "{\"1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"upscale-n1.png\"}},\"2\":{\"class_type\":\"UpscaleModelLoader\",\"inputs\":{\"model_name\":\"RealESRGAN_x4plus.safetensors\"}},\"3\":{\"class_type\":\"ImageUpscaleWithModel\",\"inputs\":{\"upscale_model\":[\"2\",0],\"image\":[\"1\",0]}},\"4\":{\"class_type\":\"ImageScaleBy\",\"inputs\":{\"image\":[\"3\",0],\"upscale_method\":\"lanczos\",\"scale_by\":0.5}},\"5\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"4\",0],\"filename_prefix\":\"upscale\"}}}"
+ },
+ {
+  "name": "upscale 4x",
+  "kind": "upscale",
+  "request": {
+   "image": "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAAAAAAAAAAAARA==",
+   "scale": "4x"
+  },
+  "prompt": "{\"1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"upscale-n1.png\"}},\"2\":{\"class_type\":\"UpscaleModelLoader\",\"inputs\":{\"model_name\":\"RealESRGAN_x4plus.safetensors\"}},\"3\":{\"class_type\":\"ImageUpscaleWithModel\",\"inputs\":{\"upscale_model\":[\"2\",0],\"image\":[\"1\",0]}},\"4\":{\"class_type\":\"ImageScaleBy\",\"inputs\":{\"image\":[\"3\",0],\"upscale_method\":\"lanczos\",\"scale_by\":1}},\"5\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"4\",0],\"filename_prefix\":\"upscale\"}}}"
+ }
+]
