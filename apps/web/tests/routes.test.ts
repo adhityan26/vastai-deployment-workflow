@@ -304,6 +304,7 @@ async function harness(
     webDestroyBackoffS: 0,
     statusPollS: 1,
     generateMaxPromptChars: 50,
+    generateMaxNegativePromptChars: 400,
     generateTimeoutS: 600,
     startRateLimitPerHour: 2,
     webBodyLimitBytes: 4096,
@@ -2347,6 +2348,7 @@ describe("styles", () => {
         prompt_optional: false,
         references: null,
         hint: null,
+        defaults: {},
         params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0, max: 1, step: 0.05, default: 0.7 }],
       },
       {
@@ -2357,6 +2359,7 @@ describe("styles", () => {
         prompt_optional: true,
         references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] },
         hint: expect.stringContaining("consent"),
+        defaults: {},
         params: [],
       },
     ]);
@@ -2778,75 +2781,101 @@ describe("anime / cartoon to real (a LoRA style with its own prompt)", () => {
   });
 });
 
-describe("recipes, negative prompt and guidance", () => {
-  const RECIPES = ["portrait_photo", "family_photo", "anime", "face_swap", "outfit_swap", "photo_restore", "to_anime"];
+describe("negative prompt, guidance and style defaults (Advanced)", () => {
+  const SAMPLES = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
   const sentPrompt = () => JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+  const t2i = JSON.parse(readFileSync(repo("instance/workflows/qwen-image-t2i.json"), "utf8"));
 
-  /** The shipped profile with every sample recipe switched on (they ship off). */
-  function recipeProfile(): typeof profile {
+  /** The shipped profile after `change` (by default: every sample style switched on; they ship off). */
+  function variant(change: (doc: Record<string, any>) => void = (d) => d.styles.forEach((s: { enabled: boolean }) => (s.enabled = true))): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
     const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
-    for (const r of doc.recipes) r.enabled = true;
-    const dir = mkdtempSync(join(tmpdir(), "recipe-profile-"));
+    change(doc);
+    const dir = mkdtempSync(join(tmpdir(), "advanced-profile-"));
     tempDirs.push(dir);
     const path = join(dir, "image.yaml");
     writeFileSync(path, stringifyYaml(doc));
     return loadProfile(path);
   }
-  beforeEach(async () => {
-    h = await harness({ profile: recipeProfile() });
-  });
 
-  it("offers no recipe by default: the shipped profile has them off", async () => {
+  it("the shipped state: guidance, both knobs in both modes, the live styles without defaults, and no recipes", async () => {
     h = await harness();
-    expect((await call("GET", "/api/state", await member())).json().recipes).toEqual([]);
-  });
-
-  it("lists the recipes, the guidance range and the negative prompt flag, and nothing of the templates", async () => {
     const body = (await call("GET", "/api/state", await member())).json();
     expect(body.guidance).toEqual({ min: 1, max: 6, step: 0.5, default: 1 });
-    expect(body.negative_prompt).toBe(true);
-    expect(body.recipes.map((r: { id: string }) => r.id)).toEqual(RECIPES);
-    expect(body.recipes.find((r: { id: string }) => r.id === "face_swap")).toEqual({
-      id: "face_swap",
-      title: "Face swap",
-      description: expect.stringContaining("<image2>"),
-      modes: ["edit"],
-      prompt_optional: true,
-      references: { min: 2, max: 2 },
-    });
-    const text = JSON.stringify(body.recipes);
-    for (const secret of ["Replace the face", "mismatched skin tone", "plastic skin", "\"cfg\"", "negative_prompt\":\""]) expect(text).not.toContain(secret);
+    expect(body.advanced).toEqual({ generate: { negative_prompt: true, cfg: true }, edit: { negative_prompt: true, cfg: true }, negative_prompt_max_chars: 400 });
+    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
+    for (const st of body.styles) expect(st.defaults).toEqual({});
+    expect(body).not.toHaveProperty("recipes");
+    expect(body).not.toHaveProperty("negative_prompt");
   });
 
-  it("generate: a recipe, a negative prompt and a cfg reach the workflow; the label names the recipe", async () => {
+  it("lists a style's defaults for the page to pre-fill, never its template", async () => {
+    h = await harness({ profile: variant() });
+    const styles = (await call("GET", "/api/state", await member())).json().styles;
+    expect(styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
+    const anime = styles.find((s: { id: string }) => s.id === "anime");
+    expect(anime).toMatchObject({ kind: "preset", modes: ["generate"], prompt_optional: true, defaults: { cfg: 3, negative_prompt: expect.stringMatching(/^photorealistic/) } });
+    expect(Object.keys(anime.defaults).sort()).toEqual(["cfg", "negative_prompt"]);
+    expect(JSON.stringify(styles)).not.toContain("A high-quality anime illustration");
+  });
+
+  it("a plain request sends exactly the shipped workflow values; the knobs land where the profile maps them", async () => {
+    h = await harness();
     h.setComfy(comfyDone([{ filename: "a.png", subfolder: "", type: "output" }]));
-    const res = await post("/api/generate", await member(), { ...okGen, recipe: "anime", negative_prompt: "hat", cfg: 4.5 });
+    const m = await member();
+    expect((await post("/api/generate", m, { ...okGen, seed: 5 })).statusCode).toBe(202);
+    expect(sentPrompt()["6"].inputs).toEqual(t2i["6"].inputs);
+    expect(sentPrompt()["8"].inputs.cfg).toBe(t2i["8"].inputs.cfg);
+    const res = await post("/api/generate", m, { ...okGen, negative_prompt: " hat ", cfg: 4.5 });
     expect(res.statusCode).toBe(202);
-    const p = sentPrompt();
-    expect(p["5"].inputs.text).toMatch(/^A high-quality anime illustration .* a fox$/);
-    expect(p["6"].inputs.text).toMatch(/^photorealistic.*, hat$/);
-    expect(p["8"].inputs.cfg).toBe(4.5);
+    expect(sentPrompt()["6"].inputs.text).toBe("hat");
+    expect(sentPrompt()["8"].inputs.cfg).toBe(4.5);
   });
 
-  it("edit: a two-reference recipe may have an empty prompt", async () => {
+  it("edit takes the knobs too, together with a style", async () => {
+    h = await harness({ cfg: { generateMaxPromptChars: 2000 } });
     h.setComfy(comfyEdit());
     const two = [REF_A.toString("base64"), REF_B.toString("base64")];
-    const res = await post("/api/edit", await member(), { prompt: "", preset: "preview", resolution: "1024", images: two, recipe: "face_swap" });
+    const res = await post("/api/edit", await member(), { ...okEdit, prompt: "", images: two, style: { id: "faceswap" }, negative_prompt: "two faces", cfg: 2 });
     expect(res.statusCode).toBe(202);
-    expect(sentPrompt()["6"].inputs.prompt).toMatch(/^Replace the face of the person in <image1>/);
+    expect(sentPrompt()["6"].inputs.prompt).toMatch(/^Edit <image1>: replace only the face/);
+    expect(sentPrompt()["6"].inputs.negative_prompt).toBe("two faces");
+    expect(sentPrompt()["7"].inputs.cfg).toBe(2);
+  });
+
+  it("a saved image's label says which knobs were set; its metadata never holds the negative prompt text", async () => {
+    h = await harness();
+    h.setComfy(realView(comfyEdit([{ filename: "e.png", subfolder: "", type: "output" }])));
+    const m = await member("ayu");
+    const res = await post("/api/edit", m, { ...okEdit, negative_prompt: "secret words", cfg: 2 });
+    expect(res.statusCode).toBe(202);
+    expect((await call("GET", `/api/generate/${res.json().id}`, m)).json().status).toBe("done");
+    expect((await post("/api/gallery", m, { job: res.json().id, index: 0 })).statusCode).toBe(201);
+    const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1024, 1 reference, guidance 2, negative prompt");
+    expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("make it real");
+    expect(JSON.stringify(head!.metadata)).not.toContain("secret");
+  });
+
+  it("a recipe field is no longer part of the API", async () => {
+    h = await harness();
+    h.setComfy(comfyEdit());
+    for (const [url, body] of [["/api/generate", { ...okGen, recipe: "anime" }], ["/api/edit", { ...okEdit, recipe: "anime" }]] as const) {
+      const res = await post(url, await member(), body);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_body");
+    }
+    expect(h.comfySeen).toHaveLength(0);
   });
 
   const bad: [string, string, Record<string, unknown>, string][] = [
-    ["an unknown recipe", "/api/generate", { ...okGen, recipe: "nope" }, "unknown_recipe"],
-    ["an edit recipe in generate", "/api/generate", { ...okGen, recipe: "face_swap" }, "recipe_not_for_mode"],
     ["a cfg off the grid", "/api/generate", { ...okGen, cfg: 2.25 }, "invalid_cfg"],
     ["a cfg above the range", "/api/generate", { ...okGen, cfg: 9 }, "invalid_cfg"],
-    ["a negative prompt over the limit", "/api/generate", { ...okGen, negative_prompt: "x".repeat(51) }, "negative_prompt_too_long"],
-    ["a non-text negative prompt", "/api/generate", { ...okGen, negative_prompt: 5 }, "invalid_negative_prompt"],
-    ["a recipe with too few references", "/api/edit", { ...okEdit, recipe: "face_swap" }, "recipe_references"],
-    ["a generate recipe in edit", "/api/edit", { ...okEdit, recipe: "anime" }, "recipe_not_for_mode"],
+    ["a cfg as text", "/api/edit", { ...okEdit, cfg: "2" }, "invalid_cfg"],
+    ["a negative prompt over GENERATE_MAX_NEGATIVE_PROMPT_CHARS", "/api/generate", { ...okGen, negative_prompt: "x".repeat(401) }, "negative_prompt_too_long"],
+    ["a non-text negative prompt", "/api/edit", { ...okEdit, negative_prompt: 5 }, "invalid_negative_prompt"],
   ];
   it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_n, url, body, code) => {
+    h = await harness();
     h.setComfy(comfyEdit());
     const res = await post(url, await member(), body);
     expect(res.statusCode).toBe(400);
@@ -2854,12 +2883,42 @@ describe("recipes, negative prompt and guidance", () => {
     expect(h.comfySeen).toHaveLength(0);
   });
 
-  it("the shipped OpenAPI document knows the new request members", async () => {
+  it("a mode whose workflow maps no knob says so in the state and refuses them with a clear code", async () => {
+    h = await harness({
+      profile: variant((d) => {
+        delete d.edit.params.negative_prompt;
+        delete d.edit.params.cfg;
+      }),
+    });
+    h.setComfy(comfyEdit());
+    const m = await member();
+    expect((await call("GET", "/api/state", m)).json().advanced.edit).toEqual({ negative_prompt: false, cfg: false });
+    expect((await post("/api/edit", m, { ...okEdit, negative_prompt: "blurry" })).json().error.code).toBe("negative_prompt_unavailable");
+    expect((await post("/api/edit", m, { ...okEdit, cfg: 2 })).json().error.code).toBe("cfg_unavailable");
+    expect(h.comfySeen).toHaveLength(0);
+    expect((await post("/api/edit", m, { ...okEdit, negative_prompt: "  " })).statusCode).toBe(202); // blank is "not set"
+  });
+
+  it("refuses to start when the guidance default is not the workflows' cfg, or a style default does not fit the limit", async () => {
+    const hot = JSON.parse(readFileSync(repo("instance/workflows/qwen-image-edit.json"), "utf8"));
+    hot["7"].inputs.cfg = 3;
+    await expect(harness({ editTemplate: hot })).rejects.toThrow(/guidance default 1 differs from the edit workflow's cfg/);
+    await expect(harness({ profile: variant() })).resolves.toBeDefined();
+    await expect(harness({ profile: variant(), cfg: { generateMaxNegativePromptChars: 20 } })).rejects.toThrow(/style portrait_photo: its default negative prompt is longer than GENERATE_MAX_NEGATIVE_PROMPT_CHARS/);
+  });
+
+  it("the shipped OpenAPI document knows the knobs and no recipes", () => {
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     for (const path of ["/api/generate", "/api/edit"]) {
       const props = doc.paths[path].post.requestBody.content["application/json"].schema.properties;
-      expect(Object.keys(props)).toEqual(expect.arrayContaining(["recipe", "negative_prompt", "cfg"]));
+      expect(Object.keys(props)).toEqual(expect.arrayContaining(["negative_prompt", "cfg"]));
+      expect(props).not.toHaveProperty("recipe");
+      expect(doc.paths[path].post.responses["400"].description).toContain("negative_prompt_unavailable");
     }
-    expect(doc.components.schemas.State.required).toEqual(expect.arrayContaining(["guidance", "negative_prompt", "recipes"]));
+    const state = doc.components.schemas.State;
+    expect(state.required).toEqual(expect.arrayContaining(["guidance", "advanced"]));
+    expect(state.properties).not.toHaveProperty("recipes");
+    expect(state.properties.styles.items.required).toContain("defaults");
+    expect(state.properties.styles.items.properties.defaults.additionalProperties).toBe(false);
   });
 });

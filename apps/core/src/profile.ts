@@ -2,8 +2,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
 import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./styles.js";
-import { parseGuidance, type GuidanceSpec } from "./guidance.js";
-import { parseRecipes, type RecipeSpec } from "./recipes.js";
+import { parseGuidance, type GuidanceSpec, type TuningSupport } from "./guidance.js";
 import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
@@ -98,8 +97,6 @@ export interface Profile {
   readonly styles: readonly StyleSpec[];
   /** The allowed guidance (cfg) range; null when the profile offers no guidance setting. */
   readonly guidance: GuidanceSpec | null;
-  /** The enabled recipes (ready-made prompt templates); empty when the profile has none. */
-  readonly recipes: readonly RecipeSpec[];
   /** The upscale mode when the profile enables it; null otherwise. */
   readonly upscale: UpscaleSpec | null;
   readonly models: readonly ModelSpec[];
@@ -112,9 +109,9 @@ export interface GenerateInput {
   preset: string;
   size: string;
   seed: number;
-  /** Already checked by the caller (resolveNegative / resolveCfg); absent leaves the workflow's own value. */
+  /** Already checked by resolveTuning; absent leaves the workflow's own value. */
   negativePrompt?: string;
-  cfg?: number | null;
+  cfg?: number;
   /** A style already checked by resolveStyle; null or absent for the plain workflow. */
   style?: ResolvedStyle | null;
 }
@@ -128,8 +125,9 @@ export interface EditInput {
   seed: number;
   /** Names of the already uploaded references, in order: the first one is image_1. */
   imageNames: readonly string[];
+  /** Already checked by resolveTuning; absent leaves the workflow's own value. */
   negativePrompt?: string;
-  cfg?: number | null;
+  cfg?: number;
   /** A style already checked by resolveStyle; null or absent for the plain workflow. */
   style?: ResolvedStyle | null;
 }
@@ -180,9 +178,44 @@ function modelEntries(raw: unknown): ModelEntry[] {
   });
 }
 
-function parseOptional(paramsRaw: Record<string, unknown>, section: string): OptionalParams {
+function parseOptional(paramsRaw: Record<string, unknown>, section: string, mandatory: readonly ParamRef[]): OptionalParams {
   const ref = (key: string): ParamRef | null => (key in paramsRaw ? paramRef(paramsRaw[key], `${section} param ${key}`) : null);
-  return { negativePrompt: ref("negative_prompt"), cfg: ref("cfg") };
+  const optional = { negativePrompt: ref("negative_prompt"), cfg: ref("cfg") };
+  // A knob mapped onto an input another param already fills would silently overwrite it (for example the
+  // negative prompt landing in the positive prompt's text).
+  const taken = new Set(mandatory.map((r) => `${r.node}/${r.input}`));
+  for (const [key, r] of [["negative_prompt", optional.negativePrompt], ["cfg", optional.cfg]] as const) {
+    if (r === null) continue;
+    const at = `${r.node}/${r.input}`;
+    if (taken.has(at)) throw new ProfileError(`${section} param ${key} uses node ${r.node} input ${r.input}, which another param already sets`);
+    taken.add(at);
+  }
+  return optional;
+}
+
+/** Which optional knobs a mode's workflow accepts; nothing for a mode the profile does not have. */
+export function tuningSupport(profile: Profile, mode: "generate" | "edit"): TuningSupport {
+  const optional = mode === "generate" ? profile.generate.optional : (profile.edit?.optional ?? null);
+  return { negativePrompt: optional?.negativePrompt != null, cfg: optional?.cfg != null };
+}
+
+/**
+ * Refuse a profile whose guidance default differs from the cfg its workflows ship with: the page shows the
+ * default when the user chooses nothing and then sends no cfg, so both must be the same number.
+ */
+export function checkGuidanceDefault(profile: Profile, templates: { generate: unknown; edit: unknown }): void {
+  if (profile.guidance === null) return;
+  const check = (ref: ParamRef | null, template: unknown, mode: string): void => {
+    if (ref === null || template === null || template === undefined) return;
+    const inputs = (template as ComfyPrompt)[ref.node]?.inputs;
+    // A missing node or input is a workflow mismatch, refused (profile_mismatch) when a job is built.
+    if (typeof inputs !== "object" || inputs === null || !(ref.input in inputs)) return;
+    if (inputs[ref.input] !== profile.guidance!.default) {
+      throw new ProfileError(`guidance default ${profile.guidance!.default} differs from the ${mode} workflow's cfg (node ${ref.node} input ${ref.input})`);
+    }
+  };
+  check(profile.generate.optional.cfg, templates.generate, "generate");
+  check(profile.edit?.optional.cfg ?? null, templates.edit, "edit");
 }
 
 function parseGenerate(raw: unknown): GenerateSpec {
@@ -224,7 +257,7 @@ function parseGenerate(raw: unknown): GenerateSpec {
     if (sizes.some((s) => s.name === name)) throw new ProfileError(`duplicate size name '${name}'`);
     sizes.push({ name, width, height });
   }
-  return { workflow, params, optional: parseOptional(paramsRaw, "generate"), qualityPresets, sizes };
+  return { workflow, params, optional: parseOptional(paramsRaw, "generate", Object.values(params)), qualityPresets, sizes };
 }
 
 function paramRef(raw: unknown, what: string): ParamRef {
@@ -270,7 +303,7 @@ function parseEdit(raw: unknown): EditSpec {
   return {
     workflow,
     params,
-    optional: parseOptional(paramsRaw, "edit"),
+    optional: parseOptional(paramsRaw, "edit", Object.values(params)),
     references: { nodeClass, imageInput, encoderNode: required(encoder["node"], "edit references encoder node"), inputPrefix },
     resolutions,
   };
@@ -288,13 +321,22 @@ export function loadProfile(path: string): Profile {
     if (guidance === null && (generate.optional.cfg !== null || edit?.optional.cfg != null)) {
       throw new ProfileError("a cfg param needs a guidance section (min, max, step, default)");
     }
+    if (guidance !== null && generate.optional.cfg === null && (edit?.optional.cfg ?? null) === null) {
+      throw new ProfileError("a guidance section needs a cfg param in generate or edit");
+    }
     return {
       name: required(raw["name"], "name"),
       generate,
       edit,
       guidance,
-      recipes: parseRecipes(raw["recipes"], guidance),
-      styles: parseStyles(raw["styles"], modelEntries(raw["models"])),
+      styles: parseStyles(raw["styles"], modelEntries(raw["models"]), {
+        guidance,
+        presets: generate.qualityPresets.map((p) => p.name),
+        sizes: generate.sizes.map((z) => z.name),
+        resolutions: edit?.resolutions.map((r) => r.name) ?? [],
+        negativePrompt: { generate: generate.optional.negativePrompt !== null, edit: (edit?.optional.negativePrompt ?? null) !== null },
+        cfg: { generate: generate.optional.cfg !== null, edit: (edit?.optional.cfg ?? null) !== null },
+      }),
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
       models,
     };
@@ -305,7 +347,7 @@ export function loadProfile(path: string): Profile {
 }
 
 /** Set the optional negative prompt and cfg inputs of a copied workflow. */
-function applyOptional(copy: ComfyPrompt, optional: OptionalParams, input: { negativePrompt?: string; cfg?: number | null }): void {
+function applyOptional(copy: ComfyPrompt, optional: OptionalParams, input: { negativePrompt?: string; cfg?: number }): void {
   const put = (ref: ParamRef | null, value: string | number, code: string, what: string): void => {
     if (ref === null) throw new GenerateInputError(code, `this server does not offer ${what}`);
     const node = copy[ref.node];
@@ -315,7 +357,7 @@ function applyOptional(copy: ComfyPrompt, optional: OptionalParams, input: { neg
     node.inputs[ref.input] = value;
   };
   if (input.negativePrompt !== undefined) put(optional.negativePrompt, input.negativePrompt, "negative_prompt_unavailable", "a negative prompt");
-  if (input.cfg !== undefined && input.cfg !== null) put(optional.cfg, input.cfg, "cfg_unavailable", "a guidance setting");
+  if (input.cfg !== undefined) put(optional.cfg, input.cfg, "cfg_unavailable", "a guidance setting");
 }
 
 /** Fill the workflow template: a deep copy with only the mapped inputs changed. */

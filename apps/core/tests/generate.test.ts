@@ -14,7 +14,6 @@ const profile: Profile = {
   edit: null,
   styles: [],
   guidance: null,
-  recipes: [],
   upscale: null,
   models: [],
   generate: {
@@ -54,7 +53,7 @@ async function fake(handler: (s: Seen, res: ServerResponse) => void, extra: Part
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   const cfg = {
-    comfyPort: port, httpTimeoutSApps: 5, webJsonMaxBytes: 65536, webImageMaxBytes: 65536, webImageTimeoutS: 5, generateMaxPromptChars: 20, generateTimeoutS: 10, statusPollS: 2, secretNames: [],
+    comfyPort: port, httpTimeoutSApps: 5, webJsonMaxBytes: 65536, webImageMaxBytes: 65536, webImageTimeoutS: 5, generateMaxPromptChars: 20, generateMaxNegativePromptChars: 30, generateTimeoutS: 10, statusPollS: 2, secretNames: [],
   } as unknown as AppsConfig;
   let t = 0;
   const sleeps: number[] = [];

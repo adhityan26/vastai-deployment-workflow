@@ -23,11 +23,13 @@ import {
   type UpscaleDeps,
   type UpscaleLimits,
   type UpscaleRequest,
+  checkGuidanceDefault,
   generate,
   labelHostname,
   pollResult,
   referenceLimits,
   tenthsOfSeconds,
+  tuningSupport,
   userLabel,
   type AppsConfig,
   type CostEstimate,
@@ -288,7 +290,7 @@ const GENERATE_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "size"],
-  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {}, recipe: {}, negative_prompt: {}, cfg: {} },
+  properties: { prompt: {}, preset: {}, size: {}, seed: {}, style: {}, negative_prompt: {}, cfg: {} },
 } as const;
 
 // Edit: the references travel as base64 text in the JSON body (so every gate for JSON bodies applies
@@ -297,7 +299,7 @@ const EDIT_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "resolution", "images"],
-  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {}, recipe: {}, negative_prompt: {}, cfg: {} },
+  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {}, negative_prompt: {}, cfg: {} },
 } as const;
 // Upscale: one base64 image and a scale name; the service validates both and has the error codes.
 const UPSCALE_BODY = {
@@ -320,10 +322,16 @@ function withNegative<T extends object>(body: T): T & { negativePrompt?: unknown
 }
 
 /** Request body limit of POST /api/edit, derived from the reference limits (the global limit stays small). */
-function editBodyLimit(limits: ReferenceLimits, maxPromptChars: number): number {
+function editBodyLimit(limits: ReferenceLimits, maxTextChars: number): number {
   const perImage = Math.ceil(limits.maxBytes / BASE64_PER_BYTES) * BASE64_CHARS_PER_GROUP + EDIT_JSON_OVERHEAD;
-  // The prompt and the negative prompt are both bounded by maxPromptChars.
-  return limits.maxCount * perImage + 2 * maxPromptChars * PROMPT_ESCAPE_FACTOR + EDIT_BODY_SLACK;
+  return limits.maxCount * perImage + maxTextChars * PROMPT_ESCAPE_FACTOR + EDIT_BODY_SLACK;
+}
+
+/** ", guidance 3.5" and ", negative prompt" for the label of a job that set them (validated before submit). */
+function tuningSuffix(body: { negative_prompt?: unknown; cfg?: unknown }): string {
+  const cfg = typeof body.cfg === "number" ? `, guidance ${body.cfg}` : "";
+  const negative = typeof body.negative_prompt === "string" && body.negative_prompt.trim() !== "" ? ", negative prompt" : "";
+  return `${cfg}${negative}`;
 }
 
 export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void {
@@ -371,7 +379,28 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const editSpec = deps.profile.edit;
   const editTemplate = deps.editTemplate ?? null;
   const limits: ReferenceLimits | null = editSpec !== null && editTemplate !== null ? referenceLimits(cfg) : null;
-  const maxPromptChars = limits === null ? 0 : intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS");
+  // The edit body carries the prompt and the negative prompt; both are bounded here for its body limit.
+  const maxTextChars =
+    limits === null
+      ? 0
+      : intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS") +
+        intCfg(cfg, "generateMaxNegativePromptChars", "GENERATE_MAX_NEGATIVE_PROMPT_CHARS");
+  // Read at startup like every other limit; a style's default negative prompt must fit it, or the page would
+  // pre-fill a text the server then refuses.
+  const maxNegativeChars = intCfg(cfg, "generateMaxNegativePromptChars", "GENERATE_MAX_NEGATIVE_PROMPT_CHARS");
+  for (const st of deps.profile.styles) {
+    const neg = st.defaults.negativePrompt;
+    if (neg !== null && neg.length > maxNegativeChars) {
+      throw new Error(`style ${st.id}: its default negative prompt is longer than GENERATE_MAX_NEGATIVE_PROMPT_CHARS (${maxNegativeChars})`);
+    }
+  }
+  // The page shows the guidance default when nothing is chosen and then sends no cfg: it must be the workflows' own.
+  checkGuidanceDefault(deps.profile, { generate: deps.template, edit: editTemplate });
+  // What each mode's workflow takes (edit only when edit is on here).
+  const advancedOf = (mode: "generate" | "edit") => {
+    const t = mode === "edit" && limits === null ? { negativePrompt: false, cfg: false } : tuningSupport(deps.profile, mode);
+    return { negative_prompt: t.negativePrompt, cfg: t.cfg && deps.profile.guidance !== null };
+  };
 
   const gallery = deps.gallery ?? null;
   // Upscale is on only when the profile has an enabled upscale section AND its template was loaded.
@@ -434,12 +463,6 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return null;
     }
     return { live, clientId };
-  };
-
-  /** ", <recipe title>" for the label of a job that used a recipe (validated before submit). */
-  const recipeSuffix = (recipe: unknown): string => {
-    const found = deps.profile.recipes.find((r) => r.id === recipe);
-    return found ? `, ${found.title}` : "";
   };
 
   /** ", <style title>" for the label of a job that ran with a style (it was validated before submit). */
@@ -512,6 +535,14 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         prompt_optional: st.promptTemplate !== null,
         references: st.references === null ? null : { min: st.references.min, max: st.references.max, labels: [...st.references.labels] },
         hint: st.hint,
+        // What the page pre-fills for this style (the user can change each); only the keys the style sets.
+        defaults: {
+          ...(st.defaults.negativePrompt === null ? {} : { negative_prompt: st.defaults.negativePrompt }),
+          ...(st.defaults.cfg === null ? {} : { cfg: st.defaults.cfg }),
+          ...(st.defaults.preset === null ? {} : { preset: st.defaults.preset }),
+          ...(st.defaults.size === null ? {} : { size: st.defaults.size }),
+          ...(st.defaults.resolution === null ? {} : { resolution: st.defaults.resolution }),
+        },
         params: st.params.map((p) => ({
           id: p.id,
           title: p.title,
@@ -533,16 +564,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               step: deps.profile.guidance.step,
               default: deps.profile.guidance.default,
             },
-      negative_prompt: deps.profile.generate.optional.negativePrompt !== null,
-      // The enabled recipes. The template text, the negative prompt and the cfg stay on the server.
-      recipes: deps.profile.recipes.map((r) => ({
-        id: r.id,
-        title: r.title,
-        description: r.description,
-        modes: [...r.modes],
-        prompt_optional: r.promptOptional,
-        references: r.references === null ? null : { min: r.references.min, max: r.references.max },
-      })),
+      // Which of the two knobs each mode's workflow takes, so the page offers only those.
+      advanced: { generate: advancedOf("generate"), edit: advancedOf("edit"), negative_prompt_max_chars: maxNegativeChars },
       // Upscale for the page: the scale names and the image limits; null when upscale is off here.
       upscale:
         upscaleLimits === null || upscaleSpec === null
@@ -773,7 +796,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       hostname,
       live: started?.live ?? null,
       prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-      label: `${asked.preset}, ${asked.size}${recipeSuffix(asked.recipe)}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
+      label: `${asked.preset}, ${asked.size}${styleSuffix(asked.style)}${tuningSuffix(asked as { negative_prompt?: unknown; cfg?: unknown })}`.slice(0, JOB_LABEL_KEPT),
     });
     return reply.code(202).send({ id: promptId });
   });
@@ -781,7 +804,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   app.post(
     "/api/edit",
     // Own body limit, derived from the reference limits; every other route keeps WEB_BODY_LIMIT_BYTES.
-    { ...member, schema: { body: EDIT_BODY }, ...(limits === null ? {} : { bodyLimit: editBodyLimit(limits, maxPromptChars) }) },
+    { ...member, schema: { body: EDIT_BODY }, ...(limits === null ? {} : { bodyLimit: editBodyLimit(limits, maxTextChars) }) },
     async (req, reply) => {
       const identity = req.identity!;
       if (limits === null) return sendError(reply, 404, "edit_unavailable", "image edit is not available on this server");
@@ -815,7 +838,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         live: started?.live ?? null,
         kind: "edit",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${recipeSuffix(asked.recipe)}${styleSuffix(asked.style)}`.slice(0, JOB_LABEL_KEPT),
+        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${styleSuffix(asked.style)}${tuningSuffix(asked as { negative_prompt?: unknown; cfg?: unknown })}`.slice(0, JOB_LABEL_KEPT),
       });
       return reply.code(202).send({ id: promptId });
     },

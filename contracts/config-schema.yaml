@@ -122,6 +122,7 @@ keys:
   - {name: STATUS_POLL_S, components: [apps], type: int, secret: false, required: false, default: 5, min: 1, description: "Interval between instance status polls"}
   - {name: RECONCILE_INTERVAL_S, components: [apps], type: int, secret: false, required: false, default: 60, min: 1, description: "Interval between registry versus Vast reconciliations"}
   - {name: GENERATE_MAX_PROMPT_CHARS, components: [apps], type: int, secret: false, required: false, default: 2000, min: 1, description: "Maximum prompt length accepted by generate"}
+  - {name: GENERATE_MAX_NEGATIVE_PROMPT_CHARS, components: [apps], type: int, secret: false, required: false, default: 1000, min: 1, max: 4000, description: "Maximum negative prompt length accepted by generate and edit (after trimming); a style default negative prompt longer than this stops the server at startup"}
   - {name: GENERATE_TIMEOUT_S, components: [apps], type: int, secret: false, required: false, default: 600, min: 1, description: "Seconds before a generation is given up"}
   - {name: HTTP_TIMEOUT_S_APPS, components: [apps], type: int, secret: false, required: false, default: 10, min: 1, description: "Timeout of outbound HTTP calls from the web process"}
   - {name: START_RATE_LIMIT_PER_HOUR, components: [apps], type: int, secret: false, required: false, default: 3, min: 1, description: "Maximum Start requests per hour"}

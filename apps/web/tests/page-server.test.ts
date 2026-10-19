@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
-import type { AppsConfig } from "@vast-comfy/core";
+import { loadProfile, type AppsConfig } from "@vast-comfy/core";
 import { buildServer } from "../src/server.js";
 
 // The page is served by the real server and must work under its Content-Security-Policy.
@@ -21,6 +21,7 @@ const cfg = {
   webJobCacheMax: 10,
   webJobTtlS: 60,
   generateTimeoutS: 60,
+  generateMaxNegativePromptChars: 1000,
   webExtendMaxMinutes: 60,
 } as unknown as AppsConfig;
 
@@ -36,7 +37,8 @@ async function server(dir: string = publicDir): Promise<FastifyInstance> {
     lifecycle: {} as never,
     registry: { active: async () => null },
     comfyFor: () => ({}) as never,
-    profile: {} as never,
+    // The startup checks read the profile (styles, guidance), so this is the shipped one.
+    profile: loadProfile(fileURLToPath(new URL("../../../instance/profiles/image.yaml", import.meta.url))),
     template: {},
     publicDir: dir,
     secrets: () => [],

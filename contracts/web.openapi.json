@@ -295,8 +295,7 @@
           "styles",
           "upscale",
           "guidance",
-          "negative_prompt",
-          "recipes"
+          "advanced"
         ],
         "properties": {
           "state": {
@@ -698,7 +697,8 @@
                 "prompt_optional",
                 "references",
                 "hint",
-                "params"
+                "params",
+                "defaults"
               ],
               "additionalProperties": false,
               "properties": {
@@ -828,6 +828,32 @@
                       }
                     }
                   }
+                },
+                "defaults": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Values the page pre-fills when the style is chosen; the user can change each. Only the keys the style sets. The server never applies them on its own: a request runs with what it sends",
+                  "properties": {
+                    "negative_prompt": {
+                      "type": "string"
+                    },
+                    "cfg": {
+                      "type": "number",
+                      "description": "On the guidance range and step"
+                    },
+                    "preset": {
+                      "type": "string",
+                      "description": "A quality preset name from presets"
+                    },
+                    "size": {
+                      "type": "string",
+                      "description": "A size name from sizes (generate styles only)"
+                    },
+                    "resolution": {
+                      "type": "string",
+                      "description": "A resolution name from edit.resolutions (edit styles only)"
+                    }
+                  }
                 }
               }
             }
@@ -905,72 +931,58 @@
                 }
               }
             ],
-            "description": "The allowed cfg range; null when the server offers no guidance setting"
+            "description": "The guidance (cfg) range for every mode whose workflow maps cfg (see advanced); null when the profile offers none. default is the cfg the workflows ship with: the page sends no cfg while the user leaves it there, so the job runs exactly as without the Advanced section. Effects on this model are unverified"
           },
-          "negative_prompt": {
-            "type": "boolean",
-            "description": "Whether the server accepts a negative prompt"
-          },
-          "recipes": {
-            "type": "array",
-            "description": "Enabled recipes (ready-made prompt templates). Only what the page needs: the template text, negative prompt and cfg stay on the server.",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "id",
-                "title",
-                "description",
-                "modes",
-                "prompt_optional",
-                "references"
-              ],
-              "properties": {
-                "id": {
-                  "type": "string"
-                },
-                "title": {
-                  "type": "string"
-                },
-                "description": {
-                  "type": "string"
-                },
-                "modes": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "generate",
-                      "edit"
-                    ]
+          "advanced": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "generate",
+              "edit",
+              "negative_prompt_max_chars"
+            ],
+            "description": "Which optional knobs each mode accepts. A request that sends a knob its mode does not take is refused (negative_prompt_unavailable, cfg_unavailable). Edit is all false when edit is off",
+            "properties": {
+              "generate": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "negative_prompt",
+                  "cfg"
+                ],
+                "properties": {
+                  "negative_prompt": {
+                    "type": "boolean",
+                    "description": "The mode's workflow takes a negative prompt"
+                  },
+                  "cfg": {
+                    "type": "boolean",
+                    "description": "The mode's workflow takes a guidance value (within guidance)"
                   }
-                },
-                "prompt_optional": {
-                  "type": "boolean"
-                },
-                "references": {
-                  "oneOf": [
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "required": [
-                        "min",
-                        "max"
-                      ],
-                      "properties": {
-                        "min": {
-                          "type": "integer"
-                        },
-                        "max": {
-                          "type": "integer"
-                        }
-                      }
-                    }
-                  ]
                 }
+              },
+              "edit": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "negative_prompt",
+                  "cfg"
+                ],
+                "properties": {
+                  "negative_prompt": {
+                    "type": "boolean",
+                    "description": "The mode's workflow takes a negative prompt"
+                  },
+                  "cfg": {
+                    "type": "boolean",
+                    "description": "The mode's workflow takes a guidance value (within guidance)"
+                  }
+                }
+              },
+              "negative_prompt_max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "GENERATE_MAX_NEGATIVE_PROMPT_CHARS (after trimming)"
               }
             }
           }
@@ -3262,26 +3274,19 @@
                       }
                     }
                   },
-                  "recipe": {
-                    "type": [
-                      "string",
-                      "null"
-                    ],
-                    "description": "A recipe id from recipes in /api/state; wraps the prompt in the recipe's template and adds its negative prompt and guidance. The prompt may then be short, or empty when the recipe has prompt_optional."
-                  },
                   "negative_prompt": {
                     "type": [
                       "string",
                       "null"
                     ],
-                    "description": "Things to avoid. Only has an effect with cfg above 1; at most GENERATE_MAX_PROMPT_CHARS. Added after the recipe's own negative prompt."
+                    "description": "Optional. Things to avoid, at most GENERATE_MAX_NEGATIVE_PROMPT_CHARS after trimming; absent, null or blank keeps the workflow's own (empty) negative prompt. Only for a mode whose advanced.negative_prompt is true (else negative_prompt_unavailable). With guidance 1 ComfyUI ignores it"
                   },
                   "cfg": {
                     "type": [
                       "number",
                       "null"
                     ],
-                    "description": "Guidance, within guidance.min..max in steps of guidance.step from /api/state"
+                    "description": "Optional guidance within guidance.min..max in steps of guidance.step (else invalid_cfg); absent or null keeps the workflow's own cfg. Only for a mode whose advanced.cfg is true (else cfg_unavailable)"
                   }
                 }
               }
@@ -3328,7 +3333,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param, invalid_negative_prompt, negative_prompt_too_long, negative_prompt_unavailable, invalid_cfg, cfg_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3480,26 +3485,19 @@
                       }
                     }
                   },
-                  "recipe": {
-                    "type": [
-                      "string",
-                      "null"
-                    ],
-                    "description": "A recipe id from recipes in /api/state; wraps the prompt in the recipe's template and adds its negative prompt and guidance. The prompt may then be short, or empty when the recipe has prompt_optional."
-                  },
                   "negative_prompt": {
                     "type": [
                       "string",
                       "null"
                     ],
-                    "description": "Things to avoid. Only has an effect with cfg above 1; at most GENERATE_MAX_PROMPT_CHARS. Added after the recipe's own negative prompt."
+                    "description": "Optional. Things to avoid, at most GENERATE_MAX_NEGATIVE_PROMPT_CHARS after trimming; absent, null or blank keeps the workflow's own (empty) negative prompt. Only for a mode whose advanced.negative_prompt is true (else negative_prompt_unavailable). With guidance 1 ComfyUI ignores it"
                   },
                   "cfg": {
                     "type": [
                       "number",
                       "null"
                     ],
-                    "description": "Guidance, within guidance.min..max in steps of guidance.step from /api/state"
+                    "description": "Optional guidance within guidance.min..max in steps of guidance.step (else invalid_cfg); absent or null keeps the workflow's own cfg. Only for a mode whose advanced.cfg is true (else cfg_unavailable)"
                   }
                 }
               }
@@ -3546,7 +3544,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param); style_reference_count when a style needs another number of reference images",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the edit service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_preset, unknown_resolution, no_references, too_many_references, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed, unknown_style, style_not_for_mode, invalid_style, invalid_style_param, unknown_style_param, invalid_negative_prompt, negative_prompt_too_long, negative_prompt_unavailable, invalid_cfg, cfg_unavailable); style_reference_count when a style needs another number of reference images",
             "content": {
               "application/json": {
                 "schema": {

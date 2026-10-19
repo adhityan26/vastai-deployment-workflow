@@ -54,7 +54,7 @@ async function fake(handler: (s: Seen, res: ServerResponse) => void, over: Recor
   const { port } = server.address() as AddressInfo;
   const cfg = {
     comfyPort: port, httpTimeoutSApps: 5, webJsonMaxBytes: 65536, webImageMaxBytes: 65536, webImageTimeoutS: 5,
-    generateMaxPromptChars: 40, generateTimeoutS: 10, statusPollS: 2,
+    generateMaxPromptChars: 40, generateMaxNegativePromptChars: 30, generateTimeoutS: 10, statusPollS: 2,
     editMaxReferences: 3, editReferenceMaxBytes: 4096, editReferenceMaxPixels: 1_000_000, editReferenceMaxSide: 8192, editReferenceTypes: ["png", "jpeg", "webp"],
     secretNames: [], ...over,
   } as unknown as AppsConfig;

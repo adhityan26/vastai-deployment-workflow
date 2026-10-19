@@ -1,3 +1,4 @@
+import { onGrid, type GuidanceSpec } from "./guidance.js";
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
 import { landsIn, type ComfyPrompt, type ModelEntry } from "./profile.js";
 
@@ -34,6 +35,32 @@ export interface StyleReferences {
   readonly labels: readonly string[];
 }
 
+/**
+ * Values the page pre-fills when the style is chosen; the user can change every one of them. The server
+ * never applies them on its own: a request carries what the user saw, so what runs is what was sent.
+ */
+export interface StyleDefaults {
+  readonly negativePrompt: string | null;
+  readonly cfg: number | null;
+  /** A quality preset name (which sets the steps). */
+  readonly preset: string | null;
+  /** A generate size name; only for a style offered in generate. */
+  readonly size: string | null;
+  /** An edit resolution name; only for a style offered in edit. */
+  readonly resolution: string | null;
+}
+
+/** What the rest of the profile offers, for checking a style's defaults against it. */
+export interface StyleContext {
+  readonly guidance: GuidanceSpec | null;
+  readonly presets: readonly string[];
+  readonly sizes: readonly string[];
+  readonly resolutions: readonly string[];
+  /** Per mode: does its workflow map a negative prompt / a cfg. */
+  readonly negativePrompt: Readonly<Record<StyleMode, boolean>>;
+  readonly cfg: Readonly<Record<StyleMode, boolean>>;
+}
+
 export interface StyleSpec {
   readonly id: string;
   readonly title: string;
@@ -58,6 +85,7 @@ export interface StyleSpec {
   readonly references: StyleReferences | null;
   /** A short note the page shows with the style; null for none. */
   readonly hint: string | null;
+  readonly defaults: StyleDefaults;
 }
 
 export interface ResolvedStyle {
@@ -77,7 +105,20 @@ const TITLE_MAX = 60;
 const CHOICE_MAX = 64;
 const MODES: readonly StyleMode[] = ["generate", "edit"];
 const TYPES: readonly StyleParamType[] = ["float", "int", "choice", "bool"];
-const STYLE_KEYS = new Set(["id", "title", "kind", "modes", "enabled", "lora", "params", "prompt_template", "references", "hint"]);
+const STYLE_KEYS = new Set(["id", "title", "kind", "modes", "enabled", "lora", "params", "prompt_template", "references", "hint", "defaults"]);
+const DEFAULT_KEYS = new Set(["negative_prompt", "cfg", "preset", "size", "resolution"]);
+/** Longest default negative prompt; the request limit (GENERATE_MAX_NEGATIVE_PROMPT_CHARS) is checked at startup. */
+const DEFAULT_NEGATIVE_MAX = 4000;
+/** A profile that offers nothing a default could name (every default is then refused). */
+const BARE_CONTEXT: StyleContext = {
+  guidance: null,
+  presets: [],
+  sizes: [],
+  resolutions: [],
+  negativePrompt: { generate: false, edit: false },
+  cfg: { generate: false, edit: false },
+};
+const NO_DEFAULTS: StyleDefaults = { negativePrompt: null, cfg: null, preset: null, size: null, resolution: null };
 const REFERENCE_KEYS = new Set(["min", "max", "labels"]);
 const KINDS: readonly StyleKind[] = ["lora", "preset"];
 /** The placeholder of a prompt template; replaced once, never re-expanded. */
@@ -161,7 +202,48 @@ function parseParam(raw: unknown, styleId: string): StyleParam {
   return { ...common, default: p["default"] };
 }
 
-function parseOne(raw: unknown, models: readonly ModelEntry[]): { style: StyleSpec; enabled: boolean } {
+function parseDefaults(raw: unknown, id: string, modes: readonly StyleMode[], enabled: boolean, ctx: StyleContext): StyleDefaults {
+  if (raw === undefined) return NO_DEFAULTS;
+  const d = mapping(raw, `style ${id} defaults`);
+  noUnknownKeys(d, DEFAULT_KEYS, `style ${id} defaults`);
+  const what = `style ${id} defaults`;
+  // An enabled style's default must be usable in every mode it is offered in, or the page would pre-fill a value
+  // the server then refuses. (A disabled style is checked for shape only, so a profile may drop a knob without
+  // first editing every sample style.)
+  const everyMode = (offered: Readonly<Record<StyleMode, boolean>>, knob: string): void => {
+    if (!enabled) return;
+    const missing = modes.filter((m) => !offered[m]);
+    if (missing.length > 0) throw new ProfileError(`${what}: ${knob} is not mapped in the ${missing.join(", ")} workflow`);
+  };
+  const name = (key: string, list: readonly string[], mode: StyleMode | null): string | null => {
+    if (d[key] === undefined) return null;
+    if (mode !== null && !modes.includes(mode)) throw new ProfileError(`${what}: ${key} is only for a style offered in ${mode}`);
+    const v = text(d[key], `${what} ${key}`, CHOICE_MAX);
+    if (!list.includes(v)) throw new ProfileError(`${what}: ${key} '${v}' is not offered by the profile`);
+    return v;
+  };
+  let negativePrompt: string | null = null;
+  if (d["negative_prompt"] !== undefined) {
+    negativePrompt = text(d["negative_prompt"], `${what} negative_prompt`, DEFAULT_NEGATIVE_MAX).trim();
+    everyMode(ctx.negativePrompt, "negative_prompt");
+  }
+  let cfg: number | null = null;
+  if (d["cfg"] !== undefined) {
+    const v = finite(d["cfg"], `${what} cfg`);
+    if (ctx.guidance === null || !onGrid(ctx.guidance, v)) throw new ProfileError(`${what}: cfg must lie on the profile's guidance range and step`);
+    everyMode(ctx.cfg, "cfg");
+    cfg = v;
+  }
+  return {
+    negativePrompt,
+    cfg,
+    preset: name("preset", ctx.presets, null),
+    size: name("size", ctx.sizes, "generate"),
+    resolution: name("resolution", ctx.resolutions, "edit"),
+  };
+}
+
+function parseOne(raw: unknown, models: readonly ModelEntry[], ctx: StyleContext): { style: StyleSpec; enabled: boolean } {
   const s = mapping(raw, "style");
   noUnknownKeys(s, STYLE_KEYS, "style");
   const id = text(s["id"], "style id", 32);
@@ -225,24 +307,26 @@ function parseOne(raw: unknown, models: readonly ModelEntry[]): { style: StyleSp
   if (kind === "preset" && promptTemplate === null && params.length === 0) throw new ProfileError(`style ${id}: a preset needs a prompt_template or params`);
 
   const enabled = s["enabled"];
+  const defaults = parseDefaults(s["defaults"], id, modesRaw as StyleMode[], enabled, ctx);
+
   if (enabled && lora !== null) {
     const entry = models.find((m) => m.file.split("/").pop() === lora.file);
     if (entry === undefined) throw new ProfileError(`style ${id} is enabled but its LoRA file ${lora.file} is not listed in models`);
     // LoraLoaderModelOnly only lists ComfyUI's loras folder: anywhere else the style would fail at run time.
     if (!landsIn(entry, LORA_FOLDER)) throw new ProfileError(`style ${id}: the models entry for ${lora.file} must have dest ${LORA_FOLDER}/`);
   }
-  return { style: { id, title, kind, modes: modesRaw as StyleMode[], lora, params, promptTemplate, references, hint }, enabled };
+  return { style: { id, title, kind, modes: modesRaw as StyleMode[], lora, params, promptTemplate, references, hint, defaults }, enabled };
 }
 
 /**
  * Parse and validate the profile's `styles:` list. Every entry is validated; only the enabled ones are
  * returned (a disabled style is documented in the profile but never offered, downloaded or accepted).
- * `models` are the profile's model entries (file and dest).
+ * `models` are the profile's model entries (file and dest); `ctx` is what a style's defaults are checked against.
  */
-export function parseStyles(raw: unknown, models: readonly ModelEntry[]): StyleSpec[] {
+export function parseStyles(raw: unknown, models: readonly ModelEntry[], ctx: StyleContext = BARE_CONTEXT): StyleSpec[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new ProfileError("styles must be a list");
-  const parsed = raw.map((item) => parseOne(item, models));
+  const parsed = raw.map((item) => parseOne(item, models, ctx));
   const ids = parsed.map((p) => p.style.id);
   if (new Set(ids).size !== ids.length) throw new ProfileError("style ids must be unique");
   return parsed.filter((p) => p.enabled).map((p) => p.style);

@@ -518,3 +518,20 @@ def test_the_optional_negative_prompt_and_cfg_params_are_accepted(tmp_path):
     profile = load_profile(write_with_generate(tmp_path, generate))
     assert profile.generate is not None
     assert not hasattr(profile.generate.params, "cfg")
+
+
+def test_the_shipped_profile_has_one_preset_mechanism_and_its_samples_download_nothing():
+    """Recipes were folded into styles: the samples are disabled presets, so they add no model to the boot."""
+    shipped, raw = _shipped_raw()
+    assert "recipes" not in raw
+    assert raw["guidance"] == {"min": 1.0, "max": 6.0, "step": 0.5, "default": 1.0}
+    samples = [s for s in raw["styles"] if s["enabled"] is False]
+    assert [s["id"] for s in samples] == ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"]
+    assert all(s["kind"] == "preset" and "lora" not in s for s in samples)
+    profile = load_profile(shipped)
+    assert profile.generate is not None
+    # Both workflows keep their own cfg 1.0, the guidance default (the web app checks this at startup too).
+    root = shipped.parents[1]
+    for name, node in (("qwen-image-t2i.json", "8"), ("qwen-image-edit.json", "7")):
+        graph = json.loads((root / "workflows" / name).read_text())
+        assert graph[node]["inputs"]["cfg"] == raw["guidance"]["default"]
