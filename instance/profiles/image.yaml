@@ -66,16 +66,22 @@ edit:
 # output the loader takes and `model_to` the input that is rewired to the loader; where it sits relative to
 # QwenImage21Cache is UNVERIFIED (live test): change these two lines if the test shows another placement.
 styles:
+  # "Anime / cartoon to real": the Anything to Real LoRA plus its own instruction (a LoRA style may also have a
+  # prompt_template and references). Exactly one image; the user's prompt is optional notes in place of {prompt}.
+  # Strength 0 leaves the LoRA loader out (prompt only, as the instruction worked without a LoRA in spike S6).
   - id: anything2real
-    title: Anything to Real
+    title: Anime / cartoon to real
     modes: [edit]
     enabled: true
     lora:
       file: Qwen2.1_Anything2RealCharacters.safetensors
       model_from: "1"
       model_to: {node: "4", input: model}
+    prompt_template: "Convert this anime or cartoon illustration into a realistic photograph of a real person. Keep the same pose, facial expression, hairstyle and hair color, outfit, background and composition. Natural skin texture and realistic lighting. {prompt}"
+    references: {min: 1, max: 1, labels: ["Image to convert"]}
+    hint: "LoRA strength 0 = prompt only, no LoRA. Works best on characters and people."
     params:
-      - {id: strength, title: LoRA strength, type: float, min: 0.4, max: 1.0, step: 0.05, default: 0.7, target: lora_strength}
+      - {id: strength, title: LoRA strength, type: float, min: 0.0, max: 1.0, step: 0.05, default: 0.7, target: lora_strength}
   # "Face swap": a preset (no LoRA, nothing to download), edit only. It sends the owner's tested instruction with the
   # user's optional notes in place of {prompt}, and needs exactly two references: <image1> is the scene to keep, <image2>
   # the face to use. The whole prompt must fit GENERATE_MAX_PROMPT_CHARS.

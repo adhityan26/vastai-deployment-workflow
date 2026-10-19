@@ -711,7 +711,7 @@
                     "lora",
                     "preset"
                   ],
-                  "description": "lora inserts a LoRA; preset only sends the style's own prompt text and checks its rules"
+                  "description": "lora inserts a LoRA loader (left out when its strength is 0: prompt only); preset uses no model. Either kind may have its own prompt text (prompt_optional) and a reference rule (references)"
                 },
                 "modes": {
                   "type": "array",

@@ -189,6 +189,8 @@ describe("edit with a style", () => {
     const doc = parse(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
     doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
     doc.styles[0].enabled = true;
+    // The plain LoRA mechanism: without the shipped style's own prompt and one-image rule.
+    for (const key of ["prompt_template", "references", "hint"]) delete doc.styles[0][key];
     const { mkdtempSync, writeFileSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -275,5 +277,36 @@ describe("edit with the Face swap preset", () => {
       message: "the style's text and your notes exceed 200 characters",
     });
     expect(seen).toEqual([]);
+  });
+});
+
+describe("edit with the Anime / cartoon to real style", () => {
+  const style = (strength = 0.7) => ({ id: "anything2real", params: { strength } });
+  const TEMPLATE = "Convert this anime or cartoon illustration into a realistic photograph of a real person. Keep the same pose, facial expression, hairstyle and hair color, outfit, background and composition. Natural skin texture and realistic lighting. {prompt}";
+
+  it("is in the shipped profile with its LoRA, one labelled reference, the prompt template and strength 0 to 1", () => {
+    const st = profile.styles.find((s) => s.id === "anything2real")!;
+    expect(st).toMatchObject({ kind: "lora", title: "Anime / cartoon to real", modes: ["edit"], promptTemplate: TEMPLATE, references: { min: 1, max: 1, labels: ["Image to convert"] } });
+    expect(st.lora!.file).toBe("Qwen2.1_Anything2RealCharacters.safetensors");
+    expect(st.params).toEqual([expect.objectContaining({ id: "strength", min: 0, max: 1, step: 0.05, default: 0.7 })]);
+    expect(st.hint).toContain("0 = prompt only, no LoRA");
+  });
+
+  it("needs exactly one image, takes the prompt as optional notes and sends the template without a trailing space", async () => {
+    const { deps, seen } = await fake(comfy(), { generateMaxPromptChars: 2000 });
+    await expect(edit(deps, request({ prompt: "", style: style() }))).rejects.toMatchObject({ code: "style_reference_count" });
+    expect(seen).toEqual([]);
+    await edit(deps, request({ prompt: "", images: [b64(png(8, 8))], style: style() }));
+    const sent = JSON.parse(seen.at(-1)!.body.toString("utf8")).prompt;
+    expect(sent["6"].inputs.prompt).toBe(TEMPLATE.replace(" {prompt}", ""));
+    expect(sent["style_lora"].inputs.strength_model).toBe(0.7);
+  });
+
+  it("strength 0 sends the prompt alone, with no LoRA node", async () => {
+    const { deps, seen } = await fake(comfy(), { generateMaxPromptChars: 2000 });
+    await edit(deps, request({ prompt: "soft window light", images: [b64(png(8, 8))], style: style(0) }));
+    const sent = JSON.parse(seen.at(-1)!.body.toString("utf8")).prompt;
+    expect(sent).not.toHaveProperty("style_lora");
+    expect(sent["6"].inputs.prompt).toMatch(/realistic lighting\. soft window light$/);
   });
 });

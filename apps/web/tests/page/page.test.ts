@@ -1338,6 +1338,32 @@ describe("styles and chaining", () => {
       expect(q("#prompt-label")!.textContent).toBe("Prompt");
     });
 
+    it("anime / cartoon to real: one labelled slot, optional notes, the strength slider from 0, quality unchanged", async () => {
+      const toReal = {
+        id: "anything2real", title: "Anime / cartoon to real", kind: "lora", modes: ["edit"], prompt_optional: true,
+        params: [{ ...strength, min: 0 }], references: { min: 1, max: 1, labels: ["Image to convert"] }, hint: "LoRA strength 0 = prompt only, no LoRA.",
+      };
+      await mount({ edit: editInfo, styles: [toReal, faceswap] }, { "POST /api/edit": { status: 202, body: { id: "real-1" } }, "GET /api/generate/real-1": { body: { status: "pending" } } });
+      chooseEdit();
+      q<HTMLButtonElement>('#presets button[data-preset="zz-slow"]')!.click();
+      click("Anime / cartoon to real");
+      expect(slots()).toEqual(["Image to convert: not attached yet"]);
+      expect(q("#prompt-label")!.textContent).toBe("Notes (optional)");
+      expect(q("#ref-hint")!.textContent).toBe("Anime / cartoon to real needs exactly 1 image (Image to convert).");
+      expect(q("#ref-hint")!.textContent).not.toContain("<image1>");
+      const range = q<HTMLInputElement>("#style-params input[type=range]")!;
+      expect([range.min, range.max, range.value]).toEqual(["0", "1", "0.7"]);
+      range.value = "0";
+      range.dispatchEvent(new Event("input"));
+      attach("anime.png");
+      expect(slots()).toEqual(["Image to convert"]);
+      expect(q("#ref-swap")!.hidden).toBe(true);
+      expect(q("#sampling-box")!.hidden).toBe(false);
+      q<HTMLFormElement>("#gen-form")!.requestSubmit();
+      await flush();
+      expect(posts("/api/edit")[0]!.body).toMatchObject({ prompt: "", preset: "zz-slow", style: { id: "anything2real", params: { strength: 0 } } });
+    });
+
     it("refuses a submit without both images, and sends an empty prompt with the style when both are there", async () => {
       await mount({ edit: editInfo, styles: [faceswap] }, { "POST /api/edit": { status: 202, body: { id: "swap-1" } }, "GET /api/generate/swap-1": { body: { status: "pending" } } });
       chooseEdit();

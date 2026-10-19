@@ -327,16 +327,30 @@ Styles come from the `styles:` section of `instance/profiles/image.yaml`. The pa
 `style: {id, params}`; the server validates every value against the profile and takes the LoRA file, nodes and targets
 from the profile, never from the request. A style with `enabled: false` is not listed and is refused.
 
-Anything to Real is ON (edit only, strength 0.4 to 1.0, default 0.7). Its LoRA
-`WarmBloodAban/Qwen-Image-2.1-LoRAs` / `Qwen2.1_Anything2RealCharacters.safetensors` is pinned in `models:` at
+"Anime / cartoon to real" (id `anything2real`) is ON (edit only). It is a LoRA style that also has its own prompt:
+a style of either kind may declare `prompt_template` (exactly one `{prompt}`, the user's prompt becomes optional
+"Notes", inserted once; with no notes the placeholder and its surrounding space disappear) and `references`.
+Its LoRA `WarmBloodAban/Qwen-Image-2.1-LoRAs` / `Qwen2.1_Anything2RealCharacters.safetensors` is pinned in `models:` at
 revision `c4ab5473bfdf585fc19cfd1e280f79d2b0c79947` (318 820 200 bytes, dest `models/loras/`); license Apache-2.0
 (model card and HF tag, checked 2026-10-18). It downloads at boot with the other models; boot fails closed if the size
-does not match. The loader refuses an enabled style whose models entry is missing or not in `models/loras/`. To pin
-another style's LoRA (needs huggingface.co, so on the laptop): `python3 scripts/pin_model.py <owner/repo> <file>`.
+does not match. The loader refuses an enabled LoRA style whose models entry is missing or not in `models/loras/`. To
+pin another style's LoRA (needs huggingface.co, so on the laptop): `python3 scripts/pin_model.py <owner/repo> <file>`.
 
-Live test (UNVERIFIED): edit an anime image with and without the style at strength 0.6 / 0.7 / 0.8. The LoRA node is
-   inserted as `style_lora` between `lora.model_from` and `lora.model_to`; whether that is right relative to
-   `QwenImage21Cache` and the GGUF base is unknown. If the result is wrong, change those two profile lines.
+### Cartoon to real
+
+Exactly one image ("Image to convert"); the prompt is optional. The style sends: "Convert this anime or cartoon
+illustration into a realistic photograph of a real person. Keep the same pose, facial expression, hairstyle and hair
+color, outfit, background and composition. Natural skin texture and realistic lighting." plus any notes. LoRA strength
+goes from 0.0 to 1.0 (step 0.05, default 0.7). Strength 0 means prompt only: the LoRA loader node is left out of the
+workflow entirely (decision: safer than a loader at strength 0, which ComfyUI would still validate against the LoRA
+file), so the result is the plain edit with this instruction. That alone already worked in spike S6
+(`docs/spikes/S6-image-edit-references.md`: "Convert this anime illustration into a realistic photograph of a real
+girl. Keep the same pose, hair color, outfit and composition.", 46.7 s, pose, hair, uniform and framing kept), so
+compare 0 with 0.6 / 0.7 / 0.8 on the first live test. The model card advises 0.6 to 0.8 for characters and people.
+
+Live test (UNVERIFIED): the LoRA node is inserted as `style_lora` between `lora.model_from` and `lora.model_to`;
+whether that is right relative to `QwenImage21Cache` and the GGUF base is unknown. If the result is wrong, change those
+two profile lines.
 
 "Use as reference" on a result downloads the image from `/api/image/...` into the page and attaches it as a reference
 in Edit (optionally with an edit style chosen). It goes through the same checks as an upload.

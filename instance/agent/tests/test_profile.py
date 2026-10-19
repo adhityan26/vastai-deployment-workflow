@@ -495,3 +495,15 @@ def test_a_lora_style_without_its_lora_section_fails_the_profile(tmp_path):
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ProfileError, match="a lora style needs a lora section"):
         load_profile(path)
+
+
+def test_anime_to_real_is_a_lora_style_with_its_own_prompt_and_one_reference():
+    shipped, raw = _shipped_raw()
+    style = next(s for s in raw["styles"] if s["id"] == "anything2real")
+    assert style["title"] == "Anime / cartoon to real" and style["modes"] == ["edit"] and style["enabled"] is True
+    assert style.get("kind", "lora") == "lora" and style["lora"]["file"] == "Qwen2.1_Anything2RealCharacters.safetensors"
+    assert style["references"] == {"min": 1, "max": 1, "labels": ["Image to convert"]}
+    assert style["prompt_template"].count("{prompt}") == 1 and style["prompt_template"].endswith("realistic lighting. {prompt}")
+    assert style["params"][0]["min"] == 0.0 and style["params"][0]["max"] == 1.0
+    # Its LoRA is still pinned and downloaded at boot (strength 0 only leaves the loader out of the workflow).
+    assert any(m.file == style["lora"]["file"] and m.dest == "models/loras/" for m in load_profile(shipped).models)

@@ -334,7 +334,9 @@ export function applyStyle(prompt: ComfyPrompt, resolved: ResolvedStyle): void {
     }
     node!.inputs[param.target.input] = value;
   }
-  if (lora === null) return;
+  // Strength 0 is "prompt only": the loader is left out entirely, so the workflow is exactly the base one and
+  // does not depend on the LoRA file (ComfyUI would still check the file name of a loader at strength 0).
+  if (lora === null || strength === 0) return;
   prompt[STYLE_LORA_NODE] = { class_type: LORA_CLASS, inputs: { model: [lora.modelFrom, 0], lora_name: lora.file, strength_model: strength } };
   consumer!.inputs[lora.modelTo.input] = [STYLE_LORA_NODE, 0];
 }
@@ -353,7 +355,14 @@ export function stylePrompt(resolved: ResolvedStyle | null, userPrompt: unknown)
   }
   const notes = typeof userPrompt === "string" ? userPrompt.trim() : "";
   const at = template.indexOf(PROMPT_PLACEHOLDER);
-  return `${template.slice(0, at)}${notes}${template.slice(at + PROMPT_PLACEHOLDER.length)}`.trim();
+  const before = template.slice(0, at);
+  const after = template.slice(at + PROMPT_PLACEHOLDER.length);
+  if (notes !== "") return `${before}${notes}${after}`.trim();
+  // No notes: drop the placeholder and the whitespace around it, keeping one space where there was any.
+  const left = before.replace(/\s+$/, "");
+  const right = after.replace(/^\s+/, "");
+  const gap = left !== "" && right !== "" && (left.length !== before.length || right.length !== after.length) ? " " : "";
+  return `${left}${gap}${right}`.trim();
 }
 
 /** Refuse an edit whose number of references does not match what the style needs. */

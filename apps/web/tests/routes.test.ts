@@ -2323,6 +2323,8 @@ describe("styles", () => {
     doc.models = doc.models.filter((m: { file: string }) => m.file !== LORA);
     doc.models.push({ file: LORA, repo: "org/loras", revision: "a".repeat(40), dest: "models/loras/", size_bytes: 1000 });
     doc.styles[0].enabled = true;
+    // The plain LoRA mechanism: without the shipped style's own prompt and one-image rule (tested on its own below).
+    for (const key of ["prompt_template", "references", "hint"]) delete doc.styles[0][key];
     mutate?.(doc);
     const dir = mkdtempSync(join(tmpdir(), "styled-profile-"));
     tempDirs.push(dir);
@@ -2339,13 +2341,13 @@ describe("styles", () => {
     expect(body.styles).toEqual([
       {
         id: "anything2real",
-        title: "Anything to Real",
+        title: "Anime / cartoon to real",
         kind: "lora",
         modes: ["edit"],
         prompt_optional: false,
         references: null,
         hint: null,
-        params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 }],
+        params: [{ id: "strength", title: "LoRA strength", type: "float", min: 0, max: 1, step: 0.05, default: 0.7 }],
       },
       {
         id: "faceswap",
@@ -2397,7 +2399,7 @@ describe("styles", () => {
     expect((await post("/api/gallery", m, { job: res.json().id, index: 0 })).statusCode).toBe(201);
     const head = await h.galleryStore.head(h.galleryStore.keys()[0]!);
     expect(head!.metadata["kind"]).toBe("edit");
-    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1024, 1 reference, Anything to Real");
+    expect(decodeURIComponent(head!.metadata["label"]!)).toBe("preview, 1024, 1 reference, Anime / cartoon to real");
     expect(decodeURIComponent(head!.metadata["prompt"]!)).toBe("make it real");
   });
 
@@ -2745,5 +2747,33 @@ describe("face swap preset", () => {
     const res = await post("/api/edit", await member(), swap(two)); // the default harness allows 50 characters
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("prompt_too_long");
+  });
+});
+
+describe("anime / cartoon to real (a LoRA style with its own prompt)", () => {
+  it("is listed with its one labelled reference and the prompt optional", async () => {
+    const st = (await call("GET", "/api/state", await member())).json().styles.find((x: { id: string }) => x.id === "anything2real");
+    expect(st).toMatchObject({
+      title: "Anime / cartoon to real", kind: "lora", prompt_optional: true,
+      references: { min: 1, max: 1, labels: ["Image to convert"] }, hint: expect.stringContaining("0 = prompt only, no LoRA"),
+    });
+    expect(st.params[0]).toMatchObject({ min: 0, max: 1, default: 0.7 });
+    expect(JSON.stringify(st)).not.toContain("Convert this anime");
+  });
+
+  it("an edit with one image and no prompt sends the style's prompt; strength 0 adds no LoRA node", async () => {
+    h = await harness({ cfg: { generateMaxPromptChars: 2000 } });
+    h.setComfy(comfyEdit());
+    const m = await member();
+    const body = (strength: number) => ({ ...okEdit, prompt: "", style: { id: "anything2real", params: { strength } } });
+    expect((await post("/api/edit", m, body(0.7))).statusCode).toBe(202);
+    let sent = JSON.parse(h.comfySeen.at(-1)!.body).prompt;
+    expect(sent["6"].inputs.prompt).toMatch(/^Convert this anime or cartoon illustration .* realistic lighting\.$/);
+    expect(sent["style_lora"].inputs.strength_model).toBe(0.7);
+    expect((await post("/api/edit", m, body(0))).statusCode).toBe(202);
+    sent = JSON.parse(h.comfySeen.at(-1)!.body).prompt;
+    expect(sent).not.toHaveProperty("style_lora");
+    const two = await post("/api/edit", m, { ...body(0.7), images: [okEdit.images[0], okEdit.images[0]] });
+    expect(two.json().error.code).toBe("style_reference_count");
   });
 });

@@ -740,7 +740,7 @@ export function referenceRuleText(style: StyleInfo | null): string | null {
   const r = style?.references ?? null;
   if (r === null) return null;
   const count = r.min === r.max ? `exactly ${r.min}` : `${r.min} to ${r.max}`;
-  const order = r.labels.length > 0 ? ` in this order: ${r.labels.join(", ")}` : "";
+  const order = r.labels.length > 1 ? ` in this order: ${r.labels.join(", ")}` : r.labels.length === 1 ? ` (${r.labels[0]})` : "";
   return `${style!.title} needs ${count} image${r.max === 1 ? "" : "s"}${order}.`;
 }
 

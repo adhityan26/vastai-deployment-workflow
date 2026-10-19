@@ -324,3 +324,45 @@ describe("preset styles (no LoRA)", () => {
     expect(prompt["4"].inputs.model).toEqual(["1", 0]);
   });
 });
+
+describe("a LoRA style with its own prompt and reference rule", () => {
+  const withPrompt = (list: Doc[]) => {
+    list[0].prompt_template = "Convert this into a photo. {prompt}";
+    list[0].references = { min: 1, max: 1, labels: ["Image to convert"] };
+    list[0].params[0].min = 0;
+  };
+
+  it("parses a LoRA style that also has a prompt template and references", () => {
+    const [style] = parse(withPrompt);
+    expect(style).toMatchObject({ kind: "lora", promptTemplate: "Convert this into a photo. {prompt}", references: { min: 1, max: 1, labels: ["Image to convert"] } });
+    expect(style!.lora).not.toBeNull();
+    expect(() => parse((l) => { withPrompt(l); l[0].prompt_template = "no placeholder"; })).toThrow(/exactly once/);
+  });
+
+  it("strength 0 leaves the LoRA loader out entirely (prompt only); above 0 it is inserted", () => {
+    const [style] = parse(withPrompt);
+    const workflow = (): Doc => ({ "1": { class_type: "UnetLoaderGGUF", inputs: {} }, "4": { class_type: "KSampler", inputs: { model: ["1", 0] } } });
+    const off = workflow();
+    applyStyle(off, resolveStyle([style!], "edit", { id: "anything2real", params: { strength: 0 } })!);
+    expect(Object.keys(off).sort()).toEqual(["1", "4"]);
+    expect(off["4"].inputs.model).toEqual(["1", 0]);
+    const on = workflow();
+    applyStyle(on, resolveStyle([style!], "edit", { id: "anything2real", params: { strength: 0.05 } })!);
+    expect(on["style_lora"].inputs.strength_model).toBe(0.05);
+    expect(on["4"].inputs.model).toEqual(["style_lora", 0]);
+  });
+
+  it("strength 0 still refuses a workflow that does not match the profile", () => {
+    const [style] = parse(withPrompt);
+    expect(() => applyStyle({ "4": { class_type: "KSampler", inputs: { model: ["9", 0] } } } as Doc, resolveStyle([style!], "edit", { id: "anything2real", params: { strength: 0 } })!)).toThrow(/workflow_mismatch|lacks node|not fed/);
+  });
+
+  it("joins the template without a doubled space when the notes are empty, wherever the placeholder is", () => {
+    const [style] = parse((l) => { withPrompt(l); l[0].prompt_template = "Make it real. {prompt} Keep the pose."; });
+    const resolved = resolveStyle([style!], "edit", { id: "anything2real" });
+    expect(stylePrompt(resolved, "")).toBe("Make it real. Keep the pose.");
+    expect(stylePrompt(resolved, "  soft light ")).toBe("Make it real. soft light Keep the pose.");
+    const [tight] = parse((l) => { withPrompt(l); l[0].prompt_template = "A{prompt}B"; });
+    expect(stylePrompt(resolveStyle([tight!], "edit", { id: "anything2real" }), "")).toBe("AB");
+  });
+});

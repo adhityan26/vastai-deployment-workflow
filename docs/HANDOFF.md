@@ -34,10 +34,21 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
    mode, parameter panels from the API), "Use as reference" and "Upscale" on results (redrawn when the server's offer
    changes), Upscale mode with both the model's intermediate image and the result bounded
    (`UPSCALE_MAX_INTERMEDIATE_PIXELS`, `UPSCALE_MAX_OUTPUT_PIXELS`), job labels with the style title, and saved upscale
-   images (gallery kind `upscale`). ENABLED for one live test: Anything to Real (LoRA pinned, Apache-2.0, edit only,
-   strength 0.4-1.0, default 0.7) and Upscale with Real-ESRGAN x4plus (safetensors from Comfy-Org, BSD-3-Clause, 2x/4x);
-   they add about 0.39 GB to the boot download (about 15.0 GB in total).
-   Still open: (a) the live test on a real instance: an anime/comic edit with and without the style at 0.6/0.7/0.8 (the
+   images (gallery kind `upscale`). ENABLED for one live test: Upscale with Real-ESRGAN x4plus (safetensors from
+   Comfy-Org, BSD-3-Clause, 2x/4x) and two presets (they add about 0.39 GB to the boot download, about 15.0 GB in total):
+   - `anything2real` "Anime / cartoon to real": the Anything to Real LoRA (pinned, Apache-2.0) plus its own instruction
+     (`prompt_template`), exactly one image ("Image to convert"), the prompt optional notes, strength 0.0-1.0
+     (default 0.7; 0 leaves the LoRA loader out: prompt only).
+   - `faceswap` "Face swap": `kind: preset` (no LoRA), the owner's tested instruction, exactly two images ("Scene to
+     keep", "Face to use") with a Swap order button and a consent hint.
+   Also built on branch `feat/progress-previews` (local commits, not pushed or deployed): each result says how long it
+   took (ComfyUI execution time, kept in saved gallery images), a live step counter and a rough step-by-step preview
+   while a job runs (ComfyUI websocket per job, `COMFY_PREVIEW_METHOD` default latent2rgb written into ComfyUI's
+   arguments at boot, `WEB_PROGRESS_*`/`WEB_PREVIEW_MAX_BYTES`), and, from `fix/stuck-start`, the stuck-start release
+   (`VAST_START_STUCK_MIN`, bad-machine avoidance) and where the rented server is (location, speeds). Runbook:
+   `deploy/web/README.md` "Live progress and preview", "Face swap", "Cartoon to real". Unverified live: the websocket over
+   the tailnet, preview quality, and the image sourcing `/workspace/.env` (check `ps aux | grep main.py`).
+   Still open: (a) the live test on a real instance: an anime/comic edit with the style at strength 0 and 0.6/0.7/0.8 (the
    LoRA placement relative to `QwenImage21Cache` on the GGUF base is UNVERIFIED; change `lora.model_from`/`model_to` if
    wrong), one upscale at 2x and 4x (the workflow has never run; VRAM use of a large upscale is unknown), and a Save of
    each result; (b) DONE: saved gallery images also have "Use as reference" and Upscale buttons; 
