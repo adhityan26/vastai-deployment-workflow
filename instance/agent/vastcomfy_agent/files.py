@@ -9,11 +9,16 @@ from typing import Any
 
 def atomic_write(path: Path, data: str) -> None:
     """Write via a temp file in the same directory, then rename (readers never see a partial file)."""
+    atomic_write_bytes(path, data.encode())
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """atomic_write for bytes (for files whose encoding is not ours to choose)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

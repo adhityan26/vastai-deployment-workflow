@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 
 from .config import Config, ConfigError
-from .files import atomic_write
+from .files import atomic_write_bytes
 
 # ComfyUI's command line on the Vast image (S1): its supervisor program runs /opt/supervisor-scripts/comfyui.sh,
 # which sources /etc/environment and then ${WORKSPACE}/.env (with `set -a`) before
@@ -43,9 +43,10 @@ def image_env_file(cfg: Config) -> Path:
 def write_image_env(path: Path, args: str) -> None:
     """Set COMFYUI_ARGS in the image's ${WORKSPACE}/.env: other lines are kept, earlier COMFYUI_ARGS lines replaced."""
     path = Path(path)
-    existing = path.read_text().splitlines() if path.exists() else []
+    # The file belongs to the image and may hold any bytes: surrogateescape keeps other lines byte for byte.
+    existing = path.read_bytes().decode("utf-8", "surrogateescape").splitlines() if path.exists() else []
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else _NEW_FILE_MODE
     kept = [line for line in existing if not _ARGS_LINE.match(line)]
     kept.append(f'{ARGS_NAME}="{args}"')
-    atomic_write(path, "\n".join(kept) + "\n")
+    atomic_write_bytes(path, ("\n".join(kept) + "\n").encode("utf-8", "surrogateescape"))
     os.chmod(path, mode)

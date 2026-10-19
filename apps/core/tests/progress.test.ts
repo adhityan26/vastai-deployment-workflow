@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AppsConfig } from "../src/config.js";
 import { ComfyClient } from "../src/comfy.js";
-import { parsePreviewMessage, sniffPreview, watchProgress, type PreviewFrame, type ProgressOptions, type ProgressSocket } from "../src/progress.js";
+import { FrameReader, parsePreviewMessage, sniffPreview, watchProgress, type PreviewFrame, type ProgressOptions, type ProgressSocket } from "../src/progress.js";
 import { JPEG, PNG_IMG, previewFrame, serverFrame, startFakeComfyWs, textFrame, until, type FakeComfyWs } from "./fake-ws.js";
 
 class Sink {
@@ -308,13 +308,57 @@ describe("fragmented messages", () => {
     expect(socket.closed).toBe(false);
   });
 
-  it("closes when the peer stops reading and pong replies pile up", async () => {
+  it("closes when the peer stops reading and floods pings (the ping rate limit closes it first; the write backlog cap is a second guard)", async () => {
     const { socket, peer } = await connected({ lifetimeMs: 60_000 });
     peer.socket.pause(); // the fake never reads again: our pongs queue up locally
     const ping = serverFrame(0x9, Buffer.alloc(125, 0x61));
     for (let i = 0; i < 40; i++) peer.send(Buffer.concat(Array.from({ length: 1000 }, () => ping)));
     await until(() => socket.closed, 8_000);
   }, 15_000);
+});
+
+describe("frame reader buffering", () => {
+  it("reassembles a frame delivered one byte at a time without copying the buffer on every byte", () => {
+    const got: Buffer[] = [];
+    const reader = new FrameReader({ maxTextBytes: 1024, maxPreviewBytes: 512 * 1024 }, (_op, p) => void got.push(Buffer.from(p)), () => undefined, () => {
+      throw new Error("must not fail");
+    });
+    const image = Buffer.concat([JPEG("big"), Buffer.alloc(200_000, 7)]);
+    const wire = previewFrame(image);
+    const concat = vi.spyOn(Buffer, "concat");
+    const t0 = Date.now();
+    for (let i = 0; i < wire.length; i++) reader.push(wire.subarray(i, i + 1));
+    const calls = concat.mock.calls.length;
+    concat.mockRestore();
+    expect(got).toHaveLength(1);
+    expect(got[0]!.subarray(8).equals(image)).toBe(true);
+    expect(calls).toBeLessThan(10);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it("still parses several frames in one chunk and a header split across chunks", () => {
+    const got: string[] = [];
+    const reader = new FrameReader({ maxTextBytes: 1024, maxPreviewBytes: 64 }, (_op, p) => void got.push(p.toString()), () => undefined, () => undefined);
+    const two = Buffer.concat([textFrame("a"), serverFrame(0x1, Buffer.alloc(300, 0x62))]);
+    reader.push(two.subarray(0, 4)); // first frame done, half the 16-bit length header of the second
+    reader.push(two.subarray(4, 6));
+    reader.push(two.subarray(6));
+    expect(got).toEqual(["a", "b".repeat(300)]);
+  });
+});
+
+describe("ping rate", () => {
+  it("closes a socket whose peer floods pings, keeps one that pings now and then", async () => {
+    const calm = await connected();
+    for (let i = 0; i < 5; i++) calm.peer.send(serverFrame(0x9, Buffer.from(`p${i}`)));
+    await until(() => calm.peer.frames().filter((f) => f.op === 0xa).length === 5);
+    expect(calm.socket.closed).toBe(false);
+    await fake!.close();
+    fake = null;
+    const { socket, peer } = await connected({ lifetimeMs: 60_000 });
+    peer.send(Buffer.concat(Array.from({ length: 200 }, () => serverFrame(0x9, Buffer.from("x")))));
+    await until(() => socket.closed);
+  });
 });
 
 describe("preview parsing", () => {

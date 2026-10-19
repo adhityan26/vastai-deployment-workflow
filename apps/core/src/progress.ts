@@ -65,6 +65,8 @@ const OP_PONG = 0xa;
 const CONTROL_MAX = 125;
 const CLOSE_NORMAL = 1000;
 const CLOSE_GRACE_MS = 1000;
+const PING_WINDOW_MS = 1000;
+const PINGS_PER_WINDOW_MAX = 50; // more pings than this within one second close the socket
 const WRITE_BACKLOG_MAX = 64 * 1024; // bytes of our own frames (pongs) waiting for the peer
 /** Fragments one message may have, and the bytes each frame counts for on top of its payload (so empty or
  * tiny continuation frames cannot grow the fragment list for free). */
@@ -227,9 +229,16 @@ export function watchProgress(opts: ProgressOptions, sink: ProgressSink): Progre
     if (socket.writableLength > WRITE_BACKLOG_MAX) close(true);
   }
 
+  const pingTimes: number[] = [];
   function onControl(op: number, payload: Buffer): void {
-    if (op === OP_PING) send(OP_PONG, payload);
-    else if (op === OP_CLOSE) close();
+    if (op === OP_PING) {
+      // ComfyUI sends few pings or none; a peer that floods them is cut off.
+      const t = Date.now();
+      while (pingTimes.length > 0 && t - pingTimes[0]! >= PING_WINDOW_MS) pingTimes.shift();
+      pingTimes.push(t);
+      if (pingTimes.length > PINGS_PER_WINDOW_MAX) return close(true);
+      send(OP_PONG, payload);
+    } else if (op === OP_CLOSE) close();
   }
 
   function forUs(data: Record<string, unknown>): boolean {
@@ -301,10 +310,15 @@ function frame(op: number, payload: Buffer): Buffer {
 /**
  * Incremental frame parser for server frames. The cap of a message is known from its first header, so
  * an oversized message is refused before its payload is buffered; fragmented messages are reassembled
- * up to the same cap. Server frames must not be masked and use no extension (RSV bits clear).
+ * up to the same cap. Server frames must not be masked and use no extension (RSV bits clear). Incoming
+ * chunks are kept in a list and joined only once a whole header or a whole frame is there, so a frame
+ * that arrives in tiny pieces is not copied again and again. Exported for tests.
  */
-class FrameReader {
-  private buf: Buffer = Buffer.alloc(0);
+export class FrameReader {
+  private chunks: Buffer[] = [];
+  private queued = 0;
+  /** The parsed header of the frame being received, once all its header bytes were there. */
+  private head: { fin: boolean; op: number; len: number; offset: number } | null = null;
   private fragments: Buffer[] = [];
   private fragmentOp = -1;
   /** Payload bytes plus FRAME_OVERHEAD per frame of the message being reassembled. */
@@ -325,51 +339,83 @@ class FrameReader {
 
   private stop(): void {
     this.failed = true;
-    this.buf = Buffer.alloc(0);
+    this.chunks = [];
+    this.queued = 0;
     this.fragments = [];
     this.fail();
   }
 
+  /** The first `n` queued bytes as one buffer (joining the chunks only now), or null while fewer are queued. */
+  private front(n: number): Buffer | null {
+    if (this.queued < n) return null;
+    if (this.chunks[0]!.length < n) this.chunks = [Buffer.concat(this.chunks, this.queued)];
+    return this.chunks[0]!;
+  }
+
+  private consume(n: number): Buffer {
+    const first = this.front(n)!;
+    const out = first.subarray(0, n);
+    if (first.length === n) this.chunks.shift();
+    else this.chunks[0] = first.subarray(n);
+    this.queued -= n;
+    return out;
+  }
+
+  /** Parse and check the next header; false while its bytes are not all there (or after a refusal). */
+  private readHead(): boolean {
+    const two = this.front(2);
+    if (two === null) return false;
+    const b0 = two[0]!;
+    const b1 = two[1]!;
+    const fin = (b0 & 0x80) !== 0;
+    const op = b0 & 0x0f;
+    if ((b0 & 0x70) !== 0 || (b1 & 0x80) !== 0) {
+      this.stop();
+      return false;
+    }
+    let len = b1 & 0x7f;
+    let offset = 2;
+    if (len === 126 || len === 127) {
+      offset = len === 126 ? 4 : 10;
+      const b = this.front(offset);
+      if (b === null) return false;
+      if (len === 126) len = b.readUInt16BE(2);
+      else {
+        if (b.readUInt32BE(2) !== 0) {
+          this.stop(); // 4 GiB or more: never
+          return false;
+        }
+        len = b.readUInt32BE(6);
+      }
+    }
+    const isControl = (op & 0x08) !== 0;
+    let ok: boolean;
+    if (isControl) ok = fin && len <= CONTROL_MAX && (op === OP_CLOSE || op === OP_PING || op === OP_PONG);
+    else if (op === OP_CONTINUATION) {
+      ok = this.fragmentOp !== -1 && this.fragmentFrames + 1 <= FRAGMENTS_MAX && this.fragmentBytes + len + FRAME_OVERHEAD <= this.capFor(this.fragmentOp);
+    } else if (op === OP_TEXT || op === OP_BINARY) {
+      ok = this.fragmentOp === -1 && len <= this.capFor(op) && (fin || len + FRAME_OVERHEAD <= this.capFor(op));
+    } else ok = false;
+    if (!ok) {
+      this.stop();
+      return false;
+    }
+    this.head = { fin, op, len, offset };
+    return true;
+  }
+
   push(chunk: Buffer): void {
-    if (this.failed) return;
-    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
+    if (this.failed || chunk.length === 0) return;
+    this.chunks.push(chunk);
+    this.queued += chunk.length;
     for (;;) {
-      if (this.failed || this.buf.length < 2) return;
-      const b0 = this.buf[0]!;
-      const b1 = this.buf[1]!;
-      const fin = (b0 & 0x80) !== 0;
-      const rsv = b0 & 0x70;
-      const op = b0 & 0x0f;
-      const masked = (b1 & 0x80) !== 0;
-      let len = b1 & 0x7f;
-      let offset = 2;
-      if (rsv !== 0 || masked) return this.stop();
-      if (len === 126) {
-        if (this.buf.length < 4) return;
-        len = this.buf.readUInt16BE(2);
-        offset = 4;
-      } else if (len === 127) {
-        if (this.buf.length < 10) return;
-        if (this.buf.readUInt32BE(2) !== 0) return this.stop(); // 4 GiB or more: never
-        len = this.buf.readUInt32BE(6);
-        offset = 10;
-      }
-      const isControl = (op & 0x08) !== 0;
-      if (isControl) {
-        if (!fin || len > CONTROL_MAX || (op !== OP_CLOSE && op !== OP_PING && op !== OP_PONG)) return this.stop();
-      } else if (op === OP_CONTINUATION) {
-        if (this.fragmentOp === -1 || this.fragmentFrames + 1 > FRAGMENTS_MAX) return this.stop();
-        if (this.fragmentBytes + len + FRAME_OVERHEAD > this.capFor(this.fragmentOp)) return this.stop();
-      } else if (op === OP_TEXT || op === OP_BINARY) {
-        if (this.fragmentOp !== -1 || len > this.capFor(op)) return this.stop();
-        if (!fin && len + FRAME_OVERHEAD > this.capFor(op)) return this.stop();
-      } else {
-        return this.stop();
-      }
-      if (this.buf.length < offset + len) return; // wait for the rest; at most the cap is ever buffered
-      const payload = this.buf.subarray(offset, offset + len);
-      this.buf = this.buf.subarray(offset + len);
-      if (isControl) {
+      if (this.failed) return;
+      if (this.head === null && !this.readHead()) return;
+      const { fin, op, len, offset } = this.head!;
+      if (this.queued < offset + len) return; // wait for the rest; at most the cap is ever buffered
+      const payload = this.consume(offset + len).subarray(offset);
+      this.head = null;
+      if ((op & 0x08) !== 0) {
         this.control(op, Buffer.from(payload));
         continue;
       }

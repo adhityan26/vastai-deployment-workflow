@@ -113,3 +113,35 @@ def test_the_web_and_the_instance_send_the_same_base_arguments(make_cfg):
     assert match, "lifecycle.ts no longer sets COMFYUI_ARGS as a template string"
     web = match.group(1).replace("${comfyPort}", "18190")
     assert comfy_args.render_args(make_cfg(COMFY_PREVIEW_METHOD="none", COMFY_PORT="18190")) == web
+
+
+def test_write_keeps_a_non_utf8_env_file_byte_for_byte(tmp_path):
+    path = tmp_path / ".env"
+    path.write_bytes(b"FOO=caf\xe9\nCOMFYUI_ARGS=old\n")
+    comfy_args.write_image_env(path, "--port 1")
+    assert path.read_bytes() == b'FOO=caf\xe9\nCOMFYUI_ARGS="--port 1"\n'
+
+
+def test_boot_comfy_args_with_a_non_utf8_env_file_neither_fails_nor_destroys(tmp_path, capsys):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+    (tmp_path / ".env").write_bytes(b"FOO=caf\xe9\n")
+    code, runner = run_boot(tmp_path, ["comfy-args", "--env-file", ef])
+    assert code == 0 and not any(c[0] == "vastai" for c in runner.cmds)
+    assert (tmp_path / ".env").read_bytes().startswith(b"FOO=caf\xe9\n")
+
+
+def test_boot_comfy_args_value_error_only_warns_with_the_class_name(tmp_path, monkeypatch, capsys):
+    prepared(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef])
+
+    def broken(path, args):
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "secret-detail")
+
+    monkeypatch.setattr("vastcomfy_agent.boot.write_image_env", broken)
+    code, runner = run_boot(tmp_path, ["comfy-args", "--env-file", ef])
+    assert code == 0 and not any(c[0] == "vastai" for c in runner.cmds)
+    err = capsys.readouterr().err
+    assert "UnicodeDecodeError" in err and "secret-detail" not in err

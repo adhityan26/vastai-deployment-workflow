@@ -182,7 +182,7 @@ def cmd_comfy_args(b: Boot) -> int:
         return b.fail("comfyui_start_failed")
     try:
         write_image_env(image_env_file(b.cfg), args)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: e.g. a decoding problem with the image's own file
         # The error class only: a path or message is not needed to act on it.
         print(f"boot: warning: ComfyUI arguments could not be written ({type(exc).__name__}); "
               "ComfyUI restarts with its old arguments, without previews", file=sys.stderr)
