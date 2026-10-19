@@ -193,6 +193,15 @@ function parseOptional(paramsRaw: Record<string, unknown>, section: string, mand
   return optional;
 }
 
+/** "<node>/<input>" to the param or knob that sets it, for one workflow. */
+function takenInputs(params: Readonly<Record<string, ParamRef>>, optional: OptionalParams): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, ref] of Object.entries(params)) out[`${ref.node}/${ref.input}`] = name;
+  if (optional.negativePrompt !== null) out[`${optional.negativePrompt.node}/${optional.negativePrompt.input}`] = "negative_prompt";
+  if (optional.cfg !== null) out[`${optional.cfg.node}/${optional.cfg.input}`] = "cfg";
+  return out;
+}
+
 /** Which optional knobs a mode's workflow accepts; nothing for a mode the profile does not have. */
 export function tuningSupport(profile: Profile, mode: "generate" | "edit"): TuningSupport {
   const optional = mode === "generate" ? profile.generate.optional : (profile.edit?.optional ?? null);
@@ -336,6 +345,8 @@ export function loadProfile(path: string): Profile {
         resolutions: edit?.resolutions.map((r) => r.name) ?? [],
         negativePrompt: { generate: generate.optional.negativePrompt !== null, edit: (edit?.optional.negativePrompt ?? null) !== null },
         cfg: { generate: generate.optional.cfg !== null, edit: (edit?.optional.cfg ?? null) !== null },
+        taken: { generate: takenInputs(generate.params, generate.optional), edit: edit === null ? {} : takenInputs(edit.params, edit.optional) },
+        referenceInputs: edit === null ? null : { node: edit.references.encoderNode, prefix: edit.references.inputPrefix },
       }),
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
       models,

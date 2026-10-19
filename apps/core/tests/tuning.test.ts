@@ -164,6 +164,8 @@ describe("style defaults", () => {
     resolutions: ["1024"],
     negativePrompt: { generate: true, edit: false },
     cfg: { generate: true, edit: true },
+    taken: { generate: {}, edit: {} },
+    referenceInputs: null,
   };
   const style = (over: Doc = {}): Doc => ({ id: "s", title: "S", kind: "preset", modes: ["generate"], enabled: true, prompt_template: "x {prompt}", ...over });
   const parse = (over: Doc) => parseStyles([style(over)], [], ctx);
@@ -192,6 +194,29 @@ describe("style defaults", () => {
     ];
     for (const [over, message] of bad) expect(() => parse(over), JSON.stringify(over)).toThrow(message);
     expect(() => parseStyles([style({ defaults: { cfg: 2 } })], [])).toThrow(/guidance range/); // no guidance at all
+  });
+
+  it("refuses a style param that targets an input a mapped knob or param of the same mode already sets", () => {
+    const withParam = (modes: string[], target: Doc, enabled = true) =>
+      variant((d) =>
+        d.styles.push({
+          id: "clash", title: "Clash", kind: "preset", modes, enabled, prompt_template: "x {prompt}",
+          params: [{ id: "knob", title: "Knob", type: "float", min: 1, max: 6, step: 0.5, default: 1, target }],
+        }),
+      );
+    const bad: [string[], Doc, RegExp][] = [
+      [["generate"], { node: "8", input: "cfg" }, /style clash param knob targets node 8 input cfg, which the generate workflow's cfg already sets/],
+      [["generate"], { node: "6", input: "text" }, /node 6 input text, which the generate workflow's negative_prompt already sets/],
+      [["generate"], { node: "8", input: "steps" }, /node 8 input steps, which the generate workflow's steps already sets/],
+      [["edit"], { node: "7", input: "cfg" }, /node 7 input cfg, which the edit workflow's cfg already sets/],
+      [["edit"], { node: "6", input: "prompt" }, /which the edit workflow's prompt already sets/],
+      [["edit"], { node: "6", input: "images.image_1" }, /which the edit workflow's reference images already set/],
+    ];
+    for (const [modes, target, message] of bad) expect(() => withParam(modes, target), JSON.stringify(target)).toThrow(message);
+    expect(() => withParam(["generate"], { node: "8", input: "cfg" }, false)).toThrow(/generate workflow's cfg/); // disabled styles too
+    // The check is per mode: in the edit workflow node 8 is the VAEDecode, which no param of edit sets.
+    expect(() => withParam(["edit"], { node: "8", input: "samples" })).not.toThrow();
+    expect(() => withParam(["generate"], { node: "7", input: "batch_size" })).not.toThrow();
   });
 
   it("validates the defaults of a disabled style too, except whether every mode maps the knob", () => {

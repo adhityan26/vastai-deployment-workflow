@@ -59,6 +59,13 @@ export interface StyleContext {
   /** Per mode: does its workflow map a negative prompt / a cfg. */
   readonly negativePrompt: Readonly<Record<StyleMode, boolean>>;
   readonly cfg: Readonly<Record<StyleMode, boolean>>;
+  /**
+   * Per mode, the inputs the workflow's own params and knobs already set ("<node>/<input>" to what sets it),
+   * and the encoder inputs that receive edit references. A style param may not target any of them: applyStyle
+   * runs last and would silently overwrite them.
+   */
+  readonly taken: Readonly<Record<StyleMode, Readonly<Record<string, string>>>>;
+  readonly referenceInputs: { readonly node: string; readonly prefix: string } | null;
 }
 
 export interface StyleSpec {
@@ -117,6 +124,8 @@ const BARE_CONTEXT: StyleContext = {
   resolutions: [],
   negativePrompt: { generate: false, edit: false },
   cfg: { generate: false, edit: false },
+  taken: { generate: {}, edit: {} },
+  referenceInputs: null,
 };
 const NO_DEFAULTS: StyleDefaults = { negativePrompt: null, cfg: null, preset: null, size: null, resolution: null };
 const REFERENCE_KEYS = new Set(["min", "max", "labels"]);
@@ -208,8 +217,8 @@ function parseDefaults(raw: unknown, id: string, modes: readonly StyleMode[], en
   noUnknownKeys(d, DEFAULT_KEYS, `style ${id} defaults`);
   const what = `style ${id} defaults`;
   // An enabled style's default must be usable in every mode it is offered in, or the page would pre-fill a value
-  // the server then refuses. (A disabled style is checked for shape only, so a profile may drop a knob without
-  // first editing every sample style.)
+  // the server then refuses. A disabled style skips only that mapping check (so a profile may drop a knob without
+  // first editing every sample style); its values are still checked (cfg on the guidance grid, names offered).
   const everyMode = (offered: Readonly<Record<StyleMode, boolean>>, knob: string): void => {
     if (!enabled) return;
     const missing = modes.filter((m) => !offered[m]);
@@ -281,6 +290,18 @@ function parseOne(raw: unknown, models: readonly ModelEntry[], ctx: StyleContext
   if (new Set(params.map((p) => p.id)).size !== params.length) throw new ProfileError(`style ${id}: param ids must be unique`);
   if (params.filter((p) => p.target.kind === "lora_strength").length > 1) throw new ProfileError(`style ${id}: only one param may target lora_strength`);
   if (lora === null && params.some((p) => p.target.kind === "lora_strength")) throw new ProfileError(`style ${id}: a preset has no LoRA strength`);
+  for (const p of params) {
+    if (p.target.kind !== "input") continue;
+    const { node, input } = p.target;
+    for (const mode of modesRaw as StyleMode[]) {
+      const owner = ctx.taken[mode][`${node}/${input}`];
+      const refs = ctx.referenceInputs;
+      const setter = owner ?? (mode === "edit" && refs !== null && node === refs.node && input.startsWith(refs.prefix) ? "reference images" : undefined);
+      if (setter !== undefined) {
+        throw new ProfileError(`style ${id} param ${p.id} targets node ${node} input ${input}, which the ${mode} workflow's ${setter} already set${setter === "reference images" ? "" : "s"}`);
+      }
+    }
+  }
 
   let promptTemplate: string | null = null;
   if (s["prompt_template"] !== undefined) {
