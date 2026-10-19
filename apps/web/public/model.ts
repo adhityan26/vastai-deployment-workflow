@@ -92,18 +92,22 @@ export interface StyleInfo {
   promptOptional: boolean;
   references: StyleReferences | null;
   hint: string | null;
+  /** What the form pre-fills when the style is chosen (the user can change each); only what the style sets. */
+  defaults: StyleDefaults;
+}
+/** A style's suggested form values (names are checked against the current lists before use). */
+export interface StyleDefaults {
+  negativePrompt?: string;
+  cfg?: number;
+  preset?: string;
+  size?: string;
+  resolution?: string;
 }
 /** The guidance (cfg) range the server accepts; null in the state when it offers none. */
 export interface GuidanceInfo { min: number; max: number; step: number; default: number }
-/** A ready-made recipe as the server lists it: what to show, never the template itself. */
-export interface RecipeInfo {
-  id: string;
-  title: string;
-  description: string;
-  modes: Mode[];
-  promptOptional: boolean;
-  references: { min: number; max: number } | null;
-}
+/** Which optional knobs a mode's workflow takes. */
+export interface Knobs { negativePrompt: boolean; cfg: boolean }
+export interface AdvancedInfo { generate: Knobs; edit: Knobs; negativeMaxChars: number }
 /** What the server offers for upscale (null in the state when upscale is off). */
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
@@ -135,9 +139,8 @@ export interface ApiState {
   styles: StyleInfo[];
   upscale: UpscaleInfo | null;
   guidance: GuidanceInfo | null;
-  /** The server accepts a negative prompt. */
-  negativePrompt: boolean;
-  recipes: RecipeInfo[];
+  /** The Advanced section per mode (negative prompt, guidance). */
+  advanced: AdvancedInfo;
 }
 
 export interface Estimate {
@@ -239,6 +242,19 @@ function parseStyleReferences(v: unknown): StyleReferences | null | undefined {
   return { min: min as number, max: max as number, labels: list };
 }
 
+/** Only well-typed defaults are kept; anything else is simply not pre-filled. */
+function parseStyleDefaults(v: unknown): StyleDefaults {
+  if (!isObj(v)) return {};
+  const out: StyleDefaults = {};
+  const text = (x: unknown): x is string => typeof x === "string" && x !== "";
+  if (text(v["negative_prompt"])) out.negativePrompt = v["negative_prompt"];
+  if (num(v["cfg"]) !== null) out.cfg = v["cfg"] as number;
+  if (text(v["preset"])) out.preset = v["preset"];
+  if (text(v["size"])) out.size = v["size"];
+  if (text(v["resolution"])) out.resolution = v["resolution"];
+  return out;
+}
+
 function parseStyles(v: unknown): StyleInfo[] {
   if (!Array.isArray(v)) return [];
   return v.flatMap((st) => {
@@ -258,6 +274,7 @@ function parseStyles(v: unknown): StyleInfo[] {
       promptOptional: st["prompt_optional"] === true,
       references,
       hint: typeof st["hint"] === "string" && st["hint"] !== "" ? st["hint"] : null,
+      defaults: parseStyleDefaults(st["defaults"]),
     }];
   });
 }
@@ -277,23 +294,18 @@ function parseGuidance(v: unknown): GuidanceInfo | null {
   return { min, max, step, default: def };
 }
 
-function parseRecipes(v: unknown): RecipeInfo[] {
-  if (!Array.isArray(v)) return [];
-  return v.flatMap((r) => {
-    if (!isObj(r) || typeof r["id"] !== "string" || r["id"] === "" || typeof r["title"] !== "string" || !Array.isArray(r["modes"])) return [];
-    const modes = r["modes"].filter((m): m is Mode => m === "generate" || m === "edit");
-    if (modes.length === 0) return [];
-    const refs = r["references"];
-    const references = isObj(refs) && posInt(refs["min"]) && posInt(refs["max"]) && refs["min"] <= refs["max"] ? { min: refs["min"], max: refs["max"] } : null;
-    return [{
-      id: r["id"],
-      title: r["title"],
-      description: typeof r["description"] === "string" ? r["description"] : "",
-      modes,
-      promptOptional: r["prompt_optional"] === true,
-      references,
-    }];
-  });
+const NO_KNOBS: Knobs = { negativePrompt: false, cfg: false };
+/** Longest negative prompt the page lets the user type when the server does not say (its default). */
+const NEGATIVE_MAX_FALLBACK = 1000;
+
+function parseKnobs(v: unknown): Knobs {
+  return isObj(v) ? { negativePrompt: v["negative_prompt"] === true, cfg: v["cfg"] === true } : NO_KNOBS;
+}
+
+/** Missing or malformed means "no knobs": the page then sends exactly what it sent before. */
+function parseAdvanced(v: unknown): AdvancedInfo {
+  if (!isObj(v)) return { generate: NO_KNOBS, edit: NO_KNOBS, negativeMaxChars: NEGATIVE_MAX_FALLBACK };
+  return { generate: parseKnobs(v["generate"]), edit: parseKnobs(v["edit"]), negativeMaxChars: posInt(v["negative_prompt_max_chars"]) ? v["negative_prompt_max_chars"] : NEGATIVE_MAX_FALLBACK };
 }
 
 function parseDownload(v: unknown): Download | null {
@@ -377,8 +389,7 @@ export function parseState(json: unknown): ApiState | null {
     styles: parseStyles(json["styles"]),
     upscale: parseUpscale(json["upscale"]),
     guidance: parseGuidance(json["guidance"]),
-    negativePrompt: json["negative_prompt"] === true,
-    recipes: parseRecipes(json["recipes"]),
+    advanced: parseAdvanced(json["advanced"]),
   };
 }
 
@@ -826,21 +837,13 @@ export function isChainableUrl(url: string): boolean {
   return saved !== null && isGalleryId(saved[1]);
 }
 
-// ---- recipes, negative prompt and guidance ----
+// ---- Advanced: negative prompt and guidance, and the defaults a style pre-fills ----
 
-/** The recipes the server allows in a mode, in its order. */
-export function recipesForMode(recipes: readonly RecipeInfo[], mode: Mode): RecipeInfo[] {
-  return recipes.filter((r) => r.modes.includes(mode));
-}
-
-/** Why a recipe cannot be submitted with this many reference images; null when it can. */
-export function recipeReferenceProblem(recipe: RecipeInfo | null, count: number): string | null {
-  const need = recipe?.references;
-  if (!recipe || !need) return null;
-  const plural = (n: number): string => `${n} image${n === 1 ? "" : "s"}`;
-  if (count < need.min) return `${recipe.title} needs ${need.min === need.max ? plural(need.min) : `at least ${plural(need.min)}`}.`;
-  if (count > need.max) return `${recipe.title} takes at most ${plural(need.max)}.`;
-  return null;
+/** What the Advanced section shows in a mode: each knob only when the mode's workflow takes it. */
+export function knobsFor(s: ApiState, mode: PageMode): Knobs {
+  if (mode === "upscale") return NO_KNOBS;
+  const k = s.advanced[mode];
+  return { negativePrompt: k.negativePrompt, cfg: k.cfg && s.guidance !== null };
 }
 
 /** A guidance slider value kept inside the range and on the step grid. */
@@ -850,18 +853,75 @@ export function snapGuidance(g: GuidanceInfo, value: number): number {
   return Math.min(g.max, Number((g.min + Math.round((clamped - g.min) / g.step) * g.step).toFixed(6)));
 }
 
-/** The extra members of a generate or edit body: only what the user chose, so a recipe's own defaults still apply. */
-export function advancedRequest(opts: {
-  recipe: RecipeInfo | null;
-  negative: string;
-  guidance: GuidanceInfo | null;
-  guidanceValue: number | null;
-}): Record<string, unknown> {
+/**
+ * The knob members of a generate or edit body. Only what differs from "untouched": no negative prompt when
+ * the box is blank, and no cfg while the slider is at the default (the workflows' own cfg), so a form the
+ * user did not touch sends exactly the body it sent before this section existed.
+ */
+export function advancedRequest(opts: { knobs: Knobs; negative: string; guidance: GuidanceInfo | null; guidanceValue: number | null }): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  if (opts.recipe) out["recipe"] = opts.recipe.id;
-  if (opts.negative.trim() !== "") out["negative_prompt"] = opts.negative.trim();
-  if (opts.guidance && opts.guidanceValue !== null) out["cfg"] = snapGuidance(opts.guidance, opts.guidanceValue);
+  const negative = opts.negative.trim();
+  if (opts.knobs.negativePrompt && negative !== "") out["negative_prompt"] = negative;
+  if (opts.knobs.cfg && opts.guidance && opts.guidanceValue !== null) {
+    const cfg = snapGuidance(opts.guidance, opts.guidanceValue);
+    if (cfg !== opts.guidance.default) out["cfg"] = cfg;
+  }
   return out;
+}
+
+/** ", guidance 3" and ", negative prompt" for a job label, the way the server labels the same job. */
+export function advancedLabel(body: Record<string, unknown>): string {
+  const cfg = typeof body["cfg"] === "number" ? `, guidance ${body["cfg"]}` : "";
+  return `${cfg}${typeof body["negative_prompt"] === "string" ? ", negative prompt" : ""}`;
+}
+
+/** The form fields a style may pre-fill. cfg null means "at the guidance default". */
+export interface FormValues {
+  negativePrompt: string;
+  cfg: number | null;
+  preset: string;
+  size: string;
+  resolution: string;
+}
+type FormKey = keyof FormValues;
+/** What the current style pre-filled, and what each field held before, so leaving the style can undo it. */
+export type Prefilled = Partial<{ [K in FormKey]: { value: FormValues[K]; previous: FormValues[K] } }>;
+
+/** A style's defaults that this server can use in this mode: offered names only, cfg on the grid, text bounded. */
+export function usableDefaults(style: StyleInfo | null, s: ApiState, mode: PageMode): Partial<FormValues> {
+  if (style === null || mode === "upscale") return {};
+  const d = style.defaults;
+  const knobs = knobsFor(s, mode);
+  const out: Partial<FormValues> = {};
+  if (d.negativePrompt !== undefined && knobs.negativePrompt) out.negativePrompt = d.negativePrompt.slice(0, s.advanced.negativeMaxChars);
+  if (d.cfg !== undefined && knobs.cfg && s.guidance) out.cfg = snapGuidance(s.guidance, d.cfg);
+  if (d.preset !== undefined && s.presets.some((p) => p.name === d.preset)) out.preset = d.preset;
+  if (mode === "generate" && d.size !== undefined && s.sizes.some((z) => z.name === d.size)) out.size = d.size;
+  if (mode === "edit" && d.resolution !== undefined && s.edit?.resolutions.some((r) => r.name === d.resolution)) out.resolution = d.resolution;
+  return out;
+}
+
+/**
+ * Switch the form from one style's defaults to the next: a field the previous style pre-filled and the user
+ * did not change goes back to what it held before; then the next style's defaults are put in. A field the
+ * user changed is left alone when leaving a style.
+ */
+export function switchDefaults(current: FormValues, prefilled: Prefilled, next: Partial<FormValues>): { values: FormValues; prefilled: Prefilled } {
+  const values: FormValues = { ...current };
+  const put = <K extends FormKey>(key: K, value: FormValues[K]): void => {
+    values[key] = value;
+  };
+  for (const key of Object.keys(prefilled) as FormKey[]) {
+    const p = prefilled[key]!;
+    if (values[key] === p.value) put(key, p.previous);
+  }
+  const fresh: Prefilled = {};
+  for (const key of Object.keys(next) as FormKey[]) {
+    const value = next[key]!;
+    (fresh as Record<FormKey, { value: unknown; previous: unknown }>)[key] = { value, previous: values[key] };
+    put(key, value);
+  }
+  return { values, prefilled: fresh };
 }
 
 // ---- upscale ----

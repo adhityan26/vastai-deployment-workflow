@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  advancedLabel,
+  advancedRequest,
+  knobsFor,
+  switchDefaults,
+  usableDefaults,
   durationText,
   formatSeconds,
   parseSeconds,
@@ -652,7 +657,7 @@ describe("gallery helpers", () => {
 describe("styles from the state", () => {
   const strength = { id: "strength", title: "LoRA strength", type: "float", min: 0.4, max: 1, step: 0.05, default: 0.7 };
   const style = { id: "anything2real", title: "Anything to Real", modes: ["edit"], params: [strength] };
-  const parsed = { ...style, promptOptional: false, references: null, hint: null };
+  const parsed = { ...style, promptOptional: false, references: null, hint: null, defaults: {} };
 
   it("is an empty list when the server sends none or something unusable", () => {
     expect(parseState(base)!.styles).toEqual([]);
@@ -663,7 +668,7 @@ describe("styles from the state", () => {
   it("reads a preset's reference rule, optional prompt and hint; leaves out a style with an unusable rule", () => {
     const swap = { id: "faceswap", title: "Face swap", kind: "preset", modes: ["edit"], params: [], prompt_optional: true, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use", "extra"] }, hint: "Ask first." };
     expect(parseState({ ...base, styles: [swap] })!.styles).toEqual([
-      { id: "faceswap", title: "Face swap", modes: ["edit"], params: [], promptOptional: true, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Ask first." },
+      { id: "faceswap", title: "Face swap", modes: ["edit"], params: [], promptOptional: true, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Ask first.", defaults: {} },
     ]);
     for (const references of [{ min: 0, max: 2 }, { min: 3, max: 2 }, { min: 1, max: 99 }, { min: "2", max: 2 }, "two"]) {
       expect(parseState({ ...base, styles: [{ ...swap, references }, style] })!.styles.map((s) => s.id)).toEqual(["anything2real"]);
@@ -765,5 +770,67 @@ describe("job durations", () => {
   it("accepts only plausible numbers from the server", () => {
     expect(parseSeconds(12.5)).toBe(12.5);
     for (const bad of ["12", -1, Number.NaN, Number.POSITIVE_INFINITY, 1e9, null, undefined, {}]) expect(parseSeconds(bad)).toBeNull();
+  });
+});
+
+describe("Advanced: knobs, the request and style defaults", () => {
+  const guidance = { min: 1, max: 6, step: 0.5, default: 1 };
+  const both = { negative_prompt: true, cfg: true };
+  const state = (over: Record<string, unknown> = {}) =>
+    parseState({
+      ...base,
+      guidance,
+      advanced: { generate: both, edit: { negative_prompt: true, cfg: false }, negative_prompt_max_chars: 10 },
+      presets: [{ name: "fast", steps: 5 }, { name: "slow", steps: 50 }],
+      sizes: [{ name: "sq", width: 512, height: 512 }],
+      edit: { max_references: 2, max_bytes: 1000, max_pixels: 1000, types: ["png"], resolutions: [{ name: "1024", value: 1024 }] },
+      ...over,
+    })!;
+
+  it("reads the per-mode knobs; an old server without them offers none", () => {
+    expect(state().advanced).toEqual({ generate: { negativePrompt: true, cfg: true }, edit: { negativePrompt: true, cfg: false }, negativeMaxChars: 10 });
+    expect(parseState(base)!.advanced).toEqual({ generate: { negativePrompt: false, cfg: false }, edit: { negativePrompt: false, cfg: false }, negativeMaxChars: 1000 });
+    expect(knobsFor(state(), "edit")).toEqual({ negativePrompt: true, cfg: false });
+    expect(knobsFor(state(), "upscale")).toEqual({ negativePrompt: false, cfg: false });
+    expect(knobsFor(state({ guidance: null }), "generate")).toEqual({ negativePrompt: true, cfg: false }); // no range, no slider
+  });
+
+  it("keeps only well-typed style defaults", () => {
+    const st = { id: "s", title: "S", modes: ["generate"], params: [], defaults: { negative_prompt: "x", cfg: "3", preset: 5, size: "sq", extra: 1 } };
+    expect(state({ styles: [st] }).styles[0]!.defaults).toEqual({ negativePrompt: "x", size: "sq" });
+  });
+
+  it("sends only what differs from untouched", () => {
+    const knobs = { negativePrompt: true, cfg: true };
+    expect(advancedRequest({ knobs, negative: "  ", guidance, guidanceValue: null })).toEqual({});
+    expect(advancedRequest({ knobs, negative: "", guidance, guidanceValue: 1 })).toEqual({}); // the default is the workflow's own
+    expect(advancedRequest({ knobs, negative: " hat ", guidance, guidanceValue: 3.4 })).toEqual({ negative_prompt: "hat", cfg: 3.5 });
+    expect(advancedRequest({ knobs: { negativePrompt: false, cfg: false }, negative: "hat", guidance, guidanceValue: 3 })).toEqual({});
+    expect(advancedLabel({ cfg: 3.5, negative_prompt: "hat" })).toBe(", guidance 3.5, negative prompt");
+    expect(advancedLabel({})).toBe("");
+  });
+
+  it("uses only the defaults this server and mode can take", () => {
+    const st = (defaults: Record<string, unknown>, modes = ["generate", "edit"]) => state({ styles: [{ id: "s", title: "S", modes, params: [], defaults }] });
+    const s1 = st({ negative_prompt: "0123456789abc", cfg: 3.2, preset: "slow", size: "sq", resolution: "1024" });
+    const style = s1.styles[0]!;
+    expect(usableDefaults(style, s1, "generate")).toEqual({ negativePrompt: "0123456789", cfg: 3, preset: "slow", size: "sq" });
+    expect(usableDefaults(style, s1, "edit")).toEqual({ negativePrompt: "0123456789", preset: "slow", resolution: "1024" }); // edit takes no cfg here
+    const s2 = st({ preset: "ultra", size: "huge" });
+    expect(usableDefaults(s2.styles[0]!, s2, "generate")).toEqual({});
+    expect(usableDefaults(null, s1, "generate")).toEqual({});
+  });
+
+  it("switches defaults: undoes the previous style's untouched pre-fill, keeps the user's changes", () => {
+    const start = { negativePrompt: "", cfg: null, preset: "fast", size: "sq", resolution: "1024" };
+    const a = switchDefaults(start, {}, { negativePrompt: "blurry", cfg: 3, preset: "slow" });
+    expect(a.values).toEqual({ ...start, negativePrompt: "blurry", cfg: 3, preset: "slow" });
+    const touched = { ...a.values, negativePrompt: "blurry, hats" };
+    const b = switchDefaults(touched, a.prefilled, {});
+    expect(b.values).toEqual({ ...start, negativePrompt: "blurry, hats" });
+    expect(b.prefilled).toEqual({});
+    const c = switchDefaults(a.values, a.prefilled, { cfg: 2 }); // straight to another style
+    expect(c.values).toEqual({ ...start, cfg: 2 });
+    expect(switchDefaults(c.values, c.prefilled, {}).values).toEqual(start);
   });
 });

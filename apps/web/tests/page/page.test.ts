@@ -1666,3 +1666,106 @@ describe("upscale", () => {
     expect(posts("/api/upscale")).toHaveLength(0);
   });
 });
+
+describe("Advanced: negative prompt and guidance", () => {
+  const guidance = { min: 1, max: 6, step: 0.5, default: 1 };
+  const both = { negative_prompt: true, cfg: true };
+  const none = { negative_prompt: false, cfg: false };
+  const editInfo = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png"], resolutions: [{ name: "zz-res", value: 1024 }, { name: "zz-big", value: 2048 }] };
+  const anime = {
+    id: "anime", title: "Anime", kind: "preset", modes: ["generate"], params: [], prompt_optional: true, references: null, hint: null,
+    defaults: { negative_prompt: "photorealistic", cfg: 3, preset: "zz-slow", size: "zz-wide" },
+  };
+  const plain = { id: "plain", title: "Plain", kind: "preset", modes: ["generate"], params: [], prompt_optional: false, references: null, hint: null, defaults: {} };
+  const advanced = (edit = both) => ({ guidance, advanced: { generate: both, edit, negative_prompt_max_chars: 200 } });
+  const done = (id: string) => ({ body: { status: "done", images: [{ index: 0, url: `/api/image/${id}/0` }], seconds: 1, queued_seconds: null } });
+  // Every submit gets its own job, which is done at once, so the form is free for the next submit.
+  const job = {
+    "POST /api/generate": () => ({ status: 202, body: { id: `job-${posts("/api/generate").length}` } }),
+    ...Object.fromEntries([1, 2, 3, 4].map((n) => [`GET /api/generate/job-${n}`, done(`job-${n}`)])),
+  };
+  const slide = (value: number) => {
+    const r = q<HTMLInputElement>("#guidance")!;
+    r.value = String(value);
+    r.dispatchEvent(new Event("input"));
+  };
+  const submit = async (prompt = "a red fox") => {
+    q<HTMLTextAreaElement>("#prompt")!.value = prompt;
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+  };
+  const click = (title: string) => [...document.querySelectorAll<HTMLButtonElement>("#styles button")].find((b) => b.textContent === title)!.click();
+  const negative = () => q<HTMLTextAreaElement>("#negative")!;
+
+  it("is hidden for a server without it, and the body is exactly the old one", async () => {
+    await mount({}, job);
+    expect(q("#advanced-box")!.hidden).toBe(true);
+    await submit();
+    expect(posts("/api/generate")[0]!.body).toEqual({ prompt: "a red fox", preset: "zz-turbo", size: "zz-square" });
+  });
+
+  it("an untouched section sends nothing extra; a typed negative prompt and a moved slider are sent", async () => {
+    await mount(advanced(), job);
+    expect(q("#advanced-box")!.hidden).toBe(false);
+    expect(q<HTMLInputElement>("#guidance")!.value).toBe("1");
+    expect(q("#guidance-value")!.textContent).toBe("1");
+    expect(negative().maxLength).toBe(200);
+    await submit();
+    expect(posts("/api/generate")[0]!.body).toEqual({ prompt: "a red fox", preset: "zz-turbo", size: "zz-square" });
+    negative().value = "  blurry  ";
+    slide(3.5);
+    expect(q("#guidance-value")!.textContent).toBe("3.5");
+    await submit();
+    expect(posts("/api/generate")[1]!.body).toMatchObject({ negative_prompt: "blurry", cfg: 3.5 });
+    expect(q("#history")!.textContent).toContain("guidance 3.5, negative prompt");
+    slide(1); // back at the default: no cfg
+    negative().value = " ";
+    await submit();
+    expect(posts("/api/generate")[2]!.body).not.toHaveProperty("cfg");
+    expect(posts("/api/generate")[2]!.body).not.toHaveProperty("negative_prompt");
+  });
+
+  it("offers in each mode only the knobs its workflow takes, and nothing in upscale", async () => {
+    await mount({ ...advanced(none), edit: editInfo }, {});
+    q<HTMLButtonElement>("#mode-edit")!.click();
+    expect(q("#advanced-box")!.hidden).toBe(true);
+    q<HTMLButtonElement>("#mode-generate")!.click();
+    expect(q("#advanced-box")!.hidden).toBe(false);
+    routes["GET /api/state"] = { body: apiState({ guidance: null, advanced: { generate: both, edit: none, negative_prompt_max_chars: 200 } }) };
+    await app!.refresh();
+    expect(q("#negative-row")!.hidden).toBe(false);
+    expect(q("#guidance-row")!.hidden).toBe(true); // no guidance range: no slider
+  });
+
+  it("a style pre-fills its defaults, the user may change them, and leaving the style undoes only what is untouched", async () => {
+    await mount({ ...advanced(), styles: [plain, anime] }, job);
+    const pressedPreset = () => [...document.querySelectorAll("#presets button")].find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+    click("Anime");
+    expect(negative().value).toBe("photorealistic");
+    expect(q<HTMLInputElement>("#guidance")!.value).toBe("3");
+    expect(pressedPreset()).toBe("zz-slow (99 steps)");
+    expect(q<HTMLSelectElement>("#size")!.value).toBe("zz-wide");
+    await submit("");
+    expect(posts("/api/generate")[0]!.body).toEqual({
+      prompt: "", preset: "zz-slow", size: "zz-wide", negative_prompt: "photorealistic", cfg: 3, style: { id: "anime", params: {} },
+    });
+    negative().value = "photorealistic, hats"; // the user's own change survives leaving the style
+    click("Standard");
+    expect(negative().value).toBe("photorealistic, hats");
+    expect(q<HTMLInputElement>("#guidance")!.value).toBe("1");
+    expect(pressedPreset()).toBe("zz-turbo (7 steps)");
+    expect(q<HTMLSelectElement>("#size")!.value).toBe("zz-square");
+    click("Plain"); // a style without defaults changes nothing
+    expect(negative().value).toBe("photorealistic, hats");
+  });
+
+  it("a style's defaults never touch the form in another mode", async () => {
+    await mount({ ...advanced(), edit: editInfo, styles: [anime] }, job);
+    click("Anime");
+    q<HTMLButtonElement>("#mode-edit")!.click(); // the generate style is not chosen in edit: its pre-fill is undone
+    expect(negative().value).toBe("");
+    expect(q<HTMLInputElement>("#guidance")!.value).toBe("1");
+    q<HTMLButtonElement>("#mode-generate")!.click(); // and comes back with the generate style
+    expect(negative().value).toBe("photorealistic");
+  });
+});

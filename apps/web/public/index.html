@@ -133,12 +133,6 @@
       <button id="mode-upscale" type="button" aria-pressed="false" hidden>Upscale</button>
     </div>
     <form id="gen-form" novalidate>
-      <fieldset id="recipe-box" hidden>
-        <legend>Preset</legend>
-        <div id="recipes" class="seg"></div>
-        <p id="recipe-hint" class="muted"></p>
-      </fieldset>
-
       <div id="prompt-box">
         <label id="prompt-label" for="prompt">Prompt</label>
         <textarea id="prompt" name="prompt" rows="4" autocomplete="off"></textarea>
@@ -171,15 +165,16 @@
 
       <details id="advanced-box" hidden>
         <summary>Advanced</summary>
+        <p class="muted">Leave these as they are for the usual results. Their effect on this model has not been tested yet.</p>
         <div id="negative-row">
           <label for="negative">Negative prompt (what to avoid)</label>
-          <textarea id="negative" name="negative_prompt" rows="2" autocomplete="off"></textarea>
-          <p class="muted">Only has an effect when guidance is above 1.</p>
+          <textarea id="negative" name="negative_prompt" rows="2" autocomplete="off" aria-describedby="negative-hint"></textarea>
+          <p id="negative-hint" class="muted">Ignored while guidance is 1.</p>
         </div>
         <div id="guidance-row">
           <label for="guidance">Guidance <output id="guidance-value" for="guidance"></output></label>
-          <input id="guidance" name="cfg" type="range">
-          <p class="muted">Higher follows the prompt more closely and makes a generation take longer.</p>
+          <input id="guidance" name="cfg" type="range" aria-describedby="guidance-hint">
+          <p id="guidance-hint" class="muted">1 is the usual setting. Above 1 a job takes longer.</p>
         </div>
       </details>
 
