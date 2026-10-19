@@ -1075,7 +1075,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   // ---- Advanced: negative prompt and guidance, and the defaults a style pre-fills ----
 
-  const advancedBox = $("advanced-box");
+  const advancedBox = $<HTMLDetailsElement>("advanced-box");
   const negativeRow = $("negative-row");
   const guidanceRow = $("guidance-row");
   const negativeBox = $<HTMLTextAreaElement>("negative");
@@ -1101,6 +1101,9 @@ export function mountApp(doc: Document, env: Env): App {
     defaultsFor = key;
     const next = switchDefaults(formValues(), prefilled, usableDefaults(style, s, mode));
     prefilled = next.prefilled;
+    // A value pre-filled inside Advanced is never sent unseen: open the section. It is never closed here,
+    // so whatever the user did with it stays.
+    if (next.prefilled.negativePrompt !== undefined || next.prefilled.cfg !== undefined) advancedBox.open = true;
     const v = next.values;
     negativeBox.value = v.negativePrompt;
     guidanceValue = v.cfg;

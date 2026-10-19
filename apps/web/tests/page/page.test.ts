@@ -1759,6 +1759,25 @@ describe("Advanced: negative prompt and guidance", () => {
     expect(negative().value).toBe("photorealistic, hats");
   });
 
+  it("opens Advanced when a style pre-fills a knob there, and never closes it on its own", async () => {
+    const sizeOnly = { ...plain, id: "sizeonly", title: "Size only", defaults: { size: "zz-wide" } };
+    await mount({ ...advanced(), styles: [plain, anime, sizeOnly] }, job);
+    const box = q<HTMLDetailsElement>("#advanced-box")!;
+    expect(box.open).toBe(false);
+    click("Size only"); // pre-fills nothing inside Advanced: stays closed
+    expect(box.open).toBe(false);
+    click("Anime");
+    expect(box.open).toBe(true); // the pre-filled negative prompt and guidance are visible before any submit
+    box.open = false; // the user closes it
+    click("Standard"); // leaving the style undoes the pre-fill but does not reopen or close anything
+    expect(box.open).toBe(false);
+    click("Plain");
+    expect(box.open).toBe(false);
+    box.open = true; // the user opens it
+    click("Standard");
+    expect(box.open).toBe(true);
+  });
+
   it("a style's defaults never touch the form in another mode", async () => {
     await mount({ ...advanced(), edit: editInfo, styles: [anime] }, job);
     click("Anime");

@@ -176,5 +176,8 @@ ul { padding: 0; margin: 0; list-style: none; }
 #ref-swap { margin-top: 8px; }
 #advanced-box { margin: 12px 0; }
 #advanced-box summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+/* display: flex drops the native disclosure triangle: draw an expand cue instead. */
+#advanced-box summary::before { content: "\25B8"; content: "\25B8" / ""; display: inline-block; width: 1.2em; color: var(--muted); }
+#advanced-box[open] > summary::before { content: "\25BE"; content: "\25BE" / ""; } /* empty alt text: decorative */
 #advanced-box input[type="range"] { width: 100%; min-height: 44px; }
 #advanced-box textarea { width: 100%; }
