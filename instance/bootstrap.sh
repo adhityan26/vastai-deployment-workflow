@@ -44,10 +44,23 @@ bounded_run() {  # secs outfile command...
 
 # One line for the boot console: on stdout and, unless stdout already is the container log, on PID 1's stdout.
 # Best effort: an unwritable sink is skipped silently and never fails the script.
+# The sink write runs in a background subshell killed after about 2 s: a pipe without a reader (or a full
+# one) must never hold up the boot.
 console_line() {
+  local pid waited=0
   printf '%s\n' "$1"
   if [ -w "$BOOT_LOG_SINK" ] && ! [ /proc/self/fd/1 -ef "$BOOT_LOG_SINK" ]; then
-    { printf '%s\n' "$1" >> "$BOOT_LOG_SINK"; } 2>/dev/null || true
+    ( printf '%s\n' "$1" >> "$BOOT_LOG_SINK" ) 2> /dev/null < /dev/null &
+    pid=$!
+    while kill -0 "$pid" 2> /dev/null; do
+      if [ "$waited" -ge 20 ]; then
+        kill -9 "$pid" 2> /dev/null
+        break
+      fi
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    wait "$pid" 2> /dev/null
   fi
   return 0
 }
@@ -119,67 +132,90 @@ emergency_destroy() {
 
 # --- early network probe (step net_probe) ----------------------------------------------------------------------
 # Vast's advertised download speed does not predict the speed to the model host (2026-10-19: 888 Mbps advertised,
-# 2.8 MB/s from Hugging Face). Before anything heavy runs, download the first NET_PROBE_BYTES of one of the
-# profile's own pinned files and measure the speed; below NET_PROBE_MIN_MBPS (MB/s, 10^6 bytes) twice, 5 s apart,
-# the boot gives up: a few paid seconds instead of a 25 minute wait. No configuration exists yet, so the keys
-# are read from the environment with their schema defaults. The probe never destroys on its own malfunction:
-# curl or awk missing, no usable profile entry, an HTTP error or a stalled transfer are a warning, and the boot
-# goes on (the web's slow-boot rules still apply). No token is sent: the pinned files are public.
+# 2.8 MB/s from Hugging Face). Before anything heavy runs, read the first NET_PROBE_BYTES of the profile's
+# largest pinned file (the repo and CDN path of the big downloads) in two halves over one connection and time
+# only the second half: the first one pays for TCP slow start and the TLS/redirect setup, which on a long RTT
+# makes a healthy 55 MB/s link look like 20. Below NET_PROBE_MIN_MBPS (MB/s, 10^6 bytes) twice, 5 s apart, the
+# boot gives up: a few paid seconds instead of a 25 minute wait. A container restart (the first-boot time file
+# exists) or a disk that already holds every pinned file never probes: such an instance is never destroyed here.
+# No configuration exists yet, so the keys are read from the environment with their schema defaults. The probe
+# never destroys on its own malfunction: curl or awk missing, no usable profile entry, an HTTP error, a stalled
+# or too short transfer are a warning, and the boot goes on (the web's slow-boot rules still apply). No token is
+# sent: the pinned files are public.
 
-net_probe_url() {  # min_bytes: the URL of the profile file to probe (stdout), via the standard-library helper
+net_probe_profile() {  # the profile file, or fails
   local profile="$HERE/profiles/${PROFILE:-}.yaml"  # config-lint: ok (PROFILE comes from the web, schema key)
-  [ -n "${PROFILE:-}" ] && [ -f "$profile" ] || return 1
-  command -v python3 > /dev/null 2>&1 || return 1
+  [ -n "${PROFILE:-}" ] && [ -f "$profile" ] && command -v python3 > /dev/null 2>&1 || return 1
+  printf '%s\n' "$profile"
+}
+
+net_probe_url() {  # the URL of the profile file to probe (stdout), via the standard-library helper
+  local profile
+  profile="$(net_probe_profile)" || return 1
   python3 -I "$HERE/agent/vastcomfy_agent/net_probe.py" url --profile "$profile" \
-    --base "${HF_BASE_URL:-https://huggingface.co}" --min-bytes "$1" 2> /dev/null  # config-lint: ok (before the schema can be read; schema default of HF_BASE_URL)
+    --base "${HF_BASE_URL:-https://huggingface.co}" 2> /dev/null  # config-lint: ok (before the schema can be read; schema default of HF_BASE_URL)
 }
 
-# url bytes max_s: one ranged download, printing the speed in MB/s (one decimal). Fails on a probe malfunction:
-# a curl error other than its own timeout, an HTTP status other than 200/206, or too little data to measure.
-# The speed counts the body only (from the first byte to the end), not DNS, TLS or the redirect.
+# A restart of this container, or every pinned model already on disk: nothing to measure the network for.
+net_probe_not_needed() {
+  local state="${STATE_DIR:-/var/lib/vastcomfy}" comfy="${COMFY_DIR:-/workspace/ComfyUI}" profile  # config-lint: ok (before the schema can be read; schema defaults of STATE_DIR and COMFY_DIR)
+  if [ -e "$state/first_boot_at" ]; then
+    echo "bootstrap: network probe skipped (container restart)" >&2
+    return 0
+  fi
+  profile="$(net_probe_profile)" || return 1
+  if python3 -I "$HERE/agent/vastcomfy_agent/net_probe.py" present --profile "$profile" --comfy-dir "$comfy" 2> /dev/null; then
+    echo "bootstrap: network probe skipped (models already present)" >&2
+    return 0
+  fi
+  return 1
+}
+
+# url bytes max_s: the range in two halves over one connection (curl --next reuses it); prints the speed of the
+# SECOND half in MB/s (one decimal), from its first body byte to its end. A sample is valid with at least 4 MiB
+# or 2 s of body, also when curl's time cap (exit 28) cut it; anything else is a probe malfunction (fails).
 net_probe_measure() {
-  local out rc
-  out="$(curl -sS -L -o /dev/null -r "0-$(($2 - 1))" --max-time "$3" \
-    -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' "$1" 2> /dev/null)"
+  local out rc half=$(($2 / 2)) fmt='%{http_code} %{size_download} %{time_starttransfer} %{time_total}\n'
+  out="$(curl -sS -L -o /dev/null -r "0-$((half - 1))" --max-time "$3" -w "$fmt" "$1" \
+    --next -sS -L -o /dev/null -r "$half-$(($2 - 1))" --max-time "$3" -w "$fmt" "$1" 2> /dev/null)"
   rc=$?
-  case "$rc" in 0|28) ;; *) return 1 ;; esac  # 28: the time cap cut the transfer; what arrived still measures the link
-  set -- $out
-  [ "$#" -eq 4 ] || return 1
-  case "$1" in 200|206) ;; *) return 1 ;; esac
-  awk -v rc="$rc" -v size="$2" -v first="$3" -v total="$4" 'BEGIN {
-    if (size + 0 <= 0 || (rc == 0 && size + 0 < 1048576)) exit 1
-    body = total - first
+  case "$rc" in 0|28) ;; *) return 1 ;; esac
+  printf '%s\n' "$out" | awk 'NR == 2 {
+    if (NF != 4 || ($1 != "200" && $1 != "206")) exit 1
+    size = $2 + 0; body = $4 - $3
+    if (size <= 0 || (size < 4194304 && body < 2)) exit 1
     if (body < 0.001) body = 0.001
-    printf "%.1f\n", size / body / 1000000
-  }'
+    printf "%.1f\n", size / body / 1000000; found = 1
+  } END { if (!found) exit 1 }'
 }
 
-# Returns 1 only when the network is too slow twice; 0 otherwise (also when the probe is off or broken).
+# Returns 1 only when the network is too slow twice; 0 otherwise (also when the probe is off, not needed or broken).
 net_probe() {
-  local bytes="${NET_PROBE_BYTES:-25165824}" min="${NET_PROBE_MIN_MBPS:-20}" url max_s speed attempt=1  # config-lint: ok (before the schema can be read; schema defaults of NET_PROBE_BYTES and NET_PROBE_MIN_MBPS)
+  local bytes="${NET_PROBE_BYTES:-50331648}" min="${NET_PROBE_MIN_MBPS:-6}" url max_s speed attempt=1  # config-lint: ok (before the schema can be read; schema defaults of NET_PROBE_BYTES and NET_PROBE_MIN_MBPS)
   case "$bytes" in ''|*[!0-9]*) echo "bootstrap: warning: network probe skipped (NET_PROBE_BYTES is not a number)" >&2; return 0 ;; esac
   case "$min" in ''|*[!0-9]*) echo "bootstrap: warning: network probe skipped (NET_PROBE_MIN_MBPS is not a number)" >&2; return 0 ;; esac
   if [ "$min" -eq 0 ]; then
     echo "bootstrap: network probe off (NET_PROBE_MIN_MBPS=0)" >&2
     return 0
   fi
-  if [ "$bytes" -lt 1048576 ]; then
-    echo "bootstrap: warning: network probe skipped (NET_PROBE_BYTES below 1 MiB)" >&2
+  if [ "$bytes" -lt 2097152 ]; then
+    echo "bootstrap: warning: network probe skipped (NET_PROBE_BYTES below 2 MiB)" >&2
     return 0
   fi
+  net_probe_not_needed && return 0
   if ! command -v curl > /dev/null 2>&1 || ! command -v awk > /dev/null 2>&1; then
     echo "bootstrap: warning: network probe skipped (curl or awk missing)" >&2
     return 0
   fi
-  if ! url="$(net_probe_url "$bytes")" || [ -z "$url" ]; then
+  if ! url="$(net_probe_url)" || [ -z "$url" ]; then
     echo "bootstrap: warning: network probe skipped (no pinned model file found in the profile)" >&2
     return 0
   fi
-  # Long enough for the range at twice the minimum time, plus connection setup; a slower link is cut and measured.
+  # Per half: long enough for the whole range at the minimum speed, plus connection setup; a slower link is cut.
   max_s=$((15 + 2 * bytes / (min * 1000000)))
   while :; do
     if ! speed="$(net_probe_measure "$url" "$bytes" "$max_s")"; then
-      echo "bootstrap: warning: network probe failed (download error); continuing without it" >&2
+      echo "bootstrap: warning: network probe failed (download error or too little data); continuing without it" >&2
       return 0
     fi
     console_line "[boot] net_probe: measured $speed MB/s (minimum $min MB/s)"

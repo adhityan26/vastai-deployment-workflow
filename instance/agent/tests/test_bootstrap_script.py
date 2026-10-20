@@ -190,7 +190,7 @@ def test_bootstrap_uses_the_venv_python_for_the_boot_cli():
     assert "COMFY_PYTHON" not in SCRIPT.read_text()
 
 
-@pytest.mark.parametrize("key", ["VENV_DIR", "VASTAI_VERSION", "NET_PROBE_BYTES", "NET_PROBE_MIN_MBPS", "HF_BASE_URL"])
+@pytest.mark.parametrize("key", ["VENV_DIR", "VASTAI_VERSION", "NET_PROBE_BYTES", "NET_PROBE_MIN_MBPS", "HF_BASE_URL", "STATE_DIR", "COMFY_DIR"])
 def test_pre_config_fallbacks_match_the_schema_defaults(key):
     assert f'${{{key}:-{schema_default(key)}}}' in SCRIPT.read_text()
 
@@ -803,10 +803,10 @@ def test_the_probe_sends_no_token_and_names_no_url():
 
 
 def probe_curl(bindir, tmp_path, answers):
-    """Fake curl: call n prints answers[n-1] = (write_out, rc) to stdout and exits rc; args are logged."""
+    """Fake curl: call n prints answers[n-1] = (write_out, rc) (printf %b: \n are line breaks) and exits rc."""
     count = tmp_path / "curl.count"
     log = tmp_path / "curl.log"
-    cases = "".join(f"  {n}) printf '%s' '{out}'; exit {rc};;\n" for n, (out, rc) in enumerate(answers, 1))
+    cases = "".join(f"  {n}) printf '%b' '{out}'; exit {rc};;\n" for n, (out, rc) in enumerate(answers, 1))
     write_exec(bindir / "curl",
                f'#!/bin/sh\nn=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"\n'
                f'printf "%s\\n" "$*" >> "{log}"\ncase "$n" in\n{cases}esac\nexit 0\n')
@@ -814,7 +814,7 @@ def probe_curl(bindir, tmp_path, answers):
 
 
 def probe_env(tmp_path, **extra):
-    env = {"PROFILE": "image", "NET_PROBE_BYTES": "25165824", "NET_PROBE_MIN_MBPS": "20"}
+    env = {"PROFILE": "image", "STATE_DIR": str(tmp_path / "state"), "COMFY_DIR": str(tmp_path / "comfy")}
     env.update(extra)
     return env
 
@@ -829,28 +829,45 @@ def run_probe(tmp_path, bindir, answers, snippet="net_probe; echo rc=$?", **env)
     return result, calls, sink.read_text()
 
 
-FAST = ("206 25165824 0.500 0.957", 0)   # about 55 MB/s (the healthy Quebec boot)
-SLOW = ("206 25165824 0.500 9.500", 0)   # about 2.8 MB/s (the Lithuania boot)
+HALF = 25165824  # the default 48 MiB range in two halves over one connection
 
 
-def test_a_fast_network_passes_with_one_ranged_download_of_the_profiles_own_file(tmp_path, bindir):
+def two(first, second, rc=0):
+    """curl's write-out for the two halves (code size time_starttransfer time_total), and its exit code."""
+    return (f"{first}\\n{second}\\n", rc)
+
+
+WARM = f"206 {HALF} 0.500 1.800"  # the first half, slowed by TCP slow start (19 MB/s)
+FAST = two(WARM, f"206 {HALF} 0.050 0.5076")   # second half about 55 MB/s (the healthy Quebec boot)
+SLOW = two(f"206 {HALF} 0.500 9.500", f"206 {HALF} 0.050 9.038")   # about 2.8 MB/s (the Lithuania boot)
+
+
+def test_a_fast_network_passes_measured_on_the_warm_second_half_of_the_largest_files_repo(tmp_path, bindir):
     result, calls, sink = run_probe(tmp_path, bindir, [FAST])
     assert result.stdout.strip().splitlines()[-1] == "rc=0", result.stderr
     assert len(calls) == 1
-    assert "-r 0-25165823" in calls[0] and "-L" in calls[0] and "--max-time 17" in calls[0]
-    # The smallest pinned model of at least 24 MiB in the shipped profile (the upscale model).
-    assert calls[0].endswith(
-        "https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged/resolve/5fd49b7b278836f48af63ecd314d0f98ab336105/"
-        "RealESRGAN_x4plus.safetensors")
-    assert "[boot] net_probe: measured 55.1 MB/s (minimum 20 MB/s)" in result.stdout
-    assert sink.splitlines() == ["[boot] net_probe: measured 55.1 MB/s (minimum 20 MB/s)"]
+    call = calls[0]
+    assert "-r 0-25165823" in call and "--next" in call and "-r 25165824-50331647" in call
+    assert call.count("--max-time 31") == 2 and call.count("-L") == 2
+    # The largest pinned model (the text encoder): the repo and CDN path of the big downloads.
+    url = ("https://huggingface.co/0xSojalSec/Qwen-Image-2.1-Uncensored-HF/resolve/"
+           "d94be5d7a09b47b0211b03d0f23d20bc18203358/text_encoders/qwen3vl_8b_int8_convrot.safetensors")
+    assert call.count(url) == 2
+    assert sink.splitlines() == ["[boot] net_probe: measured 55.0 MB/s (minimum 6 MB/s)"]
+
+
+def test_slow_start_alone_never_fails_a_healthy_link(tmp_path, bindir):
+    # A 55 MB/s link with a long RTT reads about 19.6 MB/s over its first 24 MiB; only the second half counts.
+    result, calls, _ = run_probe(tmp_path, bindir, [two(f"206 {HALF} 0.500 1.784", f"206 {HALF} 0.050 1.334")])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert "measured 19.6 MB/s" in result.stdout
 
 
 def test_a_slow_network_is_retried_once_and_then_reported(tmp_path, bindir):
     result, calls, _ = run_probe(tmp_path, bindir, [SLOW, SLOW])
     assert result.stdout.strip().splitlines()[-1] == "rc=1"
     assert len(calls) == 2
-    assert result.stdout.count("[boot] net_probe: measured 2.8 MB/s (minimum 20 MB/s)") == 2
+    assert result.stdout.count("[boot] net_probe: measured 2.8 MB/s (minimum 6 MB/s)") == 2
 
 
 def test_a_transient_dip_passes_on_the_retry(tmp_path, bindir):
@@ -858,14 +875,18 @@ def test_a_transient_dip_passes_on_the_retry(tmp_path, bindir):
     assert result.stdout.strip().splitlines()[-1] == "rc=0" and len(calls) == 2
 
 
-def test_a_cut_slow_transfer_still_measures_the_link(tmp_path, bindir):
-    result, calls, _ = run_probe(tmp_path, bindir, [("206 3000000 0.500 17.000", 28)] * 2)
+def test_a_cut_slow_transfer_measures_the_link_when_enough_body_arrived(tmp_path, bindir):
+    # Timed out (28) after 3 s of body: a valid sample of a slow link.
+    result, _, _ = run_probe(tmp_path, bindir, [two(f"206 {HALF} 0.5 31.0", "206 3000000 0.5 3.5", 28)] * 2)
     assert result.stdout.strip().splitlines()[-1] == "rc=1"
-    assert "measured 0.2 MB/s" in result.stdout
+    assert "measured 1.0 MB/s" in result.stdout
 
 
-@pytest.mark.parametrize("answer", [("000 0 0 0", 6), ("403 0 0.2 0.2", 0), ("206 0 0 17.0", 28), ("206 1000 0.1 0.2", 0),
-                                    ("garbage", 0), ("200 x", 0)])
+@pytest.mark.parametrize("answer", [
+    ("000 0 0 0\\n", 6), two(WARM, "403 0 0.2 0.2"), two(WARM, "206 0 0 31.0", 28),
+    two(WARM, "206 1000000 0.5 1.5", 28),  # timed out with under 4 MiB and under 2 s of body: no sample
+    two(WARM, "206 1000 0.1 0.2"), ("garbage\\n", 0), (f"{WARM}\\n", 0), two(WARM, "200 x"),
+])
 def test_a_probe_malfunction_is_a_warning_and_the_boot_goes_on(tmp_path, bindir, answer):
     result, calls, sink = run_probe(tmp_path, bindir, [answer, answer])
     assert result.stdout.strip().splitlines()[-1] == "rc=0"
@@ -878,7 +899,7 @@ def test_a_probe_malfunction_is_a_warning_and_the_boot_goes_on(tmp_path, bindir,
     ({"NET_PROBE_MIN_MBPS": "0"}, "network probe off"),
     ({"NET_PROBE_BYTES": "12x"}, "NET_PROBE_BYTES is not a number"),
     ({"NET_PROBE_MIN_MBPS": "-1"}, "NET_PROBE_MIN_MBPS is not a number"),
-    ({"NET_PROBE_BYTES": "1048575"}, "below 1 MiB"),
+    ({"NET_PROBE_BYTES": "2097151"}, "below 2 MiB"),
     ({"PROFILE": "no-such-profile"}, "no pinned model file"),
     ({"PROFILE": ""}, "no pinned model file"),
     ({"HF_BASE_URL": "ftp://x"}, "no pinned model file"),
@@ -887,6 +908,33 @@ def test_the_probe_is_skipped_without_a_download_when_off_or_misconfigured(tmp_p
     result, calls, _ = run_probe(tmp_path, bindir, [SLOW], **env)
     assert result.stdout.strip().splitlines()[-1] == "rc=0"
     assert calls == [] and warning in result.stderr
+
+
+def test_a_container_restart_never_probes(tmp_path, bindir):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "first_boot_at").write_text("1800000000\n")
+    result, calls, _ = run_probe(tmp_path, bindir, [SLOW, SLOW])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert calls == [] and "container restart" in result.stderr
+
+
+def test_with_every_pinned_model_already_present_it_never_probes(tmp_path, bindir):
+    import yaml
+
+    profile = yaml.safe_load((INSTANCE / "profiles" / "image.yaml").read_text())
+    for m in profile["models"]:
+        target = tmp_path / "comfy" / m["dest"] / Path(m["file"]).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.truncate(m["size_bytes"])  # sparse: right size, no disk
+    result, calls, _ = run_probe(tmp_path, bindir, [SLOW, SLOW])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert calls == [] and "models already present" in result.stderr
+
+
+def test_one_model_missing_still_probes(tmp_path, bindir):
+    result, calls, _ = run_probe(tmp_path, bindir, [FAST])
+    assert len(calls) == 1
 
 
 def test_without_curl_the_probe_is_skipped(tmp_path, bindir):
@@ -898,6 +946,15 @@ def test_without_curl_the_probe_is_skipped(tmp_path, bindir):
     result = source_and_run(tmp_path, f'PATH="{only}"; net_probe; echo rc=$?', probe_env(tmp_path))
     assert result.stdout.strip().splitlines()[-1] == "rc=0"
     assert "curl or awk missing" in result.stderr
+
+
+def test_console_line_never_blocks_on_a_sink_without_a_reader(tmp_path, bindir):
+    fifo = tmp_path / "pid1"
+    os.mkfifo(fifo)  # opening it for writing blocks until a reader comes: none ever does
+    started = time.monotonic()
+    result = source_and_run(tmp_path, f'BOOT_LOG_SINK="{fifo}"; console_line hello; console_line again; echo rc=$?')
+    assert time.monotonic() - started < 10
+    assert result.stdout.splitlines() == ["hello", "again", "rc=0"]
 
 
 def test_slow_network_prints_the_failed_marker_and_destroys_with_the_stock_cli_and_code_14(tmp_path, bindir):

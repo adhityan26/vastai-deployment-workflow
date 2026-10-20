@@ -19,12 +19,10 @@ def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
     assert len(from_yaml) == 5
 
 
-def test_the_smallest_file_at_least_the_probe_range_is_chosen(tmp_path):
-    url = net_probe.probe_url(PROFILES / "image.yaml", "https://huggingface.co/", 24 * MIB)
-    assert url == ("https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged/resolve/"
-                   "5fd49b7b278836f48af63ecd314d0f98ab336105/RealESRGAN_x4plus.safetensors")
-    # Above the upscale model's 66.9 MB the LoRA (318.8 MB) is the smallest large enough.
-    assert "Qwen2.1_Anything2RealCharacters.safetensors" in net_probe.probe_url(PROFILES / "image.yaml", "https://h.test", 100 * MIB)
+def test_the_largest_pinned_file_is_probed_the_repo_and_cdn_path_of_the_big_downloads():
+    url = net_probe.probe_url(PROFILES / "image.yaml", "https://huggingface.co/")
+    assert url == ("https://huggingface.co/0xSojalSec/Qwen-Image-2.1-Uncensored-HF/resolve/"
+                   "d94be5d7a09b47b0211b03d0f23d20bc18203358/text_encoders/qwen3vl_8b_int8_convrot.safetensors")
 
 
 PROFILE = """
@@ -39,18 +37,19 @@ workflows: [x.json]
 """
 
 
-def test_without_a_file_large_enough_the_largest_is_used_and_bad_entries_are_skipped(tmp_path):
+def test_bad_entries_are_skipped(tmp_path):
     path = tmp_path / "p.yaml"
     path.write_text(PROFILE)
-    assert net_probe.probe_url(path, "https://h.test", 100) == "https://h.test/org/two/resolve/r2/big.bin"
-    assert net_probe.probe_url(path, "https://h.test", 5) == "https://h.test/org/one/resolve/r1/dir/a%20b.bin"
+    assert net_probe.probe_url(path, "https://h.test") == "https://h.test/org/two/resolve/r2/big.bin"
+    path.write_text(PROFILE.replace("size_bytes: 30", "size_bytes: 3"))
+    assert net_probe.probe_url(path, "https://h.test") == "https://h.test/org/one/resolve/r1/dir/a%20b.bin"
 
 
 def test_the_flow_parser_is_the_fallback_without_pyyaml(tmp_path, monkeypatch):
     path = tmp_path / "p.yaml"
     path.write_text(PROFILE)
     monkeypatch.setitem(sys.modules, "yaml", None)  # import yaml now raises ImportError
-    assert net_probe.probe_url(path, "https://h.test", 100) == "https://h.test/org/two/resolve/r2/big.bin"
+    assert net_probe.probe_url(path, "https://h.test") == "https://h.test/org/two/resolve/r2/big.bin"
 
 
 def run(*args):
@@ -58,18 +57,41 @@ def run(*args):
 
 
 def test_the_script_runs_standalone_in_isolated_mode():
-    result = run("url", "--profile", str(PROFILES / "image.yaml"), "--base", "https://huggingface.co", "--min-bytes", str(24 * MIB))
-    assert result.returncode == 0 and result.stdout.strip().endswith("/RealESRGAN_x4plus.safetensors")
+    result = run("url", "--profile", str(PROFILES / "image.yaml"), "--base", "https://huggingface.co")
+    assert result.returncode == 0 and result.stdout.strip().endswith("/qwen3vl_8b_int8_convrot.safetensors")
 
 
 @pytest.mark.parametrize("profile,base", [("missing.yaml", "https://huggingface.co"), ("image.yaml", "ftp://x"),
                                           ("image.yaml", "https://h.test/path?q")])
 def test_any_doubt_exits_non_zero_without_output(profile, base):
-    result = run("url", "--profile", str(PROFILES / profile), "--base", base, "--min-bytes", "1")
+    result = run("url", "--profile", str(PROFILES / profile), "--base", base)
     assert result.returncode == 1 and result.stdout == ""
 
 
 def test_a_profile_without_models_gives_no_url(tmp_path):
     path = tmp_path / "p.yaml"
     path.write_text("name: p\nmodels: []\n")
-    assert net_probe.probe_url(path, "https://h.test", 1) is None
+    assert net_probe.probe_url(path, "https://h.test") is None
+
+
+def place(comfy, entries):
+    for dest, name, size in entries:
+        target = comfy / dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.truncate(size)
+
+
+def test_present_says_yes_only_when_every_valid_pinned_file_has_its_size(tmp_path):
+    path = tmp_path / "p.yaml"
+    path.write_text(PROFILE)
+    comfy = tmp_path / "comfy"
+    args = ["present", "--profile", str(path), "--comfy-dir", str(comfy)]
+    assert run(*args).returncode == 1
+    place(comfy, [("models/x/", "a b.bin", 10)])
+    assert run(*args).returncode == 1
+    place(comfy, [("models/x/", "big.bin", 29)])
+    assert run(*args).returncode == 1  # wrong size
+    place(comfy, [("models/x/", "big.bin", 30)])
+    assert run(*args).returncode == 0
+    assert run("present", "--profile", str(tmp_path / "missing.yaml"), "--comfy-dir", str(comfy)).returncode == 1

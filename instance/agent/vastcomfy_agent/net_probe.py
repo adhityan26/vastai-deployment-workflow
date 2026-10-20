@@ -7,15 +7,17 @@ parser of the one-line flow mappings the profiles use. Any doubt (unreadable pro
 a value outside the expected characters) exits non-zero: the probe is best effort and bootstrap then
 continues without it.
 
-The URL is the profile's own pinned file (never a hardcoded one): the smallest pinned model that is at
-least as large as the probe range, else the largest one.
+The URL is the profile's own pinned file (never a hardcoded one): the LARGEST pinned model, so the probe
+takes the repo and CDN path (Hugging Face's xet/LFS storage) that carries most of the boot download; only a
+small range of it is read. `present` tells bootstrap that every pinned file is already in place (a restart
+or a reused disk), in which case it does not probe at all.
 """
 from __future__ import annotations
 
 import argparse
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
@@ -70,13 +72,36 @@ def _valid(entry: dict) -> tuple[str, str, str, int] | None:
     return file, repo, revision, int(size)
 
 
-def probe_url(profile: Path, base: str, min_bytes: int) -> str | None:
-    entries = [v for v in (_valid(m) for m in read_models(profile)) if v is not None and v[3] > 0]
+def _entries(profile: Path) -> list[tuple[str, str, str, int, str]]:
+    out = []
+    for m in read_models(profile):
+        valid = _valid(m)
+        dest = str(m.get("dest", ""))
+        if valid is not None and valid[3] > 0:
+            out.append((*valid, dest))
+    return out
+
+
+def probe_url(profile: Path, base: str) -> str | None:
+    entries = _entries(profile)
     if not entries:
         return None
-    big_enough = [e for e in entries if e[3] >= min_bytes]
-    file, repo, revision, _size = min(big_enough, key=lambda e: e[3]) if big_enough else max(entries, key=lambda e: e[3])
+    file, repo, revision, _size, _dest = max(entries, key=lambda e: e[3])
     return f"{base.rstrip('/')}/{repo}/resolve/{quote(revision)}/{quote(file)}"
+
+
+def all_present(profile: Path, comfy_dir: Path) -> bool:
+    """Every pinned file sits at COMFY_DIR/<dest>/<basename> with its pinned size (as the agent places them)."""
+    entries = _entries(profile)
+    if not entries:
+        return False
+    for file, _repo, _revision, size, dest in entries:
+        if dest.startswith("/") or ".." in PurePosixPath(dest).parts:
+            return False
+        target = comfy_dir / dest / PurePosixPath(file).name
+        if not target.is_file() or target.stat().st_size != size:
+            return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,12 +110,19 @@ def main(argv: list[str] | None = None) -> int:
     url = sub.add_parser("url")
     url.add_argument("--profile", type=Path, required=True)
     url.add_argument("--base", required=True)
-    url.add_argument("--min-bytes", type=int, required=True)
+    present = sub.add_parser("present")
+    present.add_argument("--profile", type=Path, required=True)
+    present.add_argument("--comfy-dir", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "present":
+        try:
+            return EXIT_OK if all_present(args.profile, args.comfy_dir) else EXIT_NO_URL
+        except Exception:  # best effort: any doubt means "not all present", so the probe runs
+            return EXIT_NO_URL
     if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?", args.base):  # config-lint: ok (URL shape check, no URL)
         return EXIT_NO_URL
     try:
-        found = probe_url(args.profile, args.base, args.min_bytes)
+        found = probe_url(args.profile, args.base)
     except Exception:  # best effort: any problem means "no probe"
         return EXIT_NO_URL
     if found is None:
