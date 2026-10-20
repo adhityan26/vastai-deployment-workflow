@@ -54,6 +54,8 @@ export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-l
 export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // The menu entry the user chose last (an entry id only; checked against the current menu before use).
 export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
+// Layout rule (the same breakpoint as style.css): from this width the menu is a fixed sidebar, below it a drawer.
+export const WIDE_SCREEN_QUERY = "(min-width: 900px)";
 // Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
 export const SPEED_WINDOW_SAMPLES = 6;
 export const SPEED_MAX_GAP_MS = 120_000;
@@ -937,6 +939,14 @@ export function matchesQuery(entry: MenuEntry, query: string): boolean {
   const q = query.trim().toLocaleLowerCase();
   if (q === "") return true;
   return entry.title.toLocaleLowerCase().includes(q) || (entry.description ?? "").toLocaleLowerCase().includes(q);
+}
+
+/** The entries that match the search, under their category in menu order; categories without a match are left out. */
+export function menuGroups(menu: MenuInfo, query: string): { category: MenuCategory; items: MenuEntry[] }[] {
+  return menu.categories.flatMap((category) => {
+    const items = menu.items.filter((i) => i.category === category.id && matchesQuery(i, query));
+    return items.length === 0 ? [] : [{ category, items }];
+  });
 }
 
 /** The ways to continue from a result: every edit entry ("Use as reference", with the style's title), then upscale. */
