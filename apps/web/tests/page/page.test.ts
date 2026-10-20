@@ -66,6 +66,11 @@ async function mount(state: Record<string, unknown> = {}, extra: Record<string, 
 
 const q = <T extends Element = HTMLElement>(sel: string): T | null => document.querySelector<T>(sel);
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0)); };
+/** The menu: an entry by id, the id of the current one, and a click by id or by visible title. */
+const menuItem = (id: string) => document.querySelector<HTMLButtonElement>(`.menu-item[data-tool-id="${id}"]`);
+const currentTool = () => document.querySelector(".menu-item[aria-current]")?.getAttribute("data-tool-id") ?? null;
+const chooseTool = (id: string) => menuItem(id)!.click();
+const chooseByTitle = (title: string) => [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((b) => b.querySelector(".menu-title")?.textContent === title)!.click();
 const posts = (path: string) => calls.filter((c) => c.method === "POST" && c.path === path);
 
 beforeEach(() => {
@@ -745,7 +750,7 @@ describe("edit with reference images", () => {
     input.dispatchEvent(new Event("change"));
   }
   const b64 = (text: string) => Buffer.from(text).toString("base64");
-  const chooseEdit = () => q<HTMLButtonElement>("#mode-edit")!.click();
+  const chooseEdit = () => chooseTool("edit");
   const tags = () => [...document.querySelectorAll("#ref-list .ref-tag")].map((n) => n.textContent);
 
   let created: string[] = [];
@@ -763,11 +768,11 @@ describe("edit with reference images", () => {
 
   it("offers the mode switch only when the server offers edit, and switches the form", async () => {
     await mount();
-    expect(q("#mode-box")!.hidden).toBe(true);
+    expect(menuItem("edit")).toBeNull();
     expect(q("#edit-box")!.hidden).toBe(true);
     routes["GET /api/state"] = { body: apiState({ edit: editInfo }) };
     await app!.refresh();
-    expect(q("#mode-box")!.hidden).toBe(false);
+    expect(menuItem("edit")).not.toBeNull();
     expect(q("#edit-box")!.hidden).toBe(true);
     expect(q("#size-box")!.hidden).toBe(false);
     expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
@@ -775,11 +780,11 @@ describe("edit with reference images", () => {
     chooseEdit();
     expect(q("#edit-box")!.hidden).toBe(false);
     expect(q("#size-box")!.hidden).toBe(true);
-    expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
-    expect(q("#mode-generate")!.getAttribute("aria-pressed")).toBe("false");
+    expect(currentTool()).toBe("edit");
+    expect(currentTool()).not.toBe("generate");
     expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Edit");
 
-    q<HTMLButtonElement>("#mode-generate")!.click();
+    chooseTool("generate");
     expect(q("#edit-box")!.hidden).toBe(true);
     expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
   });
@@ -793,7 +798,7 @@ describe("edit with reference images", () => {
     q<HTMLSelectElement>("#resolution")!.value = "zz-res-2";
     await app!.refresh();
     expect(q<HTMLSelectElement>("#resolution")!.value).toBe("zz-res-2");
-    expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+    expect(currentTool()).toBe("edit");
   });
 
   it("shows previews tagged <image1>, <image2>, removes one, and releases the preview url", async () => {
@@ -922,7 +927,8 @@ describe("edit with reference images", () => {
     expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
     routes["GET /api/state"] = { body: apiState({ state: "ready", edit: null }) };
     await app!.refresh();
-    expect(q("#mode-box")!.hidden).toBe(true);
+    expect(menuItem("edit")).toBeNull();
+    expect(currentTool()).toBe("generate");
     expect(q("#edit-box")!.hidden).toBe(true);
     expect(q("#size-box")!.hidden).toBe(false);
     expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
@@ -1140,11 +1146,11 @@ describe("gallery: save, auto-save and the gallery card", () => {
       expect(buttons().map((b) => b.textContent)).toEqual(["Use as reference", "Upscale"]);
       buttons()[0]!.click();
       await flush();
-      expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+      expect(currentTool()).toBe("edit");
       expect(q("#ref-list .ref-name")!.textContent).toBe(`saved-${GID(1).slice(0, 8)}.png`);
       buttons()[1]!.click();
       await flush();
-      expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+      expect(currentTool()).toBe("upscale");
       expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
     });
 
@@ -1290,10 +1296,10 @@ describe("styles and chaining", () => {
       { id: "sharp", title: "Sharp", type: "bool", default: false },
     ],
   };
-  const chooseEdit = () => q<HTMLButtonElement>("#mode-edit")!.click();
-  const styleButtons = () => [...document.querySelectorAll("#styles button")].map((b) => b.textContent);
-  const pressed = () => [...document.querySelectorAll("#styles button")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent);
-  const click = (title: string) => [...document.querySelectorAll<HTMLButtonElement>("#styles button")].find((b) => b.textContent === title)!.click();
+  const chooseEdit = () => chooseTool("edit");
+  const titles = () => [...document.querySelectorAll(".menu-item .menu-title")].map((b) => b.textContent);
+  const pressed = () => [menuItem(currentTool()!)!.querySelector(".menu-title")!.textContent];
+  const click = chooseByTitle;
 
   beforeEach(() => {
     window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
@@ -1331,7 +1337,7 @@ describe("styles and chaining", () => {
       expect(names()).toEqual(["scene.png", "face.png"]);
       q<HTMLButtonElement>("#ref-swap")!.click();
       expect(names()).toEqual(["face.png", "scene.png"]);
-      click("Standard"); // back to the plain edit: plain <imageN> tags, no swap, prompt required
+      chooseTool("edit"); // back to the plain edit: plain <imageN> tags, no swap, prompt required
       expect(slots()).toEqual(["<image1>", "<image2>"]);
       expect(q("#ref-swap")!.hidden).toBe(true);
       expect(q("#style-hint")!.hidden).toBe(true);
@@ -1383,14 +1389,16 @@ describe("styles and chaining", () => {
     });
   });
 
-  it("hides the style box when no style is listed for the mode, and lists Standard first otherwise", async () => {
+  it("lists each style as its own entry in the tool menu, after the plain tools", async () => {
     await mount({ edit: editInfo, styles: [a2r] });
-    expect(q("#style-box")!.hidden).toBe(true); // generate: the style is edit-only
+    expect(titles()).toEqual(["Generate", "Edit images", "Upscale", "Anything to Real"].filter((t) => t !== "Upscale"));
+    expect(q("#style-box")!.hidden).toBe(true); // plain generate: no style
     chooseEdit();
+    expect(q("#style-box")!.hidden).toBe(true); // plain edit: no options
+    click("Anything to Real");
     expect(q("#style-box")!.hidden).toBe(false);
-    expect(styleButtons()).toEqual(["Standard", "Anything to Real"]);
-    expect(pressed()).toEqual(["Standard"]);
-    expect(q("#style-params")!.children).toHaveLength(0);
+    expect(pressed()).toEqual(["Anything to Real"]);
+    expect(q("#gen-title")!.textContent).toBe("Anything to Real");
   });
 
   it("draws the panel of the chosen style from the api and keeps a slider across polls", async () => {
@@ -1436,7 +1444,7 @@ describe("styles and chaining", () => {
     await flush();
     expect(posts("/api/generate")[0]!.body).not.toHaveProperty("style");
 
-    expect(styleButtons()).toEqual(["Standard", "Mixed"]); // a2r is edit-only
+    expect(titles()).toEqual(["Generate", "Edit images", "Anything to Real", "Mixed", "Mixed"]); // a2r is edit-only; Mixed has an entry per mode
     click("Mixed");
     const sel = q<HTMLSelectElement>("#style-params select")!;
     sel.value = "hard";
@@ -1449,13 +1457,14 @@ describe("styles and chaining", () => {
     expect(posts("/api/generate")[1]!.body).toMatchObject({ style: { id: "mixed", params: { kind: "hard", sharp: true } } });
   });
 
-  it("falls back to Standard when the chosen style disappears from the state", async () => {
+  it("falls back to the first entry when the chosen style disappears from the state", async () => {
     await mount({ edit: editInfo, styles: [a2r] });
     chooseEdit();
     click("Anything to Real");
     routes["GET /api/state"] = { body: apiState({ edit: editInfo, styles: [] }) };
     await app!.refresh();
     expect(q("#style-box")!.hidden).toBe(true);
+    expect(currentTool()).toBe("generate");
   });
 
   it("renders a hostile style title and parameter title as text only", async () => {
@@ -1513,10 +1522,10 @@ describe("styles and chaining", () => {
       await withResult();
       q<HTMLButtonElement>(".chain button")!.click();
       await flush();
-      expect(q("#mode-edit")!.getAttribute("aria-pressed")).toBe("true");
+      expect(currentTool()).toBe("edit");
       expect([...document.querySelectorAll("#ref-list .ref-tag")].map((n) => n.textContent)).toEqual(["<image1>"]);
       expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
-      expect(pressed()).toEqual(["Standard"]);
+      expect(pressed()).toEqual(["Edit images"]);
       expect(calls.filter((c) => c.path === "/api/image/g-1/0")).toHaveLength(1);
     });
 
@@ -1546,7 +1555,7 @@ describe("styles and chaining", () => {
 describe("upscale", () => {
   const up = { scales: ["2x", "4x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"] };
   const editInfo = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }] };
-  const chooseUp = () => q<HTMLButtonElement>("#mode-upscale")!.click();
+  const chooseUp = () => chooseTool("upscale");
   const pickOne = (name = "a.png", content = "UPBYTES") => {
     const input = q<HTMLInputElement>("#ref-input")!;
     Object.defineProperty(input, "files", { value: [new File([content], name, { type: "image/png" })], configurable: true });
@@ -1560,12 +1569,12 @@ describe("upscale", () => {
 
   it("offers the mode only when the server offers upscale, and shows just the image and the scale", async () => {
     await mount({ edit: editInfo });
-    expect(q("#mode-upscale")!.hidden).toBe(true);
+    expect(menuItem("upscale")).toBeNull();
     await mount({ upscale: up });
-    expect(q("#mode-box")!.hidden).toBe(false); // upscale alone is enough for the switch
-    expect(q("#mode-edit")!.hidden).toBe(true);
+    expect(menuItem("upscale")).not.toBeNull(); // upscale alone is enough for an entry
+    expect(menuItem("edit")).toBeNull();
     chooseUp();
-    expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+    expect(currentTool()).toBe("upscale");
     expect(q("#prompt-box")!.hidden).toBe(true);
     expect(q("#sampling-box")!.hidden).toBe(true);
     expect(q("#size-box")!.hidden).toBe(true);
@@ -1636,7 +1645,7 @@ describe("upscale", () => {
       expect(labels()).toEqual(["Upscale"]);
       [...document.querySelectorAll<HTMLButtonElement>(".chain button")][0]!.click();
       await flush();
-      expect(q("#mode-upscale")!.getAttribute("aria-pressed")).toBe("true");
+      expect(currentTool()).toBe("upscale");
       expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
     });
 
@@ -1655,7 +1664,7 @@ describe("upscale", () => {
 
   it("refuses to upscale when several images were attached in edit mode", async () => {
     await mount({ upscale: up, edit: editInfo });
-    q<HTMLButtonElement>("#mode-edit")!.click();
+    chooseTool("edit");
     const input = q<HTMLInputElement>("#ref-input")!;
     Object.defineProperty(input, "files", { value: [new File(["A"], "a.png", { type: "image/png" }), new File(["B"], "b.png", { type: "image/png" })], configurable: true });
     input.dispatchEvent(new Event("change"));
@@ -1694,7 +1703,7 @@ describe("Advanced: negative prompt and guidance", () => {
     q<HTMLFormElement>("#gen-form")!.requestSubmit();
     await flush();
   };
-  const click = (title: string) => [...document.querySelectorAll<HTMLButtonElement>("#styles button")].find((b) => b.textContent === title)!.click();
+  const click = chooseByTitle;
   const negative = () => q<HTMLTextAreaElement>("#negative")!;
 
   it("is hidden for a server without it, and the body is exactly the old one", async () => {
@@ -1727,9 +1736,9 @@ describe("Advanced: negative prompt and guidance", () => {
 
   it("offers in each mode only the knobs its workflow takes, and nothing in upscale", async () => {
     await mount({ ...advanced(none), edit: editInfo }, {});
-    q<HTMLButtonElement>("#mode-edit")!.click();
+    chooseTool("edit");
     expect(q("#advanced-box")!.hidden).toBe(true);
-    q<HTMLButtonElement>("#mode-generate")!.click();
+    chooseTool("generate");
     expect(q("#advanced-box")!.hidden).toBe(false);
     routes["GET /api/state"] = { body: apiState({ guidance: null, advanced: { generate: both, edit: none, negative_prompt_max_chars: 200 } }) };
     await app!.refresh();
@@ -1750,7 +1759,7 @@ describe("Advanced: negative prompt and guidance", () => {
       prompt: "", preset: "zz-slow", size: "zz-wide", negative_prompt: "photorealistic", cfg: 3, style: { id: "anime", params: {} },
     });
     negative().value = "photorealistic, hats"; // the user's own change survives leaving the style
-    click("Standard");
+    chooseTool("generate");
     expect(negative().value).toBe("photorealistic, hats");
     expect(q<HTMLInputElement>("#guidance")!.value).toBe("1");
     expect(pressedPreset()).toBe("zz-turbo (7 steps)");
@@ -1769,22 +1778,24 @@ describe("Advanced: negative prompt and guidance", () => {
     click("Anime");
     expect(box.open).toBe(true); // the pre-filled negative prompt and guidance are visible before any submit
     box.open = false; // the user closes it
-    click("Standard"); // leaving the style undoes the pre-fill but does not reopen or close anything
+    chooseTool("generate"); // leaving the style undoes the pre-fill but does not reopen or close anything
     expect(box.open).toBe(false);
     click("Plain");
     expect(box.open).toBe(false);
     box.open = true; // the user opens it
-    click("Standard");
+    chooseTool("generate");
     expect(box.open).toBe(true);
   });
 
   it("a style's defaults never touch the form in another mode", async () => {
     await mount({ ...advanced(), edit: editInfo, styles: [anime] }, job);
     click("Anime");
-    q<HTMLButtonElement>("#mode-edit")!.click(); // the generate style is not chosen in edit: its pre-fill is undone
+    chooseTool("edit"); // the generate style is not chosen in edit: its pre-fill is undone
     expect(negative().value).toBe("");
     expect(q<HTMLInputElement>("#guidance")!.value).toBe("1");
-    q<HTMLButtonElement>("#mode-generate")!.click(); // and comes back with the generate style
+    chooseTool("generate"); // plain generate again: nothing of the style comes back by itself
+    expect(negative().value).toBe("");
+    click("Anime");
     expect(negative().value).toBe("photorealistic");
   });
 });

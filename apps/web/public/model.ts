@@ -52,6 +52,8 @@ const MAX_GPU_NAME = 64; // the API refuses longer names
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
 export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
 export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
+// The menu entry the user chose last (an entry id only; checked against the current menu before use).
+export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
 // Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
 export const SPEED_WINDOW_SAMPLES = 6;
 export const SPEED_MAX_GAP_MS = 120_000;
@@ -141,6 +143,8 @@ export interface ApiState {
   guidance: GuidanceInfo | null;
   /** The Advanced section per mode (negative prompt, guidance). */
   advanced: AdvancedInfo;
+  /** The tool menu as the server lists it; null when it sends none (the page then builds one: usableMenu). */
+  menu: MenuInfo | null;
 }
 
 export interface Estimate {
@@ -395,6 +399,7 @@ export function parseState(json: unknown): ApiState | null {
     upscale: parseUpscale(json["upscale"]),
     guidance: parseGuidance(json["guidance"]),
     advanced: parseAdvanced(json["advanced"]),
+    menu: parseMenu(json["menu"]),
   };
 }
 
@@ -840,6 +845,105 @@ export function isChainableUrl(url: string): boolean {
   if (/^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url)) return true;
   const saved = /^\/api\/gallery\/([^/]+)\/image$/.exec(url);
   return saved !== null && isGalleryId(saved[1]);
+}
+
+// ---- the tool menu ----
+
+export interface MenuCategory { id: string; title: string }
+/** One entry of the tool menu: which request it sends (tool) and with which style. */
+export interface MenuEntry {
+  id: string;
+  title: string;
+  description: string | null;
+  /** A name of the page's built-in icon set (icons.ts draws an unknown one as the default icon). */
+  icon: string;
+  category: string;
+  tool: PageMode;
+  style: string | null;
+  available: boolean;
+}
+export interface MenuInfo { categories: MenuCategory[]; items: MenuEntry[] }
+
+const MENU_ID = /^[a-z][a-z0-9_-]{0,63}$/;
+const MENU_TOOLS: readonly PageMode[] = ["generate", "edit", "upscale"];
+const MENU_TEXT_MAX = 200; // the server sends at most 60 (title) and 120 (description) characters
+const nonBlank = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.length <= MENU_TEXT_MAX;
+
+/** The menu of GET /api/state; null when it is missing or unusable. Entries that cannot be drawn faithfully are left out. */
+function parseMenu(v: unknown): MenuInfo | null {
+  if (!isObj(v) || !Array.isArray(v["categories"]) || !Array.isArray(v["items"])) return null;
+  const categories: MenuCategory[] = [];
+  for (const c of v["categories"]) {
+    if (!isObj(c) || typeof c["id"] !== "string" || !MENU_ID.test(c["id"]) || !nonBlank(c["title"])) continue;
+    if (!categories.some((k) => k.id === c["id"])) categories.push({ id: c["id"], title: c["title"] });
+  }
+  const items: MenuEntry[] = [];
+  for (const i of v["items"]) {
+    if (!isObj(i) || typeof i["id"] !== "string" || !MENU_ID.test(i["id"]) || !nonBlank(i["title"])) continue;
+    const tool = i["tool"] as PageMode;
+    const style = i["style"];
+    if (!MENU_TOOLS.includes(tool) || !categories.some((c) => c.id === i["category"]) || items.some((k) => k.id === i["id"])) continue;
+    if (style !== null && (typeof style !== "string" || !MENU_ID.test(style) || tool === "upscale")) continue;
+    items.push({
+      id: i["id"],
+      title: i["title"],
+      description: nonBlank(i["description"]) ? i["description"] : null,
+      icon: typeof i["icon"] === "string" ? i["icon"] : "",
+      category: i["category"] as string,
+      tool,
+      style: style as string | null,
+      available: i["available"] === true,
+    });
+  }
+  return { categories, items };
+}
+
+/** The category of the menu the page builds when the server sends none. */
+const FALLBACK_CATEGORY: MenuCategory = { id: "tools", title: "Tools" };
+
+/** A menu from what the state offers (the server's menu is missing): the plain tools, then each style per mode. */
+function fallbackMenu(s: ApiState): MenuInfo {
+  const plain = (id: string, title: string, icon: string, tool: PageMode): MenuEntry => ({ id, title, description: null, icon, category: FALLBACK_CATEGORY.id, tool, style: null, available: true });
+  const items = [plain("generate", "Generate", "image", "generate"), plain("edit", "Edit images", "wand", "edit"), plain("upscale", "Upscale", "expand", "upscale")];
+  for (const st of s.styles) {
+    for (const m of st.modes) {
+      items.push({ id: st.modes.length === 1 ? st.id : `${st.id}-${m}`, title: st.title, description: null, icon: m === "edit" ? "wand" : "image", category: FALLBACK_CATEGORY.id, tool: m, style: st.id, available: true });
+    }
+  }
+  return { categories: [FALLBACK_CATEGORY], items };
+}
+
+/**
+ * The entries the page offers now, in menu order: available on the server, their mode offered in this state
+ * (edit and upscale can be off), and their style listed for that mode. Categories without an entry are left out.
+ */
+export function usableMenu(s: ApiState): MenuInfo {
+  const menu = s.menu ?? fallbackMenu(s);
+  const items = menu.items.filter((i) => {
+    if (!i.available) return false;
+    if ((i.tool === "edit" && s.edit === null) || (i.tool === "upscale" && s.upscale === null)) return false;
+    return i.style === null || (i.tool !== "upscale" && s.styles.some((st) => st.id === i.style && st.modes.includes(i.tool as Mode)));
+  });
+  return { categories: menu.categories.filter((c) => items.some((i) => i.category === c.id)), items };
+}
+
+/** The wanted entry when the menu has it, else the first one; null for an empty menu. */
+export function chooseEntry(wanted: string | null, items: readonly MenuEntry[]): MenuEntry | null {
+  return items.find((i) => i.id === wanted) ?? items[0] ?? null;
+}
+
+/** True when an entry matches the search text (title or description, ignoring case); empty text matches all. */
+export function matchesQuery(entry: MenuEntry, query: string): boolean {
+  const q = query.trim().toLocaleLowerCase();
+  if (q === "") return true;
+  return entry.title.toLocaleLowerCase().includes(q) || (entry.description ?? "").toLocaleLowerCase().includes(q);
+}
+
+/** The ways to continue from a result: every edit entry ("Use as reference", with the style's title), then upscale. */
+export function chainTargets(items: readonly MenuEntry[]): { id: string; title: string }[] {
+  const edits = items.filter((i) => i.tool === "edit").map((i) => ({ id: i.id, title: i.style === null ? "Use as reference" : `Use as reference: ${i.title}` }));
+  const ups = items.filter((i) => i.tool === "upscale").map((i) => ({ id: i.id, title: "Upscale" }));
+  return [...edits, ...ups];
 }
 
 // ---- Advanced: negative prompt and guidance, and the defaults a style pre-fills ----

@@ -39,7 +39,20 @@
 </section>
 
 <main id="app" hidden>
+  <nav id="tool-nav" class="sidebar" aria-label="Tools">
+    <div class="side-head">
+      <p class="side-title">Tools</p>
+      <button id="menu-close" type="button" class="icon-btn" aria-label="Close menu">&times;</button>
+    </div>
+    <label for="menu-search" class="sr">Search tools</label>
+    <input id="menu-search" class="menu-search" type="search" placeholder="Search tools&hellip;" autocomplete="off" aria-controls="menu-list">
+    <div id="menu-list" class="menu-list"></div>
+    <p id="menu-empty" class="muted menu-empty" role="status" hidden>No tool matches.</p>
+  </nav>
+  <div id="menu-backdrop" class="backdrop" hidden></div>
+  <div class="page">
   <header class="top">
+    <button id="menu-open" type="button" class="menu-btn" aria-controls="tool-nav" aria-expanded="false">Menu</button>
     <h1>Image generator</h1>
     <span id="role" class="chip" hidden></span>
   </header>
@@ -124,14 +137,11 @@
 
   <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>
 
-  <section class="card" aria-labelledby="gen-title">
-    <h2 id="gen-title">Generate</h2>
+  <section id="tool-card" class="card" aria-labelledby="gen-title">
+    <h2 id="gen-title" tabindex="-1">Generate</h2>
+    <p id="tool-desc" class="muted" hidden></p>
+    <p id="style-hint" class="muted" hidden></p>
     <p id="gen-hint" class="muted" role="status"></p>
-    <div id="mode-box" class="seg" role="group" aria-label="Mode" hidden>
-      <button id="mode-generate" type="button" aria-pressed="true">Generate</button>
-      <button id="mode-edit" type="button" aria-pressed="false">Edit images</button>
-      <button id="mode-upscale" type="button" aria-pressed="false" hidden>Upscale</button>
-    </div>
     <form id="gen-form" novalidate>
       <div id="prompt-box">
         <label id="prompt-label" for="prompt">Prompt</label>
@@ -157,10 +167,8 @@
       </div>
 
       <fieldset id="style-box" hidden>
-        <legend>Style</legend>
-        <div id="styles" class="seg"></div>
+        <legend>Options</legend>
         <div id="style-params" class="style-params"></div>
-        <p id="style-hint" class="muted" hidden></p>
       </fieldset>
 
       <details id="advanced-box" hidden>
@@ -216,6 +224,7 @@
     <div id="gal-list" class="grid" hidden></div>
     <button id="gal-more" type="button" hidden>Load more</button>
   </section>
+  </div>
 </main>
 
 <div id="modal" class="modal" hidden>

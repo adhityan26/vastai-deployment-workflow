@@ -43,6 +43,13 @@ import {
   referenceHint,
   CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
+  TOOL_STORAGE_KEY,
+  chainTargets,
+  chooseEntry,
+  matchesQuery,
+  usableMenu,
+  type MenuEntry,
+  type MenuInfo,
   HISTORY_COLLAPSED_KEY,
   formatDuration,
   historyRefreshDue,
@@ -120,6 +127,7 @@ import {
   type GpuOption,
   type Sample,
 } from "./model.js";
+import { iconNode } from "./icons.js";
 
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
 // never innerHTML. Decisions live in model.ts.
@@ -214,7 +222,8 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
-  let mode: PageMode = "generate";
+  let mode: PageMode = "generate"; // follows the selected menu entry (its tool)
+  let selectedId: string | null = null; // the wanted menu entry; the one shown is chosen against the current menu
   const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
   let guidanceValue: number | null = null; // null = at the guidance default (the workflows' own cfg: nothing is sent)
   let prefilled: Prefilled = {}; // what the current style pre-filled, so leaving it undoes that
@@ -447,7 +456,10 @@ export function mountApp(doc: Document, env: Env): App {
     if (e.target === modal) closeModal?.(false);
   });
   doc.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal?.(false);
+    if (e.key === "Escape") {
+      if (!modal.hidden) closeModal?.(false);
+      else if (drawerOpen) setDrawer(false, true);
+    }
   });
 
   // ---- actions ----
@@ -856,11 +868,7 @@ export function mountApp(doc: Document, env: Env): App {
   const sizeSelect = $<HTMLSelectElement>("size");
   const generateBtn = $<HTMLButtonElement>("btn-generate");
   const promptBox = $<HTMLTextAreaElement>("prompt");
-  const modeBox = $("mode-box");
-  const modeGenerate = $<HTMLButtonElement>("mode-generate");
-  const modeEdit = $<HTMLButtonElement>("mode-edit");
   const editBox = $("edit-box");
-  const modeUpscale = $<HTMLButtonElement>("mode-upscale");
   const promptRow = $("prompt-box");
   const samplingBox = $("sampling-box");
   const resolutionBox = $("resolution-box");
@@ -879,9 +887,11 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderForm(s: ApiState): void {
-    // Edit can disappear (server config) while it is selected: fall back to plain generate.
-    if (s.edit === null && mode === "edit") mode = "generate";
-    if (s.upscale === null && mode === "upscale") mode = "generate";
+    // The menu decides the mode and the style. An entry can disappear (edit or upscale off, a style gone):
+    // the first entry still offered takes over.
+    const entry = syncSelection(s);
+    $("gen-title").textContent = entry?.title ?? "Generate";
+    setText("tool-desc", entry?.description ?? "");
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
     const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale]);
     if (key !== formKey) {
@@ -943,12 +953,6 @@ export function mountApp(doc: Document, env: Env): App {
     renderAdvanced(s);
     const editing = mode === "edit";
     const upscaling = mode === "upscale";
-    modeBox.hidden = s.edit === null && s.upscale === null;
-    modeEdit.hidden = s.edit === null;
-    modeUpscale.hidden = s.upscale === null;
-    modeGenerate.setAttribute("aria-pressed", String(mode === "generate"));
-    modeEdit.setAttribute("aria-pressed", String(editing));
-    modeUpscale.setAttribute("aria-pressed", String(upscaling));
     editBox.hidden = !editing && !upscaling;
     resolutionBox.hidden = upscaling;
     scaleBox.hidden = !upscaling;
@@ -973,15 +977,14 @@ export function mountApp(doc: Document, env: Env): App {
           : "Generating is available when the instance is ready.";
   }
 
-  // ---- styles (a sub-menu per mode, with the panel of the chosen style) ----
+  // ---- style options (the panel of the selected entry's style) ----
 
   const styleBox = $("style-box");
-  const stylesSeg = $("styles");
   const styleParamsBox = $("style-params");
   const styleHint = $("style-hint");
   let styleKey = "";
 
-  /** The style chosen for the current mode, only if the server still lists it for that mode. */
+  /** The style of the selected entry, only if the server still lists it for the current mode. */
   function currentStyle(s: ApiState | null): StyleInfo | null {
     if (mode === "upscale") return null;
     const id = chosenStyle[mode];
@@ -1034,39 +1037,12 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderStyles(s: ApiState): void {
-    if (mode === "upscale") {
-      styleBox.hidden = true;
-      if (styleKey !== "") {
-        styleKey = "";
-        renderReferences();
-      }
-      return;
-    }
-    const m: Mode = mode;
-    const list = stylesForMode(s.styles, m);
-    styleBox.hidden = list.length === 0;
-    if (list.length === 0) {
-      if (styleKey !== "") {
-        styleKey = "";
-        renderReferences();
-      }
-      return;
-    }
-    if (chosenStyle[m] !== null && !list.some((st) => st.id === chosenStyle[m])) chosenStyle[m] = null;
-    const chosen = chosenStyle[m];
-    // Rebuild only when the list or the choice changes, so a poll never resets a slider.
-    const key = JSON.stringify([m, chosen, list.map((st) => st.id), s.styles]);
+    const style = currentStyle(s);
+    // Rebuild only when the style or its definition changes, so a poll never resets a slider.
+    const key = JSON.stringify([mode, style?.id ?? null, style]);
     if (key === styleKey) return;
     styleKey = key;
-    const buttons = [{ id: null as string | null, title: "Standard" }, ...list].map((st) => {
-      const b = make("button", st.title);
-      b.type = "button";
-      b.setAttribute("aria-pressed", String(st.id === chosen));
-      b.addEventListener("click", () => selectStyle(st.id));
-      return b;
-    });
-    stylesSeg.replaceChildren(...buttons);
-    const style = currentStyle(s);
+    styleBox.hidden = style === null || style.params.length === 0;
     styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
     styleHint.textContent = style?.hint ?? "";
     styleHint.hidden = style?.hint == null;
@@ -1142,25 +1118,157 @@ export function mountApp(doc: Document, env: Env): App {
     guidanceOut.textContent = String(value);
   });
 
-  function selectStyle(id: string | null): void {
-    if (mode === "upscale") return;
-    chosenStyle[mode] = id;
-    styleKey = "";
-    if (state) renderForm(state);
+  // ---- the tool menu (sidebar on wide screens, a drawer on narrow ones) ----
+
+  const nav = $("tool-nav");
+  const menuList = $("menu-list");
+  const menuSearch = $<HTMLInputElement>("menu-search");
+  const menuEmpty = $("menu-empty");
+  const menuOpenBtn = $<HTMLButtonElement>("menu-open");
+  const menuCloseBtn = $<HTMLButtonElement>("menu-close");
+  const menuBackdrop = $("menu-backdrop");
+  let menuKey = "";
+  let query = "";
+  let drawerOpen = false;
+
+  function readTool(): string | null {
+    try {
+      return doc.defaultView?.localStorage.getItem(TOOL_STORAGE_KEY) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function writeTool(id: string): void {
+    try {
+      doc.defaultView?.localStorage.setItem(TOOL_STORAGE_KEY, id);
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
   }
 
-  function setMode(next: PageMode): void {
-    if (next === "edit" && state?.edit == null) return;
-    if (next === "upscale" && state?.upscale == null) return;
+  /** The entry shown now (the wanted one, else the first offered); sets mode and style from it and draws the menu. */
+  function syncSelection(s: ApiState): MenuEntry | null {
+    const menu = usableMenu(s);
+    if (selectedId === null) selectedId = readTool();
+    const entry = chooseEntry(selectedId, menu.items);
+    mode = entry?.tool ?? "generate";
+    if (mode !== "upscale") chosenStyle[mode] = entry?.style ?? null;
+    renderMenu(menu, entry);
+    return entry;
+  }
+
+  function menuButtons(): HTMLButtonElement[] {
+    return Array.from(menuList.querySelectorAll<HTMLButtonElement>("button.menu-item"));
+  }
+
+  function renderMenu(menu: MenuInfo, entry: MenuEntry | null): void {
+    const shown = menu.items.filter((i) => matchesQuery(i, query));
+    // Rebuild only when the menu or the search changes (focus and scroll stay put across polls).
+    const key = JSON.stringify([menu, query]);
+    if (key !== menuKey) {
+      menuKey = key;
+      const groups = menu.categories.flatMap((c) => {
+        const items = shown.filter((i) => i.category === c.id);
+        if (items.length === 0) return [];
+        const group = make("section", undefined, "menu-group");
+        const heading = make("h3", c.title, "menu-heading");
+        heading.id = `menu-heading-${c.id}`;
+        group.setAttribute("aria-labelledby", heading.id);
+        const ul = make("ul");
+        for (const item of items) {
+          const li = make("li");
+          const b = make("button", undefined, "menu-item");
+          b.type = "button";
+          b.dataset["toolId"] = item.id;
+          if (item.description !== null) b.title = item.description;
+          b.append(iconNode(doc, item.icon), make("span", item.title, "menu-title"));
+          b.addEventListener("click", () => selectEntry(item.id));
+          li.append(b);
+          ul.append(li);
+        }
+        group.append(heading, ul);
+        return [group];
+      });
+      menuList.replaceChildren(...groups);
+    }
+    menuEmpty.hidden = shown.length > 0 || menu.items.length === 0;
+    for (const b of menuButtons()) {
+      if (b.dataset["toolId"] === entry?.id) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+    }
+  }
+
+  /** Choose a menu entry: what the old mode switch and style selector did. */
+  function selectEntry(id: string, focusPanel = true): void {
+    if (!menuItems().some((i) => i.id === id)) return;
+    selectedId = id;
+    writeTool(id);
     showRefErrors([]);
-    mode = next;
     formError.hidden = true;
+    styleKey = "";
+    if (drawerOpen) setDrawer(false, false);
     if (state) renderForm(state);
     renderReferences();
+    if (focusPanel) $("gen-title").focus();
   }
-  modeGenerate.addEventListener("click", () => setMode("generate"));
-  modeEdit.addEventListener("click", () => setMode("edit"));
-  modeUpscale.addEventListener("click", () => setMode("upscale"));
+  function menuItems(): readonly MenuEntry[] {
+    return state === null ? [] : usableMenu(state).items;
+  }
+
+  menuSearch.addEventListener("input", () => {
+    query = menuSearch.value;
+    if (state) renderMenu(usableMenu(state), chooseEntry(selectedId, usableMenu(state).items));
+  });
+  menuSearch.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      menuButtons()[0]?.focus();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const first = menuButtons()[0];
+      if (first?.dataset["toolId"] !== undefined) selectEntry(first.dataset["toolId"]);
+    }
+  });
+  menuList.addEventListener("keydown", (e) => {
+    const buttons = menuButtons();
+    const at = buttons.indexOf(doc.activeElement as HTMLButtonElement);
+    if (at === -1) return;
+    let next: HTMLElement | undefined;
+    if (e.key === "ArrowDown") next = buttons[Math.min(at + 1, buttons.length - 1)];
+    else if (e.key === "ArrowUp") next = at === 0 ? menuSearch : buttons[at - 1];
+    else if (e.key === "Home") next = buttons[0];
+    else if (e.key === "End") next = buttons[buttons.length - 1];
+    if (next === undefined) return;
+    e.preventDefault();
+    next.focus();
+  });
+
+  /** Open or close the drawer (narrow screens). Closing hands the focus back to the Menu button when asked. */
+  function setDrawer(open: boolean, returnFocus: boolean): void {
+    drawerOpen = open;
+    nav.classList.toggle("open", open);
+    menuBackdrop.hidden = !open;
+    menuOpenBtn.setAttribute("aria-expanded", String(open));
+    if (open) menuSearch.focus();
+    else if (returnFocus) menuOpenBtn.focus();
+  }
+  menuOpenBtn.addEventListener("click", () => setDrawer(!drawerOpen, true));
+  menuCloseBtn.addEventListener("click", () => setDrawer(false, true));
+  menuBackdrop.addEventListener("click", () => setDrawer(false, true));
+  // Focus trap: Tab and Shift+Tab wrap inside the open drawer.
+  nav.addEventListener("keydown", (e) => {
+    if (!drawerOpen || e.key !== "Tab") return;
+    const stops = [menuCloseBtn, menuSearch, ...menuButtons()];
+    const first = stops[0]!;
+    const last = stops[stops.length - 1]!;
+    if (e.shiftKey && doc.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && doc.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);
@@ -1373,32 +1481,26 @@ export function mountApp(doc: Document, env: Env): App {
 
   // ---- chaining: a result becomes the reference image of the next edit ----
 
-  /** One button per way to continue from a result; null when edit is not offered or the url is not ours. */
+  /** One button per way to continue from a result; null when no edit or upscale entry is offered or the url is not ours. */
   function chainButtons(src: string, name: string): HTMLElement | null {
-    const s = state;
-    if (s === null || (s.edit === null && s.upscale === null) || !isChainableUrl(src)) return null;
+    const targets = chainTargets(menuItems().filter((i) => i.tool !== "generate"));
+    if (targets.length === 0 || !isChainableUrl(src)) return null;
     const row = make("div", undefined, "chain");
-    const targets: { mode: PageMode; id: string | null; title: string }[] = [
-      ...(s.edit ? [{ mode: "edit" as const, id: null, title: "Use as reference" }] : []),
-      ...(s.edit ? stylesForMode(s.styles, "edit") : []).map((st) => ({ mode: "edit" as const, id: st.id, title: `Use as reference: ${st.title}` })),
-      ...(s.upscale ? [{ mode: "upscale" as const, id: null, title: "Upscale" }] : []),
-    ];
     for (const t of targets) {
       const b = make("button", t.title);
       b.type = "button";
-      b.addEventListener("click", () => void chainResult(src, name, t.mode, t.id));
+      b.addEventListener("click", () => void chainResult(src, name, t.id));
       row.append(b);
     }
     return row;
   }
 
-  async function chainResult(src: string, name: string, target: PageMode, styleId: string | null): Promise<void> {
-    mode = target;
-    if (target === "edit") chosenStyle.edit = styleId;
-    styleKey = "";
-    formError.hidden = true;
+  async function chainResult(src: string, name: string, entryId: string): Promise<void> {
+    const target = menuItems().find((i) => i.id === entryId);
+    if (target === undefined) return;
     // One image for an upscale, so a result replaces whatever was attached; edit adds to the list.
-    if (target === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    if (target.tool === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    selectEntry(entryId, false);
     const rules = refLimits(state);
     if (rules === null) return;
     try {
@@ -1489,7 +1591,7 @@ export function mountApp(doc: Document, env: Env): App {
    */
   let resultActionsKey = "";
   function renderResultActions(s: ApiState): void {
-    const key = JSON.stringify([s.gallery, s.edit !== null, s.upscale !== null, s.edit ? stylesForMode(s.styles, "edit").map((st) => [st.id, st.title]) : []]);
+    const key = JSON.stringify([s.gallery, chainTargets(usableMenu(s).items.filter((i) => i.tool !== "generate"))]);
     if (key === resultActionsKey) return;
     resultActionsKey = key;
     for (const e of history) if (e.status === "done") renderEntry(e);
