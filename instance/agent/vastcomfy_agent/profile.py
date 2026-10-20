@@ -14,6 +14,7 @@ import yaml
 
 from .files import write_json
 from .paths import StatePaths
+from .ranged import RangedDownload, RangeUnsupported, SegmentError, ranges_supported
 from .workflows import NAME_RE
 
 
@@ -304,7 +305,15 @@ class ProgressWriter:
         write_json(self._path, {"phase": self._phase, "file": file, "bytes_done": done, "bytes_total": total})
 
 
+# Smallest segment of a parallel download: smaller files use fewer connections (one below twice this).
+MIN_SEGMENT_BYTES = 8 * 1024 * 1024
+
+
 class Downloader:
+    """Downloads pinned model files. With connections > 1 a file whose server answers HEAD with
+    `Accept-Ranges: bytes` and the pinned Content-Length is fetched in parallel byte ranges (ranged.py);
+    otherwise, or when a ranged request is answered with a plain 200, in one stream as before."""
+
     def __init__(
         self,
         *,
@@ -316,6 +325,8 @@ class Downloader:
         chunk_bytes: int,
         sleep: Callable[[float], None] = time.sleep,
         on_progress: Callable[[str, int, int], None] = lambda *a: None,
+        connections: int = 1,
+        min_segment_bytes: int = MIN_SEGMENT_BYTES,
     ):
         self._base = hf_base.rstrip("/")
         self._token = token
@@ -325,6 +336,8 @@ class Downloader:
         self._chunk = chunk_bytes
         self._sleep = sleep
         self._on_progress = on_progress
+        self._connections = max(1, connections)
+        self._min_segment = max(1, min_segment_bytes)
 
     def fetch(self, model: ModelSpec, comfy_dir: Path) -> Path:
         target = target_path(model, comfy_dir)
@@ -347,6 +360,13 @@ class Downloader:
         target.parent.mkdir(parents=True, exist_ok=True)
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         try:
+            if self._connections > 1 and model.size_bytes >= 2 * self._min_segment:
+                try:
+                    if ranges_supported(self._client, url, headers, model.size_bytes):
+                        self._download_ranged(url, headers, part, target, model)
+                        return
+                except RangeUnsupported:
+                    pass  # this server ignores Range: one plain stream below, in the same attempt
             with self._client.stream("GET", url, headers=headers, follow_redirects=True) as response:
                 response.raise_for_status()
                 done = 0
@@ -361,6 +381,27 @@ class Downloader:
         finally:
             if part.exists():
                 part.unlink()
+
+    def _download_ranged(self, url: str, headers: dict, part: Path, target: Path, model: ModelSpec) -> None:
+        done = 0
+
+        def on_bytes(n: int) -> None:  # called under the download's lock
+            nonlocal done
+            done += n
+            self._on_progress(target.name, done, model.size_bytes)
+
+        job = RangedDownload(
+            client=self._client, url=url, headers=headers, size=model.size_bytes, connections=self._connections,
+            min_segment=self._min_segment, retries=self._retries, backoff_s=self._backoff, chunk_bytes=self._chunk,
+            sleep=self._sleep, on_bytes=on_bytes,
+        )
+        try:
+            job.run(part)
+        except SegmentError as exc:
+            raise DownloadError(str(exc)) from exc
+        if done != model.size_bytes or part.stat().st_size != model.size_bytes:
+            raise DownloadError(f"size mismatch: got {done} bytes, expected {model.size_bytes}")
+        os.replace(part, target)
 
 
 def _run_checked(run: Callable, cmd: list[str], what: str) -> subprocess.CompletedProcess:

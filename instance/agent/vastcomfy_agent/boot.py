@@ -151,7 +151,7 @@ def cmd_install_models(b: Boot) -> int:
     downloader = Downloader(
         hf_base=b.cfg.hf_base_url, token=b.cfg.hf_token, client=b.http, retries=b.cfg.download_retries,
         backoff_s=b.cfg.download_backoff_s, chunk_bytes=b.cfg.download_chunk_bytes, sleep=b.sleep,
-        on_progress=ProgressWriter(Path(b.cfg.state_dir), "models"),
+        on_progress=ProgressWriter(Path(b.cfg.state_dir), "models"), connections=b.cfg.download_connections,
     )
     try:
         for model in missing_models(profile, comfy_dir):

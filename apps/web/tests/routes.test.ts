@@ -302,6 +302,7 @@ async function harness(
     bootMaxDownloadEtaMin: 20,
     netProbeBytes: 25165824,
     netProbeMinMbps: 20,
+    downloadConnections: 4,
     vastBadMachineTtlMin: 60,
     unreachableDestroyMin: 15,
     reconcileGraceMin: 10,

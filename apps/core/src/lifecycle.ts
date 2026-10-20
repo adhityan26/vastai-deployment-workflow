@@ -676,6 +676,8 @@ export class Lifecycle {
       // The early network probe of instance/bootstrap.sh (read before the instance schema can be read).
       NET_PROBE_BYTES: String(intCfg(cfg, "netProbeBytes", "NET_PROBE_BYTES", 1048576)),
       NET_PROBE_MIN_MBPS: String(intCfg(cfg, "netProbeMinMbps", "NET_PROBE_MIN_MBPS", 0)),
+      // Parallel ranged connections per model file (instance/agent/vastcomfy_agent/ranged.py).
+      DOWNLOAD_CONNECTIONS: String(intCfg(cfg, "downloadConnections", "DOWNLOAD_CONNECTIONS", 1)),
       // The instance writes it into ComfyUI's arguments before its own ComfyUI restart (instance/bootstrap.sh).
       ...(typeof cfg["comfyPreviewMethod"] === "string" && cfg["comfyPreviewMethod"] !== ""
         ? { COMFY_PREVIEW_METHOD: cfg["comfyPreviewMethod"] }

@@ -63,6 +63,7 @@ const cfg = {
   bootMaxDownloadEtaMin: 20,
   netProbeBytes: 25165824,
   netProbeMinMbps: 20,
+  downloadConnections: 4,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
@@ -261,6 +262,7 @@ describe("Lifecycle.start", () => {
       DATA_DIRECTORY: "/workspace/", // config-lint: ok
       NET_PROBE_BYTES: "25165824",
       NET_PROBE_MIN_MBPS: "20",
+      DOWNLOAD_CONNECTIONS: "4",
     });
     expect(out.record.status).toBe("booting");
     expect(out.record.vast_instance_id).toBe(900);
