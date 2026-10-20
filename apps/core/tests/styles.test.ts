@@ -266,6 +266,7 @@ describe("preset styles (no LoRA)", () => {
       id: "faceswap", title: "Face swap", kind: "preset", modes: ["edit"], lora: null, params: [],
       promptTemplate: TEMPLATE, references: { min: 2, max: 2, labels: ["Scene to keep", "Face to use"] }, hint: "Ask first.",
       defaults: { negativePrompt: null, cfg: null, preset: null, size: null, resolution: null },
+      menu: { category: null, description: null, icon: null, order: null },
     });
     // The existing LoRA style keeps its kind and has no template or rules.
     expect(parse()[0]).toMatchObject({ kind: "lora", promptTemplate: null, references: null, hint: null });

@@ -26,6 +26,7 @@ import {
   checkGuidanceDefault,
   generate,
   labelHostname,
+  menuItems,
   pollResult,
   referenceLimits,
   tenthsOfSeconds,
@@ -430,6 +431,17 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           maxIntermediatePixels: intCfg(cfg, "upscaleMaxIntermediatePixels", "UPSCALE_MAX_INTERMEDIATE_PIXELS"),
         };
 
+  // The tool menu is fixed at startup (profile and which modes are on here); only titles, descriptions, icon
+  // names and ids, never templates, node ids or file names.
+  const menuItemsOn = menuItems(deps.profile.menu, deps.profile.styles).map((item) => ({
+    ...item,
+    available: item.tool === "generate" || (item.tool === "edit" ? limits !== null && editSpec !== null : upscaleLimits !== null),
+  }));
+  const menuView = {
+    categories: deps.profile.menu.categories.filter((c) => menuItemsOn.some((i) => i.category === c.id)).map((c) => ({ id: c.id, title: c.title })),
+    items: menuItemsOn,
+  };
+
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
@@ -590,6 +602,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               max_pixels: upscaleLimits.maxPixels,
               types: [...upscaleLimits.types],
             },
+      // The tool menu: categories and entries in display order; `available` is false while the entry's mode is off.
+      menu: menuView,
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null

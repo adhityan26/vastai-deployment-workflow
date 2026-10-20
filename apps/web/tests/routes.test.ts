@@ -2958,3 +2958,75 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
     expect(state.properties.styles.items.properties.defaults.additionalProperties).toBe(false);
   });
 });
+
+// ---- the tool menu ----
+
+describe("menu", () => {
+  const ITEM_KEYS = ["available", "category", "description", "icon", "id", "style", "title", "tool"];
+  const items = (body: { menu: { items: { id: string; available: boolean }[] } }) => body.menu.items;
+  const ids = (body: Parameters<typeof items>[0]) => items(body).map((i) => i.id);
+
+  it("lists the categories and every entry in display order, with no template, node, file or LoRA detail", async () => {
+    h = await harness({ profile });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.menu.categories).toEqual([{ id: "create", title: "Create" }, { id: "edit", title: "Edit & combine" }, { id: "enhance", title: "Enhance" }]);
+    expect(ids(body)).toEqual([
+      "text_to_image", "portrait_photo", "family_photo", "anime",
+      "free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime",
+      "photo_restore", "upscale",
+    ]);
+    for (const item of body.menu.items) expect(Object.keys(item).sort()).toEqual(ITEM_KEYS);
+    expect(body.menu.items[0]).toEqual({ id: "text_to_image", title: "Text to image", description: "Describe a picture and generate it.", icon: "image", category: "create", tool: "generate", style: null, available: true });
+    expect(body.menu.items.find((i: { id: string }) => i.id === "photo_restore")).toMatchObject({ category: "enhance", tool: "edit", style: "photo_restore", icon: "restore", available: true });
+    const text = JSON.stringify(body.menu);
+    for (const secret of ["safetensors", "prompt_template", "model_from", "workflow", "Convert this anime", "\"node\"", "order"]) expect(text).not.toContain(secret);
+  });
+
+  it("marks the edit and upscale entries unavailable while that mode is off here; a disabled style has no entry", async () => {
+    h = await harness({ editTemplate: null }); // edit off, and no upscale template (upscale off)
+    const body = (await call("GET", "/api/state", await member())).json();
+    const off = items(body).filter((i) => !i.available).map((i) => i.id);
+    expect(off).toEqual(["free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime", "photo_restore", "upscale"]);
+    expect(items(body).filter((i) => i.available).map((i) => i.id)).toEqual(["text_to_image", "portrait_photo", "family_photo", "anime"]);
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.styles.find((s: { id: string }) => s.id === "anime").enabled = false;
+    const dir = mkdtempSync(join(tmpdir(), "menu-profile-"));
+    tempDirs.push(dir);
+    writeFileSync(join(dir, "image.yaml"), stringifyYaml(doc));
+    h = await harness({ profile: loadProfile(join(dir, "image.yaml")) });
+    expect(ids((await call("GET", "/api/state", await member())).json())).not.toContain("anime");
+  });
+
+  it("is the same for admins and members, and the request shapes of generate, edit and upscale are unchanged", async () => {
+    h = await harness({ profile });
+    const a = (await call("GET", "/api/state", await admin())).json().menu;
+    const m = (await call("GET", "/api/state", await member())).json().menu;
+    expect(a).toEqual(m);
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    for (const path of ["/api/generate", "/api/edit", "/api/upscale"]) {
+      expect(doc.paths[path].post.requestBody.content["application/json"].schema.properties).not.toHaveProperty("menu");
+    }
+  });
+
+  it("the OpenAPI document describes the menu strictly", async () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const state = doc.components.schemas.State;
+    expect(state.required).toContain("menu");
+    const menu = state.properties.menu;
+    expect(menu.additionalProperties).toBe(false);
+    expect(menu.required).toEqual(["categories", "items"]);
+    expect(menu.properties.categories.items.additionalProperties).toBe(false);
+    expect(menu.properties.categories.items.required).toEqual(["id", "title"]);
+    const item = menu.properties.items.items;
+    expect(item.additionalProperties).toBe(false);
+    expect([...item.required].sort()).toEqual(ITEM_KEYS);
+    expect(Object.keys(item.properties).sort()).toEqual(ITEM_KEYS);
+    expect(item.properties.tool.enum).toEqual(["generate", "edit", "upscale"]);
+    expect(item.properties.icon.enum).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush"]);
+    // What the server sends fits the document: the same keys, and every icon in the enum.
+    h = await harness({ profile });
+    const body = (await call("GET", "/api/state", await member())).json();
+    for (const i of body.menu.items) expect(item.properties.icon.enum).toContain(i.icon);
+    expect(Object.keys(body.menu).sort()).toEqual(["categories", "items"]);
+  });
+});

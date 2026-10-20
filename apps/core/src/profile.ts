@@ -4,6 +4,7 @@ import { GenerateInputError, ProfileError } from "./profile-errors.js";
 import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./styles.js";
 import { parseGuidance, type GuidanceSpec, type TuningSupport } from "./guidance.js";
 import { parseUpscale, type UpscaleSpec } from "./upscale.js";
+import { checkStyleMenus, parseMenu, type MenuSpec } from "./menu.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
@@ -99,6 +100,8 @@ export interface Profile {
   readonly guidance: GuidanceSpec | null;
   /** The upscale mode when the profile enables it; null otherwise. */
   readonly upscale: UpscaleSpec | null;
+  /** The tool menu's categories and built-in tools (styles add their own entries: see menuItems). */
+  readonly menu: MenuSpec;
   readonly models: readonly ModelSpec[];
 }
 
@@ -333,22 +336,26 @@ export function loadProfile(path: string): Profile {
     if (guidance !== null && generate.optional.cfg === null && (edit?.optional.cfg ?? null) === null) {
       throw new ProfileError("a guidance section needs a cfg param in generate or edit");
     }
+    const menu = parseMenu(raw["menu"]);
+    const styles = parseStyles(raw["styles"], modelEntries(raw["models"]), {
+      guidance,
+      presets: generate.qualityPresets.map((p) => p.name),
+      sizes: generate.sizes.map((z) => z.name),
+      resolutions: edit?.resolutions.map((r) => r.name) ?? [],
+      negativePrompt: { generate: generate.optional.negativePrompt !== null, edit: (edit?.optional.negativePrompt ?? null) !== null },
+      cfg: { generate: generate.optional.cfg !== null, edit: (edit?.optional.cfg ?? null) !== null },
+      taken: { generate: takenInputs(generate.params, generate.optional), edit: edit === null ? {} : takenInputs(edit.params, edit.optional) },
+      referenceInputs: edit === null ? null : { node: edit.references.encoderNode, prefix: edit.references.inputPrefix },
+    });
+    checkStyleMenus(raw["styles"], menu);
     return {
       name: required(raw["name"], "name"),
       generate,
       edit,
       guidance,
-      styles: parseStyles(raw["styles"], modelEntries(raw["models"]), {
-        guidance,
-        presets: generate.qualityPresets.map((p) => p.name),
-        sizes: generate.sizes.map((z) => z.name),
-        resolutions: edit?.resolutions.map((r) => r.name) ?? [],
-        negativePrompt: { generate: generate.optional.negativePrompt !== null, edit: (edit?.optional.negativePrompt ?? null) !== null },
-        cfg: { generate: generate.optional.cfg !== null, edit: (edit?.optional.cfg ?? null) !== null },
-        taken: { generate: takenInputs(generate.params, generate.optional), edit: edit === null ? {} : takenInputs(edit.params, edit.optional) },
-        referenceInputs: edit === null ? null : { node: edit.references.encoderNode, prefix: edit.references.inputPrefix },
-      }),
+      styles,
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
+      menu,
       models,
     };
   } catch (e) {

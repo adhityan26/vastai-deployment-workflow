@@ -295,7 +295,8 @@
           "styles",
           "upscale",
           "guidance",
-          "advanced"
+          "advanced",
+          "menu"
         ],
         "properties": {
           "state": {
@@ -631,6 +632,115 @@
                 },
                 "height": {
                   "type": "integer"
+                }
+              }
+            }
+          },
+          "menu": {
+            "type": "object",
+            "description": "The tool menu of the page, in display order: the profile's categories that have entries, and one entry per built-in tool (plain generate, plain edit, upscale) and per enabled style (a style offered in two modes has one entry per mode). Never templates, node ids, file names or LoRA details. The request shapes of /api/generate, /api/edit and /api/upscale do not change: an entry only tells the page which request to send and which style id to put in it.",
+            "required": [
+              "categories",
+              "items"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "categories": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "title"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 40
+                    }
+                  }
+                }
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "title",
+                    "description",
+                    "icon",
+                    "category",
+                    "tool",
+                    "style",
+                    "available"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                      "description": "Unique entry id: the tool id, the style id, or '<style id>-<mode>' for a style offered in two modes"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "description": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120,
+                      "description": "One line shown under the title"
+                    },
+                    "icon": {
+                      "type": "string",
+                      "enum": [
+                        "image",
+                        "wand",
+                        "user",
+                        "users",
+                        "swap",
+                        "shirt",
+                        "restore",
+                        "sparkles",
+                        "expand",
+                        "camera",
+                        "brush"
+                      ],
+                      "description": "A built-in inline SVG icon of the page bundle"
+                    },
+                    "category": {
+                      "type": "string",
+                      "description": "The id of one of the listed categories"
+                    },
+                    "tool": {
+                      "type": "string",
+                      "enum": [
+                        "generate",
+                        "edit",
+                        "upscale"
+                      ],
+                      "description": "Which request the entry sends"
+                    },
+                    "style": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The style id the entry puts in that request; null for a built-in tool"
+                    },
+                    "available": {
+                      "type": "boolean",
+                      "description": "False while the entry's mode is off on this server (edit or upscale not offered)"
+                    }
+                  }
                 }
               }
             }
