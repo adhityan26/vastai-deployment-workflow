@@ -32,6 +32,15 @@ itself (`boot_failed`, blaming the machine only for its own failures: see the RE
 downloads (`DOWNLOAD_CONNECTIONS` 4). Runbook: `deploy/web/README.md` "Slow boots". Unverified live: the
 early destroy path, markers in `vastai logs`, ranges through the HF CDN/xet redirect, the thresholds.
 
+## Tool menu (2026-10-20, branch `feat/tool-menu`, local commits, not pushed or deployed)
+
+Task A (sidebar tool menu) is DONE: the six sample presets are on, the profile's `menu:` section and `/api/state`
+`menu` drive a left sidebar (search, small-caps category headings, icon + title, `aria-current`, arrow keys,
+remembered choice) that replaces the mode tabs and the style sub-menu; below 900 px it is a drawer behind a "Menu"
+button. Each entry is its own panel; request bodies are unchanged (golden and page tests). Runbook:
+`deploy/web/README.md` "Menu". Checked in jsdom and in headless Chromium at 1280 and 375 px against a fake state;
+never on a phone or against a real instance. Next: Task B (Start dialog advanced server choice).
+
 ## Next work, in order
 
 1. ~~Usage history~~ Done and on `master`: persistent log of instance sessions with start, stop and the stop reason
