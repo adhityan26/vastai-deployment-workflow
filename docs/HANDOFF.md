@@ -1,4 +1,4 @@
-# Handoff (2026-10-18)
+# Handoff (2026-10-20)
 
 Written so a fresh session (for example a cloud session that only has this repo) can continue. It contains no secrets and no private addresses. Local-only things (`.env`, memory, `.superpowers/` ledgers, homelab access) are NOT available in a cloud session.
 
@@ -19,6 +19,18 @@ flow behind the boot console, Tailscale OAuth against the real API, RTX 5090 (Bl
 Edit notes: a 4 x 8 MiB request needs about 12 Mbit/s of upload within `WEB_REQUEST_TIMEOUT_S` (30 s); references stay in
 ComfyUI `input/` until the instance is destroyed; animated/multi-frame references are refused (`reference_animated`);
 `EDIT_REFERENCE_MAX_SIDE` bounds width/height. Edit design: `docs/superpowers/plans/2026-10-18-image-edit.md`.
+
+## Slow boots (2026-10-20, branch `fix/slow-boot`, local commits, not pushed or deployed)
+
+Two paid boots were lost on 2026-10-19 (Lithuania A5000: models at ~2.8 MB/s from Hugging Face despite
+888 Mbps on Vast; California 3090: 20+ min in `install_tools`, released only at `BOOT_TIMEOUT_MIN`). Built:
+an early network probe as the first boot step (`net_probe`; `NET_PROBE_BYTES` 24 MiB, `NET_PROBE_MIN_MBPS`
+20 MB/s, `[boot] FAILED: slow_network`, exit 14, stock-CLI destroy), boot step markers printed by
+bootstrap (9 steps now), web-side releases `slow_boot` (`BOOT_AGENT_GRACE_MIN` 10) and `slow_download`
+(`MODEL_ETA_MIN_OBSERVE_S` 120, `BOOT_MAX_DOWNLOAD_ETA_MIN` 20), a generic rule for a boot that vanished by
+itself (`boot_failed`), all of them putting the machine on the bad-machine list, and parallel ranged model
+downloads (`DOWNLOAD_CONNECTIONS` 4). Runbook: `deploy/web/README.md` "Slow boots". Unverified live: the
+early destroy path, markers in `vastai logs`, ranges through the HF CDN/xet redirect, the thresholds.
 
 ## Next work, in order
 
@@ -60,8 +72,9 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
    preset styles), an "Advanced" section with negative prompt and guidance (cfg) for generate and edit, validated
    against the profile mapping and `GENERATE_MAX_NEGATIVE_PROMPT_CHARS`; untouched it sends exactly the old body.
    Their effect on this model is UNVERIFIED (README "Negative prompt, guidance and style defaults").
-3. Boot console Task 3 (instance side): mirror bootstrap output and `[boot] step <n>/8: <id>` markers to
-   `/proc/1/fd/1` so `vastai logs` shows them (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
+3. Boot console Task 3 (instance side): the `[boot] step <n>/9: <id>` and `[boot] FAILED:` markers are
+   printed now (branch `fix/slow-boot`); still open: mirror the rest of the bootstrap output to
+   `/proc/1/fd/1` so `vastai logs` shows it (plan: `docs/superpowers/plans/2026-10-18-boot-console.md`; needs a push and
    a real boot to verify). Deferred minors of the console are listed in that plan's review notes (not blocking).
 4. ~~Save + Gallery~~ Done and on `master` (PR #4): Save per result, auto-save (this device), a gallery card
    (own images; admins can list everyone's), delete, quotas, MinIO via `GALLERY_S3_*` (empty endpoint = off). Plan:
