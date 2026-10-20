@@ -113,16 +113,18 @@ styles:
     prompt_template: "Edit <image1>: replace only the face of the person in <image1> with the face of the person in <image2>. Keep the body, pose, hair, clothing, background, lighting and camera framing of <image1> exactly the same. The result must contain exactly one person. {prompt}"
     references: {min: 2, max: 2, labels: ["Scene to keep", "Face to use"]}
     hint: "Results depend on the model. Only use a face with the consent of the person in the second photo."
-  # Sample presets ported from the recipes of feat/recipes-negative-prompt. ALL OFF: their wording is a first draft,
-  # never compared on real output, and their negative prompt and cfg defaults are UNVERIFIED for this model. The
-  # recipe "face_swap" was not ported: `faceswap` above (the owner's tested instruction) replaces it.
+  # Sample presets ported from the recipes of feat/recipes-negative-prompt. ON for the live test (2026-10-20): they
+  # are presets, so they download nothing. Their wording is a first draft, never compared on real output, and their
+  # negative prompt and cfg defaults are UNVERIFIED for this model (and QwenImage21Cache): the page only pre-fills
+  # them and the user can change or clear each one; the live test decides whether they stay. The recipe
+  # "face_swap" was not ported: `faceswap` above (the owner's tested instruction) replaces it.
   - id: portrait_photo
     title: Portrait photo
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A realistic portrait photograph with natural skin texture, fine pores and small imperfections, soft natural light, shallow depth of field, 85mm lens, true-to-life colors and sharp eyes. {prompt}"
-    hint: "Describe the person in the notes."
+    hint: "Describe the person in the notes. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "plastic skin, airbrushed, waxy, oversmoothed, uncanny face, deformed hands, extra fingers, blurry, low quality, watermark, text, oversaturated"
       cfg: 3.0
@@ -130,9 +132,9 @@ styles:
     title: Family photo
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A warm, candid family photograph, everyone looking natural and relaxed, realistic faces and hands, natural daylight, 50mm lens, true-to-life colors, detailed clothing. {prompt}"
-    hint: "Describe who is in the photo and where."
+    hint: "Describe who is in the photo and where. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "plastic skin, distorted faces, merged people, extra fingers, deformed hands, extra limbs, blurry, low quality, watermark, text"
       cfg: 3.0
@@ -140,8 +142,9 @@ styles:
     title: Anime illustration
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A high-quality anime illustration with clean line art, expressive eyes, detailed cel shading and a balanced color palette. {prompt}"
+    hint: "Describe the scene in the notes. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "photorealistic, 3d render, blurry, low quality, jpeg artifacts, bad anatomy, extra fingers, watermark, text"
       cfg: 3.0
@@ -149,27 +152,30 @@ styles:
     title: Outfit swap
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Make the person in <image1> wear the clothing from <image2>. Keep the face, pose, background and lighting of <image1> unchanged. {prompt}"
     references: {min: 2, max: 2, labels: ["Person", "Clothing to use"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "changed face, changed pose, mismatched lighting, blurry, distorted clothing"
   - id: photo_restore
     title: Restore old photo
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Restore this old photograph: remove scratches, dust and noise, repair damaged areas, correct the faded colors and sharpen the detail while keeping every face and the identity of every person exactly the same. {prompt}"
     references: {min: 1, max: 1, labels: ["Photo to restore"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "changed faces, new people, over-smoothed skin, artifacts"
   - id: to_anime
     title: Photo to anime
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Redraw <image1> as a high-quality anime illustration with clean line art and cel shading, keeping the identity, pose and composition. {prompt}"
     references: {min: 1, max: 1, labels: ["Photo to redraw"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "photorealistic, 3d render, blurry, low quality"
 

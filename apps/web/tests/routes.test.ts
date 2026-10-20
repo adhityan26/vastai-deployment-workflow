@@ -2343,6 +2343,8 @@ function newFilesWith(before: Map<string, number>, roots: string[], marker: Buff
 
 describe("styles", () => {
   const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+  // The sample presets, on for the live test (presets: nothing to download).
+  const SAMPLES = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
 
   /** The shipped profile with the Anything to Real style switched on (its LoRA among the models). */
   function styledProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -2365,7 +2367,8 @@ describe("styles", () => {
   it("lists the enabled styles in /api/state with their limits, and nothing about the LoRA file or the workflow nodes", async () => {
     h = await harness({ profile: styledProfile() });
     const body = (await call("GET", "/api/state", await member())).json();
-    expect(body.styles).toEqual([
+    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
+    expect(body.styles.slice(0, 2)).toEqual([
       {
         id: "anything2real",
         title: "Anime / cartoon to real",
@@ -2394,13 +2397,13 @@ describe("styles", () => {
   });
 
   it("the shipped profile offers the style", async () => {
-    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
+    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
   });
 
   it("with the style off, state.styles is empty and the style is refused as unknown", async () => {
     h = await harness({ profile: styledProfile((doc) => (doc.styles[0].enabled = false)) });
     const m = await member();
-    expect((await call("GET", "/api/state", m)).json().styles.map((s: { id: string }) => s.id)).toEqual(["faceswap"]);
+    expect((await call("GET", "/api/state", m)).json().styles.map((s: { id: string }) => s.id)).toEqual(["faceswap", ...SAMPLES]);
     h.setComfy(comfyEdit());
     const res = await post("/api/edit", m, { ...okEdit, style: { id: "anything2real" } });
     expect(res.statusCode).toBe(400);
@@ -2812,7 +2815,7 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
   const sentPrompt = () => JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
   const t2i = JSON.parse(readFileSync(repo("instance/workflows/qwen-image-t2i.json"), "utf8"));
 
-  /** The shipped profile after `change` (by default: every sample style switched on; they ship off). */
+  /** The shipped profile after `change` (by default: every style switched on, as they ship since the live test). */
   function variant(change: (doc: Record<string, any>) => void = (d) => d.styles.forEach((s: { enabled: boolean }) => (s.enabled = true))): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
     const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
     change(doc);
@@ -2823,13 +2826,18 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
     return loadProfile(path);
   }
 
-  it("the shipped state: guidance, both knobs in both modes, the live styles without defaults, and no recipes", async () => {
+  it("the shipped state: guidance, both knobs in both modes, the live styles without defaults, the samples with theirs, and no recipes", async () => {
     h = await harness();
     const body = (await call("GET", "/api/state", await member())).json();
     expect(body.guidance).toEqual({ min: 1, max: 6, step: 0.5, default: 1 });
     expect(body.advanced).toEqual({ generate: { negative_prompt: true, cfg: true }, edit: { negative_prompt: true, cfg: true }, negative_prompt_max_chars: 400 });
-    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
-    for (const st of body.styles) expect(st.defaults).toEqual({});
+    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
+    for (const st of body.styles.slice(0, 2)) expect(st.defaults).toEqual({});
+    const defaults = Object.fromEntries(body.styles.slice(2).map((st: { id: string; defaults: Record<string, unknown> }) => [st.id, Object.keys(st.defaults).sort()]));
+    expect(defaults).toEqual({
+      portrait_photo: ["cfg", "negative_prompt"], family_photo: ["cfg", "negative_prompt"], anime: ["cfg", "negative_prompt"],
+      outfit_swap: ["negative_prompt"], photo_restore: ["negative_prompt"], to_anime: ["negative_prompt"],
+    });
     expect(body).not.toHaveProperty("recipes");
     expect(body).not.toHaveProperty("negative_prompt");
   });
@@ -2911,9 +2919,11 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
 
   it("a mode whose workflow maps no knob says so in the state and refuses them with a clear code", async () => {
     h = await harness({
+      // The edit styles' knob defaults go with the mappings (an enabled style may not pre-fill an unmapped knob).
       profile: variant((d) => {
         delete d.edit.params.negative_prompt;
         delete d.edit.params.cfg;
+        for (const st of d.styles) if (st.modes.includes("edit") && st.defaults) delete st.defaults.negative_prompt;
       }),
     });
     h.setComfy(comfyEdit());

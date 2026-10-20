@@ -2,7 +2,7 @@ import { it } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadProfile } from "../../src/profile.js";
-import { capture, cases, type Captured } from "./cases.js";
+import { capture, cases, sampleCases, type Captured } from "./cases.js";
 
 // Writes golden-prompts.json from the code of the checkout it runs in (meant for the reference commit).
 const repo = (p: string) => fileURLToPath(new URL(`../../../../${p}`, import.meta.url));
@@ -12,5 +12,11 @@ it("captures the golden prompts", async () => {
   const templates = { generate: read("qwen-image-t2i.json"), edit: read("qwen-image-edit.json"), upscale: read("image-upscale.json") };
   const out: Captured[] = [];
   for (const c of cases(profile)) out.push({ ...c, prompt: await capture(c, profile, templates) });
-  writeFileSync(process.env["GOLDEN_OUT"]!, `${JSON.stringify(out, null, 1)}\n`);
+  if (process.env["GOLDEN_OUT"]) writeFileSync(process.env["GOLDEN_OUT"], `${JSON.stringify(out, null, 1)}\n`);
+  // The sample presets (golden-samples.json); only on a checkout where they are enabled.
+  if (process.env["GOLDEN_SAMPLES_OUT"]) {
+    const more: Captured[] = [];
+    for (const c of sampleCases(profile)) more.push({ ...c, prompt: await capture(c, profile, templates) });
+    writeFileSync(process.env["GOLDEN_SAMPLES_OUT"], `${JSON.stringify(more, null, 1)}\n`);
+  }
 });

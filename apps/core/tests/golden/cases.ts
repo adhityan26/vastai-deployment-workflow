@@ -60,6 +60,32 @@ export function cases(profile: Profile): GoldenCase[] {
   return out;
 }
 
+/**
+ * The sample presets switched on for the live test (2026-10-20), each as the page sends it: untouched (empty notes,
+ * no knobs) and with the defaults it pre-fills (negative prompt, and guidance for the generate samples). They did
+ * not run on d929a9f, so golden-samples.json was captured on branch feat/tool-menu before the menu work: it guards
+ * against drift from here on.
+ */
+export function sampleCases(profile: Profile): GoldenCase[] {
+  const out: GoldenCase[] = [];
+  const samples = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
+  for (const id of samples) {
+    const st = profile.styles.find((s) => s.id === id);
+    if (st === undefined) throw new Error(`sample ${id} is not enabled`);
+    const knobs = {
+      ...(st.defaults.negativePrompt === null ? {} : { negativePrompt: st.defaults.negativePrompt }),
+      ...(st.defaults.cfg === null ? {} : { cfg: st.defaults.cfg }),
+    };
+    const count = st.references?.min ?? 0;
+    const base = st.modes[0] === "generate"
+      ? { kind: "generate" as const, request: { prompt: "", preset: "standard", size: "1:1", seed: 42, style: { id } } }
+      : { kind: "edit" as const, request: { prompt: "", preset: "standard", resolution: "1024", seed: 7, images: [png(640, 480, "A"), png(512, 512, "B")].slice(0, count), style: { id } } };
+    out.push({ name: `sample ${id} untouched`, ...base });
+    out.push({ name: `sample ${id} pre-filled`, kind: base.kind, request: { ...base.request, prompt: "warm light", ...knobs } });
+  }
+  return out;
+}
+
 /** Run one case through the real service with a fake ComfyUI and return the submitted prompt as JSON text. */
 export async function capture(c: GoldenCase, profile: Profile, templates: Record<Kind, unknown>): Promise<string> {
   let submitted: unknown = null;
