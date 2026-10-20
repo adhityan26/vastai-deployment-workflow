@@ -46,8 +46,9 @@ import {
   TOOL_STORAGE_KEY,
   chainTargets,
   chooseEntry,
-  matchesQuery,
+  menuGroups,
   usableMenu,
+  WIDE_SCREEN_QUERY,
   type MenuEntry,
   type MenuInfo,
   HISTORY_COLLAPSED_KEY,
@@ -330,6 +331,7 @@ export function mountApp(doc: Document, env: Env): App {
   function showAuthScreen(kind: "login" | "noaccess", message: string): void {
     startSubmitting = false; // a Start request in flight must not keep the dialog over the login screen
     closeModal?.(false);
+    if (drawerOpen) setDrawer(false, false);
     pauseTimers();
     clearMessages();
     state = null;
@@ -1118,9 +1120,10 @@ export function mountApp(doc: Document, env: Env): App {
     guidanceOut.textContent = String(value);
   });
 
-  // ---- the tool menu (sidebar on wide screens, a drawer on narrow ones) ----
+  // ---- the tool menu (a sidebar on wide screens, a drawer on narrow ones) ----
 
   const nav = $("tool-nav");
+  const pageBox = $("page");
   const menuList = $("menu-list");
   const menuSearch = $<HTMLInputElement>("menu-search");
   const menuEmpty = $("menu-empty");
@@ -1131,6 +1134,7 @@ export function mountApp(doc: Document, env: Env): App {
   let query = "";
   let drawerOpen = false;
 
+  // The stored id is only ever compared with the ids of the current menu (chooseEntry), never shown or parsed.
   function readTool(): string | null {
     try {
       return doc.defaultView?.localStorage.getItem(TOOL_STORAGE_KEY) ?? null;
@@ -1146,11 +1150,20 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
-  /** The entry shown now (the wanted one, else the first offered); sets mode and style from it and draws the menu. */
+  /** The entries offered now, in menu order. */
+  function offeredEntries(): readonly MenuEntry[] {
+    return state === null ? [] : usableMenu(state).items;
+  }
+
+  /**
+   * The entry shown now: the chosen (or remembered) one when the menu still has it, else the first. A fallback
+   * becomes the selection, so an entry that comes back later does not pull the form away. Sets mode and style.
+   */
   function syncSelection(s: ApiState): MenuEntry | null {
     const menu = usableMenu(s);
     if (selectedId === null) selectedId = readTool();
     const entry = chooseEntry(selectedId, menu.items);
+    if (entry !== null) selectedId = entry.id;
     mode = entry?.tool ?? "generate";
     if (mode !== "upscale") chosenStyle[mode] = entry?.style ?? null;
     renderMenu(menu, entry);
@@ -1162,57 +1175,62 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderMenu(menu: MenuInfo, entry: MenuEntry | null): void {
-    const shown = menu.items.filter((i) => matchesQuery(i, query));
     // Rebuild only when the menu or the search changes (focus and scroll stay put across polls).
     const key = JSON.stringify([menu, query]);
     if (key !== menuKey) {
       menuKey = key;
-      const groups = menu.categories.flatMap((c) => {
-        const items = shown.filter((i) => i.category === c.id);
-        if (items.length === 0) return [];
-        const group = make("section", undefined, "menu-group");
-        const heading = make("h3", c.title, "menu-heading");
-        heading.id = `menu-heading-${c.id}`;
-        group.setAttribute("aria-labelledby", heading.id);
-        const ul = make("ul");
-        for (const item of items) {
-          const li = make("li");
-          const b = make("button", undefined, "menu-item");
-          b.type = "button";
-          b.dataset["toolId"] = item.id;
-          if (item.description !== null) b.title = item.description;
-          b.append(iconNode(doc, item.icon), make("span", item.title, "menu-title"));
-          b.addEventListener("click", () => selectEntry(item.id));
-          li.append(b);
-          ul.append(li);
-        }
-        group.append(heading, ul);
-        return [group];
-      });
-      menuList.replaceChildren(...groups);
+      const groups = menuGroups(menu, query);
+      menuList.replaceChildren(
+        ...groups.map(({ category, items }) => {
+          const group = make("section", undefined, "menu-group");
+          const heading = make("h3", category.title, "menu-heading");
+          heading.id = `menu-heading-${category.id}`;
+          group.setAttribute("aria-labelledby", heading.id);
+          const ul = make("ul");
+          for (const item of items) {
+            const b = make("button", undefined, "menu-item");
+            b.type = "button";
+            b.dataset["toolId"] = item.id;
+            if (item.description !== null) b.title = item.description;
+            b.append(iconNode(doc, item.icon), make("span", item.title, "menu-title"));
+            b.addEventListener("click", () => selectEntry(item.id));
+            const li = make("li");
+            li.append(b);
+            ul.append(li);
+          }
+          group.append(heading, ul);
+          return group;
+        }),
+      );
+      menuEmpty.hidden = groups.length > 0 || menu.items.length === 0;
     }
-    menuEmpty.hidden = shown.length > 0 || menu.items.length === 0;
     for (const b of menuButtons()) {
       if (b.dataset["toolId"] === entry?.id) b.setAttribute("aria-current", "page");
       else b.removeAttribute("aria-current");
     }
   }
 
-  /** Choose a menu entry: what the old mode switch and style selector did. */
+  /**
+   * Choose a menu entry: what the old mode switch and style selector did. From the drawer, the drawer closes and
+   * the focus goes to the chosen tool's panel; in the sidebar it stays on the entry.
+   */
   function selectEntry(id: string, focusPanel = true): void {
-    if (!menuItems().some((i) => i.id === id)) return;
+    if (!offeredEntries().some((i) => i.id === id)) return;
     selectedId = id;
     writeTool(id);
     showRefErrors([]);
     formError.hidden = true;
     styleKey = "";
-    if (drawerOpen) setDrawer(false, false);
+    const fromDrawer = drawerOpen;
+    if (fromDrawer) setDrawer(false, false);
     if (state) renderForm(state);
     renderReferences();
-    if (focusPanel) $("gen-title").focus();
-  }
-  function menuItems(): readonly MenuEntry[] {
-    return state === null ? [] : usableMenu(state).items;
+    if (focusPanel && fromDrawer) $("gen-title").focus();
+    else if (focusPanel) {
+      // Scrolled down to the results: bring the panel's top back into view (never scroll otherwise).
+      const card = $("tool-card");
+      if (card.getBoundingClientRect().top < 0) card.scrollIntoView?.({ block: "start" });
+    }
   }
 
   menuSearch.addEventListener("input", () => {
@@ -1225,8 +1243,8 @@ export function mountApp(doc: Document, env: Env): App {
       menuButtons()[0]?.focus();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const first = menuButtons()[0];
-      if (first?.dataset["toolId"] !== undefined) selectEntry(first.dataset["toolId"]);
+      const first = menuButtons()[0]?.dataset["toolId"];
+      if (first !== undefined) selectEntry(first);
     }
   });
   menuList.addEventListener("keydown", (e) => {
@@ -1243,11 +1261,12 @@ export function mountApp(doc: Document, env: Env): App {
     next.focus();
   });
 
-  /** Open or close the drawer (narrow screens). Closing hands the focus back to the Menu button when asked. */
+  /** Open or close the drawer (narrow screens). While open, the page behind it is inert. */
   function setDrawer(open: boolean, returnFocus: boolean): void {
     drawerOpen = open;
     nav.classList.toggle("open", open);
     menuBackdrop.hidden = !open;
+    pageBox.toggleAttribute("inert", open);
     menuOpenBtn.setAttribute("aria-expanded", String(open));
     if (open) menuSearch.focus();
     else if (returnFocus) menuOpenBtn.focus();
@@ -1268,6 +1287,11 @@ export function mountApp(doc: Document, env: Env): App {
       e.preventDefault();
       first.focus();
     }
+  });
+  // The drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
+  const wide = typeof doc.defaultView?.matchMedia === "function" ? doc.defaultView.matchMedia(WIDE_SCREEN_QUERY) : null;
+  wide?.addEventListener?.("change", (e) => {
+    if (e.matches && drawerOpen) setDrawer(false, false);
   });
 
   promptBox.addEventListener("input", () => {
@@ -1483,7 +1507,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   /** One button per way to continue from a result; null when no edit or upscale entry is offered or the url is not ours. */
   function chainButtons(src: string, name: string): HTMLElement | null {
-    const targets = chainTargets(menuItems().filter((i) => i.tool !== "generate"));
+    const targets = chainTargets(offeredEntries().filter((i) => i.tool !== "generate"));
     if (targets.length === 0 || !isChainableUrl(src)) return null;
     const row = make("div", undefined, "chain");
     for (const t of targets) {
@@ -1496,7 +1520,7 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   async function chainResult(src: string, name: string, entryId: string): Promise<void> {
-    const target = menuItems().find((i) => i.id === entryId);
+    const target = offeredEntries().find((i) => i.id === entryId);
     if (target === undefined) return;
     // One image for an upscale, so a result replaces whatever was attached; edit adds to the list.
     if (target.tool === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }

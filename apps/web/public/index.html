@@ -38,7 +38,7 @@
   <button id="btn-logout-noaccess" type="button" class="primary">Logout</button>
 </section>
 
-<main id="app" hidden>
+<div id="app" class="app" hidden>
   <nav id="tool-nav" class="sidebar" aria-label="Tools">
     <div class="side-head">
       <p class="side-title">Tools</p>
@@ -50,12 +50,13 @@
     <p id="menu-empty" class="muted menu-empty" role="status" hidden>No tool matches.</p>
   </nav>
   <div id="menu-backdrop" class="backdrop" hidden></div>
-  <div class="page">
+  <div id="page" class="page">
   <header class="top">
     <button id="menu-open" type="button" class="menu-btn" aria-controls="tool-nav" aria-expanded="false">Menu</button>
     <h1>Image generator</h1>
     <span id="role" class="chip" hidden></span>
   </header>
+  <main id="main" class="main">
   <div class="userbar">
     <span id="user-name" class="muted"></span>
     <button id="btn-logout" type="button">Logout</button>
@@ -64,78 +65,6 @@
 
   <div id="banner" class="alert bad" role="alert" hidden></div>
   <div id="notice" class="alert ok" role="status" hidden></div>
-
-  <section class="card" aria-labelledby="status-title">
-    <h2 id="status-title">Status</h2>
-    <p id="state-line" class="state" aria-live="polite" data-tone="idle">Loading</p>
-    <div id="progress-box" hidden>
-      <progress id="progress" max="100" value="0" aria-label="Download progress"></progress>
-      <p id="progress-text" class="progress-text" hidden></p>
-      <p id="progress-file" class="muted"></p>
-    </div>
-    <p id="boot-sentence" class="alert ok" role="status" hidden></p>
-    <div id="alert-agent" class="alert warn" role="alert" hidden>
-      The instance is running but the agent cannot be reached. It may be starting up or broken.
-    </div>
-    <div id="alert-start-failure" class="alert bad" role="alert" hidden>
-      <span id="start-failure-text"></span>
-    </div>
-    <div id="alert-failed" class="alert bad" role="alert" hidden>
-      <strong>Failed.</strong> <span id="failed-reason"></span>
-    </div>
-    <div id="alert-destroy-failed" class="alert bad" role="alert" hidden>
-      <strong>Could not destroy the instance.</strong> It may still be running and costing money.
-      <span id="destroy-failed-error"></span>
-    </div>
-    <dl class="facts">
-      <div><dt>Uptime</dt><dd id="f-uptime">&mdash;</dd></div>
-      <div><dt>Cost so far</dt><dd id="f-cost">&mdash;</dd></div>
-      <div><dt>Price</dt><dd id="f-price">&mdash;</dd></div>
-      <div id="f-credit-box" hidden><dt>Vast credit</dt><dd id="f-credit">&mdash;</dd></div>
-      <div><dt>GPU</dt><dd id="f-gpu">&mdash;</dd></div>
-      <div><dt>Server</dt><dd id="f-server">&mdash;</dd></div>
-      <div><dt>Idle shutdown in</dt><dd id="f-idle">&mdash;</dd></div>
-      <div><dt>Failsafe in</dt><dd id="f-failsafe">&mdash;</dd></div>
-      <div><dt>Hard cap in</dt><dd id="f-hardcap">&mdash;</dd></div>
-      <div><dt>Queue</dt><dd id="f-queue">&mdash;</dd></div>
-      <div><dt>VRAM</dt><dd id="f-vram">&mdash;</dd></div>
-    </dl>
-  </section>
-
-  <section id="console-card" class="card" aria-labelledby="console-title" hidden>
-    <div class="card-head">
-      <h2 id="console-title">Boot console</h2>
-      <button id="console-toggle" type="button" aria-expanded="true" aria-controls="console-body">Hide log</button>
-    </div>
-    <p id="console-ended" class="alert warn" role="status" hidden></p>
-    <ol id="console-steps" class="steps" aria-label="Boot steps"></ol>
-    <div id="console-body">
-      <p id="console-error" class="muted" role="status" hidden></p>
-      <p id="console-note" class="muted" hidden></p>
-      <div id="console-log" class="console-log" role="log" aria-label="Boot console output" aria-live="off" tabindex="0"></div>
-      <div id="console-actions" class="row console-actions">
-        <button id="console-pause" type="button" aria-pressed="false">Pause</button>
-        <button id="console-copy" type="button">Copy</button>
-        <button id="console-clear" type="button">Clear view</button>
-      </div>
-      <p id="console-status" class="muted" role="status"></p>
-    </div>
-  </section>
-
-  <section id="usage-card" class="card" aria-labelledby="usage-title" hidden>
-    <div class="card-head">
-      <h2 id="usage-title">History</h2>
-      <button id="usage-toggle" type="button" aria-expanded="true" aria-controls="usage-body">Hide history</button>
-    </div>
-    <div id="usage-body">
-      <p id="usage-error" class="muted" role="status" hidden></p>
-      <p id="usage-empty" class="muted">No instance sessions yet.</p>
-      <ul id="usage-list" class="usage-list" aria-label="Recent instance sessions"></ul>
-      <p class="muted">Costs are estimates: duration &times; price per hour. Disk and traffic are billed separately.</p>
-    </div>
-  </section>
-
-  <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>
 
   <section id="tool-card" class="card" aria-labelledby="gen-title">
     <h2 id="gen-title" tabindex="-1">Generate</h2>
@@ -208,6 +137,45 @@
     </form>
   </section>
 
+  <section class="card" aria-labelledby="status-title">
+    <h2 id="status-title">Status</h2>
+    <p id="state-line" class="state" aria-live="polite" data-tone="idle">Loading</p>
+    <div id="progress-box" hidden>
+      <progress id="progress" max="100" value="0" aria-label="Download progress"></progress>
+      <p id="progress-text" class="progress-text" hidden></p>
+      <p id="progress-file" class="muted"></p>
+    </div>
+    <p id="boot-sentence" class="alert ok" role="status" hidden></p>
+    <div id="alert-agent" class="alert warn" role="alert" hidden>
+      The instance is running but the agent cannot be reached. It may be starting up or broken.
+    </div>
+    <div id="alert-start-failure" class="alert bad" role="alert" hidden>
+      <span id="start-failure-text"></span>
+    </div>
+    <div id="alert-failed" class="alert bad" role="alert" hidden>
+      <strong>Failed.</strong> <span id="failed-reason"></span>
+    </div>
+    <div id="alert-destroy-failed" class="alert bad" role="alert" hidden>
+      <strong>Could not destroy the instance.</strong> It may still be running and costing money.
+      <span id="destroy-failed-error"></span>
+    </div>
+    <dl class="facts">
+      <div><dt>Uptime</dt><dd id="f-uptime">&mdash;</dd></div>
+      <div><dt>Cost so far</dt><dd id="f-cost">&mdash;</dd></div>
+      <div><dt>Price</dt><dd id="f-price">&mdash;</dd></div>
+      <div id="f-credit-box" hidden><dt>Vast credit</dt><dd id="f-credit">&mdash;</dd></div>
+      <div><dt>GPU</dt><dd id="f-gpu">&mdash;</dd></div>
+      <div><dt>Server</dt><dd id="f-server">&mdash;</dd></div>
+      <div><dt>Idle shutdown in</dt><dd id="f-idle">&mdash;</dd></div>
+      <div><dt>Failsafe in</dt><dd id="f-failsafe">&mdash;</dd></div>
+      <div><dt>Hard cap in</dt><dd id="f-hardcap">&mdash;</dd></div>
+      <div><dt>Queue</dt><dd id="f-queue">&mdash;</dd></div>
+      <div><dt>VRAM</dt><dd id="f-vram">&mdash;</dd></div>
+    </dl>
+  </section>
+
+  <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden></section>
+
   <section class="card" aria-labelledby="hist-title">
     <h2 id="hist-title">Results</h2>
     <p id="hist-empty" class="muted">Nothing yet. Results stay here until you reload the page.</p>
@@ -224,8 +192,42 @@
     <div id="gal-list" class="grid" hidden></div>
     <button id="gal-more" type="button" hidden>Load more</button>
   </section>
+
+  <section id="usage-card" class="card" aria-labelledby="usage-title" hidden>
+    <div class="card-head">
+      <h2 id="usage-title">History</h2>
+      <button id="usage-toggle" type="button" aria-expanded="true" aria-controls="usage-body">Hide history</button>
+    </div>
+    <div id="usage-body">
+      <p id="usage-error" class="muted" role="status" hidden></p>
+      <p id="usage-empty" class="muted">No instance sessions yet.</p>
+      <ul id="usage-list" class="usage-list" aria-label="Recent instance sessions"></ul>
+      <p class="muted">Costs are estimates: duration &times; price per hour. Disk and traffic are billed separately.</p>
+    </div>
+  </section>
+
+  <section id="console-card" class="card" aria-labelledby="console-title" hidden>
+    <div class="card-head">
+      <h2 id="console-title">Boot console</h2>
+      <button id="console-toggle" type="button" aria-expanded="true" aria-controls="console-body">Hide log</button>
+    </div>
+    <p id="console-ended" class="alert warn" role="status" hidden></p>
+    <ol id="console-steps" class="steps" aria-label="Boot steps"></ol>
+    <div id="console-body">
+      <p id="console-error" class="muted" role="status" hidden></p>
+      <p id="console-note" class="muted" hidden></p>
+      <div id="console-log" class="console-log" role="log" aria-label="Boot console output" aria-live="off" tabindex="0"></div>
+      <div id="console-actions" class="row console-actions">
+        <button id="console-pause" type="button" aria-pressed="false">Pause</button>
+        <button id="console-copy" type="button">Copy</button>
+        <button id="console-clear" type="button">Clear view</button>
+      </div>
+      <p id="console-status" class="muted" role="status"></p>
+    </div>
+  </section>
+  </main>
   </div>
-</main>
+</div>
 
 <div id="modal" class="modal" hidden>
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
