@@ -1211,7 +1211,7 @@ const END_REASON_TEXT: Record<string, string> = {
   boot_timeout: "the boot took too long",
   start_stuck: "the rented machine did not start",
   boot_stopped: "the container stopped during the boot",
-  slow_boot: "the rented machine's network was too slow (the agent never answered)",
+  slow_boot: "the rented machine did not finish starting up in time (the agent never answered)",
   slow_download: "the rented machine's model download was too slow",
   unreachable: "the agent stayed unreachable",
   destroy_retry: "destroyed after a retry",
@@ -1227,9 +1227,9 @@ const RETRY_ELSEWHERE = "It was released; try Start again, a different machine i
 const START_FAILURE_TEXT: Record<string, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
-  slow_boot: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  slow_boot: `The rented machine did not finish starting up in time. ${RETRY_ELSEWHERE}`,
   slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
-  boot_failed: "The rented machine gave up during its boot and was removed; try Start again, a different machine is chosen.",
+  boot_failed: "The rented machine's boot failed and it removed itself; try Start again.",
 };
 
 /** A measured speed in MB/s from the server: a finite number 0..100000, else null. */

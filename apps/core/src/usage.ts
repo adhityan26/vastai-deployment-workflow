@@ -594,6 +594,15 @@ export class UsageHistory {
     return e !== undefined && (this.fresh.has(hostname) || e.last_agent !== null);
   }
 
+  /** The reason the agent gave when it was last seen failing or destroying itself (open session), else null. */
+  lastAgentFailure(hostname: string): string | null {
+    const e = this.open(hostname);
+    if (e === undefined) return null;
+    const obs = this.fresh.get(hostname) ?? e.last_agent;
+    if (obs === null || obs.state === null) return null;
+    return obs.state === FAILED_STATE || DESTROYING_STATES.has(obs.state) ? obs.reason : null;
+  }
+
   /** The web asked to stop this open session (any reason); the first request is kept. */
   stopRequested(hostname: string): boolean {
     return this.open(hostname)?.pending_stop != null;

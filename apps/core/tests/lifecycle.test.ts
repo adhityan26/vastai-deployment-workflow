@@ -1860,6 +1860,37 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       expect(reasons(await s.at(T0 + 9 * MIN))).toEqual(["slow_download"]);
     });
 
+    it("bytes falling below the previous sample (a file restarted) open a new window; 18-20 MB/s is never released", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(5_000 * MB);
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.downloading(6_100 * MB);
+      expect(reasons(await s.at(T0 + 4 * MIN))).toEqual([]);
+      // A retry restarted the second file: fewer bytes than the previous sample, still above the first.
+      s.downloading(5_010 * MB);
+      expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]);
+      let bytes = 5_010 * MB;
+      for (let m = 6; m <= 12; m++) {
+        bytes += 19 * MB * 60;
+        s.downloading(bytes);
+        expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+      }
+    });
+
+    it("a download that would end after BOOT_TIMEOUT_MIN is released early even with an ETA under the limit", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(0);
+      await s.at(T0 + 6 * MIN, runningRow); // a late agent: the window starts at 6 min
+      s.downloading(12.6 * MB * 120);
+      // ETA about 17.8 min (< 20), but 8 + 17.8 + the rest of the boot is past 25.
+      expect(reasons(await s.at(T0 + 8 * MIN))).toEqual([]);
+      s.downloading(12.6 * MB * 180);
+      expect(reasons(await s.at(T0 + 9 * MIN))).toEqual(["slow_download"]);
+      expect((await s.life.view()).start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 12.6 });
+    });
+
     it("no model list (no profile) never judges the download", async () => {
       const s = setup();
       s.agent.statusImpl = async () =>
@@ -1916,6 +1947,56 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       await vanish(r, 10);
       expect((await r.life.view()).start_failure).toBeNull();
       expect((await r.life.estimate()).offer_id).toBe(11);
+    });
+
+    for (const reason of ["tailscale_failed", "download_failed", "node_install_failed", "node_import_failed", "comfyui_start_failed", "config_invalid", "boot_failed", "something_new"]) {
+      it(`does not blame the machine for a boot that failed with ${reason} (service-wide or a code problem)`, async () => {
+        const s = slowSetup();
+        await s.life.start();
+        s.agent.statusImpl = async () => status("failed", { reason });
+        await s.at(T0 + 3 * MIN, runningRow);
+        await vanish(s, 10);
+        const failure = (await s.life.view()).start_failure;
+        expect(failure).toMatchObject({ code: "boot_failed" });
+        expect(failure?.server?.machine_id ?? null).toBeNull();
+        expect((await s.life.estimate()).offer_id).toBe(11);
+        expect(s.logs.find((l) => l.includes("boot failed"))).toContain("not blamed");
+      });
+    }
+
+    it("blames the machine for disk_insufficient", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.agent.statusImpl = async () => status("failed", { reason: "disk_insufficient" });
+      await s.at(T0 + 3 * MIN, runningRow);
+      await vanish(s, 10);
+      expect((await s.life.estimate()).offer_id).toBe(12);
+    });
+
+    it("never blames a machine whose Destroy was requested while its create was uncertain", async () => {
+      const s = slowSetup();
+      s.vast.createImpl = async () => {
+        throw new Error("network timeout");
+      };
+      await expect(s.life.start()).rejects.toThrow();
+      expect((await s.life.destroy("admin")).outcome).toBe("pending");
+      await s.registry.update(HOST, { status: "booting", vast_instance_id: 900 });
+      await vanish(s, 10);
+      expect(await s.registry.active()).toBeNull();
+      expect((await s.life.view()).start_failure).toBeNull();
+      expect((await s.life.estimate()).offer_id).toBe(11);
+    });
+
+    it("never blames a machine whose stop the web had recorded (usage file)", async () => {
+      const usage = new UsageHistory({ maxEntries: 20, slackS: 120 }, null);
+      const s = slowSetup({ usage });
+      await s.life.start();
+      await s.at(T0 + 3 * MIN, runningRow);
+      usage.requestStop(HOST, "hard_cap");
+      await vanish(s, 10);
+      expect(await s.registry.active()).toBeNull();
+      expect((await s.life.view()).start_failure).toBeNull();
+      expect((await s.life.estimate()).offer_id).toBe(11);
     });
 
     it("an unknown machine is not avoided (and nothing breaks)", async () => {

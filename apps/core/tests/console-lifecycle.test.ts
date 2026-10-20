@@ -196,8 +196,11 @@ describe("Lifecycle.console", () => {
     expect((await h.lc.console(0)).instance).toMatchObject({ ended: true, ended_reason: "vanished" });
   });
 
-  it("another FAILED code after the probe is a plain boot_failed", async () => {
+  it("another FAILED code after the probe is a plain boot_failed and does not blame the machine", async () => {
     const h = await harness();
+    Object.assign(h.vast.instances[0]!, { machine_id: 555 });
+    h.clock.t = T0 + 9 * 60;
+    await h.lc.reconcile();
     h.vast.logText = "[boot] net_probe: measured 2.8 MB/s (minimum 20 MB/s)\n[boot] step 4/9: tailscale\n[boot] FAILED: tailscale_failed\n";
     await h.lc.console(0);
     h.vast.instances = [];
@@ -205,7 +208,9 @@ describe("Lifecycle.console", () => {
     await h.lc.reconcile();
     h.clock.t = T0 + 11 * 60;
     await h.lc.reconcile();
-    expect((await h.lc.view()).start_failure).toMatchObject({ code: "boot_failed", measured_mb_s: null });
+    const failure = (await h.lc.view()).start_failure;
+    expect(failure).toMatchObject({ code: "boot_failed", measured_mb_s: null });
+    expect(failure?.server?.machine_id ?? null).toBeNull();
   });
 
   it("reads Vast at most once per BOOT_LOG_POLL_MIN_S", async () => {

@@ -71,6 +71,16 @@ const BYTES_PER_MB = 1_000_000; // MB/s as people (and curl, and the page) count
 // What the instance's early network probe (instance/bootstrap.sh) prints into the container log
 // when it gives up: the web shows it as slow_download (display only; never a release decision).
 const INSTANCE_SLOW_NETWORK = "slow_network";
+// A download is also too slow when it would end after BOOT_TIMEOUT_MIN: the elapsed boot, the time
+// left at the measured speed and this much for the rest of the boot (workflows, ComfyUI restart).
+const AFTER_DOWNLOAD_S = 120;
+// Failure codes (instance boot marker or agent reason) that blame the rented machine itself when its
+// boot vanished: its network to the model host or its disk. Every other code (Tailscale or key
+// problems, download_failed which is mostly Hugging Face answering 401/403/5xx, git, node and ComfyUI
+// failures, config, the generic boot_failed) is service-wide or a code problem and blames nothing.
+// No code at all (the instance vanished without a word) blames the machine.
+const MACHINE_FAILURE_CODES: ReadonlySet<string> = new Set([INSTANCE_SLOW_NETWORK, "disk_insufficient"]);
+const AGENT_FAILURE_STATES: ReadonlySet<string> = new Set(["failed", "stopping", "destroy_failed"]);
 const PERCENT = 100;
 const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
 const HOST_PLACEHOLDER = "[host]";
@@ -471,9 +481,13 @@ export class Lifecycle {
     id: number;
     firstAt: number;
     firstBytes: number;
+    lastBytes: number;
     slowSince: number | null;
     count: number;
   } | null = null;
+  // The reason the agent of the active record gave when it was last seen failing (in memory; the
+  // usage file keeps the last sighting for after a restart).
+  private lastAgentFailure: { hostname: string; reason: string | null } | null = null;
   // The last hostname whose agent answered (one instance is active at a time).
   private agentAnsweredHost: string | null = null;
   // Where the active record's server is, from the last Vast row seen: an instance that vanished is no
@@ -1547,7 +1561,11 @@ export class Lifecycle {
     }
 
     // Slow boots: only a record still booting (never one that reached ready) is judged.
-    if (agent !== null) this.agentAnsweredHost = hostname;
+    if (agent !== null) {
+      this.agentAnsweredHost = hostname;
+      const failing = AGENT_FAILURE_STATES.has(agent.state ?? "");
+      this.lastAgentFailure = { hostname, reason: failing && typeof agent.reason === "string" ? agent.reason : null };
+    }
     const silentHeld = this.sampleSilent(record, inst, agent, now);
     const slowDownload = this.sampleDownload(record, agent, now);
 
@@ -1626,8 +1644,10 @@ export class Lifecycle {
    * /status), judged once the window is MODEL_ETA_MIN_OBSERVE_S long. Too slow means the bytes left
    * would take more than BOOT_MAX_DOWNLOAD_ETA_MIN at that speed. Returns the speed in MB/s when the
    * slow download held (STUCK_CONFIRMATIONS consecutive slow samples, STUCK_DWELL_S apart), else null.
+   * Also too slow: a download that, at that speed, would end (plus AFTER_DOWNLOAD_S for the rest of the
+   * boot) after BOOT_TIMEOUT_MIN, which would release it anyway without naming the machine.
    * A failed agent read is not a sample; a good sample resets the slow run; fewer bytes than at the
-   * start of the window (a file restarted) starts a new window.
+   * previous sample (a file restarted) start a new window.
    */
   private sampleDownload(record: InstanceRecord, agent: AgentStatus | null, now: number): number | null {
     const hostname = record.tailnet_hostname;
@@ -1642,21 +1662,26 @@ export class Lifecycle {
     if (dl === null) return reset();
     const observeS = intCfg(this.cfg, "modelEtaMinObserveS", "MODEL_ETA_MIN_OBSERVE_S", 1);
     const maxEtaS = intCfg(this.cfg, "bootMaxDownloadEtaMin", "BOOT_MAX_DOWNLOAD_ETA_MIN", 1) * SECONDS_PER_MINUTE;
+    const bootTimeoutS = intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1) * SECONDS_PER_MINUTE;
     const seen = this.downloadSeen;
-    if (seen === null || seen.hostname !== hostname || seen.id !== id || dl.bytes_done < seen.firstBytes) {
-      this.downloadSeen = { hostname, id, firstAt: now, firstBytes: dl.bytes_done, slowSince: null, count: 0 };
+    if (seen === null || seen.hostname !== hostname || seen.id !== id || dl.bytes_done < seen.lastBytes) {
+      this.downloadSeen = { hostname, id, firstAt: now, firstBytes: dl.bytes_done, lastBytes: dl.bytes_done, slowSince: null, count: 0 };
       return null;
     }
     const observed = now - seen.firstAt;
-    if (observed < observeS) return null;
+    if (observed < observeS) {
+      this.downloadSeen = { ...seen, lastBytes: dl.bytes_done };
+      return null;
+    }
     const rate = (dl.bytes_done - seen.firstBytes) / observed; // bytes per second
     const left = Math.max(0, dl.bytes_total - dl.bytes_done);
     const eta = left === 0 ? 0 : rate > 0 ? left / rate : Number.POSITIVE_INFINITY;
-    if (eta <= maxEtaS) {
-      this.downloadSeen = { ...seen, slowSince: null, count: 0 };
+    const doomed = now - record.created_at + eta + AFTER_DOWNLOAD_S > bootTimeoutS;
+    if (eta <= maxEtaS && !doomed) {
+      this.downloadSeen = { ...seen, lastBytes: dl.bytes_done, slowSince: null, count: 0 };
       return null;
     }
-    const next = { ...seen, slowSince: seen.slowSince ?? now, count: seen.count + 1 };
+    const next = { ...seen, lastBytes: dl.bytes_done, slowSince: seen.slowSince ?? now, count: seen.count + 1 };
     this.downloadSeen = next;
     if (next.count < STUCK_CONFIRMATIONS || now - next.slowSince < STUCK_DWELL_S) return null;
     return measuredMbS(rate / BYTES_PER_MB) ?? 0;
@@ -1681,18 +1706,33 @@ export class Lifecycle {
     }
     let code: StuckCode = "boot_failed";
     let measured: number | null = null;
+    const codes: string[] = [];
     try {
       const buf = this.consoleBuffer();
-      if (buf.owner === hostname && buf.failedCode === INSTANCE_SLOW_NETWORK) {
-        code = "slow_download";
-        measured = buf.netProbeMbS();
+      if (buf.owner === hostname && buf.failedCode !== null) {
+        codes.push(buf.failedCode);
+        if (buf.failedCode === INSTANCE_SLOW_NETWORK) {
+          code = "slow_download";
+          measured = buf.netProbeMbS();
+        }
       }
     } catch {
       // the console is optional
     }
+    let agentReason = this.lastAgentFailure?.hostname === hostname ? this.lastAgentFailure.reason : null;
+    if (agentReason === null) {
+      try {
+        agentReason = this.deps.usage?.lastAgentFailure(hostname) ?? null;
+      } catch {
+        agentReason = null;
+      }
+    }
+    if (agentReason !== null) codes.push(agentReason);
+    // Where the web cannot tell it is the machine, it does not blame it (see MACHINE_FAILURE_CODES).
+    const blame = codes.length === 0 || codes.some((c) => MACHINE_FAILURE_CODES.has(c));
     const known = this.lastServer?.hostname === hostname ? this.lastServer.server : NO_SERVER;
     const offer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
-    this.recordStuck(record, record.vast_instance_id, null, mergeServer(known, offer) ?? NO_SERVER, now, code, measured);
+    this.recordStuck(record, record.vast_instance_id, null, mergeServer(known, offer) ?? NO_SERVER, now, code, measured, blame);
   }
 
   /**
@@ -1717,8 +1757,9 @@ export class Lifecycle {
     now: number,
     code: StuckCode,
     measured: number | null,
+    blame = true,
   ): void {
-    const avoid = BAD_MACHINE_CODES.has(code) ? server.machine_id : null;
+    const avoid = blame && BAD_MACHINE_CODES.has(code) ? server.machine_id : null;
     const entry: StuckStart = {
       hostname: record.tailnet_hostname,
       code,
@@ -1734,7 +1775,12 @@ export class Lifecycle {
     const inst = instanceId ?? "unknown";
     const machine = server.machine_id ?? "unknown";
     const ttl = Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE);
-    const avoiding = avoid !== null ? `avoiding the machine for ${ttl} min` : "the machine is not known, nothing is avoided";
+    const avoiding =
+      avoid !== null
+        ? `avoiding the machine for ${ttl} min`
+        : !blame
+          ? "the failure is not the machine's, it is not blamed"
+          : "the machine is not known, nothing is avoided";
     const speed = entry.measured_mb_s !== null ? `about ${entry.measured_mb_s} MB/s` : "speed unknown";
     let text: string;
     switch (code) {

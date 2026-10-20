@@ -651,7 +651,11 @@ describe("GET /api/state", () => {
     expect(startFailureMessage("slow_download", null)).toBe(
       "The rented machine's network is too slow. It was released; try Start again, a different machine is chosen.",
     );
-    expect(startFailureMessage("slow_boot", 2.8)).toBe(startFailureMessage("slow_download", null));
+    expect(startFailureMessage("slow_boot", 2.8)).toBe(
+      "The rented machine did not finish starting up in time. It was released; try Start again, a different machine is chosen.",
+    );
+    const schemaText = readFileSync(OPENAPI, "utf8");
+    expect(schemaText).not.toContain("BOOT_AGENT_GRACE_MIN old");
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     const sf = doc.components.schemas.State.properties.start_failure;
     expect(sf.required).toEqual(["code", "message", "server", "measured_mb_s"]);

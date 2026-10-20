@@ -24,11 +24,11 @@ ComfyUI `input/` until the instance is destroyed; animated/multi-frame reference
 
 Two paid boots were lost on 2026-10-19 (Lithuania A5000: models at ~2.8 MB/s from Hugging Face despite
 888 Mbps on Vast; California 3090: 20+ min in `install_tools`, released only at `BOOT_TIMEOUT_MIN`). Built:
-an early network probe as the first boot step (`net_probe`; `NET_PROBE_BYTES` 24 MiB, `NET_PROBE_MIN_MBPS`
-20 MB/s, `[boot] FAILED: slow_network`, exit 14, stock-CLI destroy), boot step markers printed by
+an early network probe as the first boot step (`net_probe`; `NET_PROBE_BYTES` 48 MiB of the largest model, second
+half timed, `NET_PROBE_MIN_MBPS` 6 MB/s, skipped on restarts and when the models are present, `[boot] FAILED: slow_network`, exit 14, stock-CLI destroy), boot step markers printed by
 bootstrap (9 steps now), web-side releases `slow_boot` (`BOOT_AGENT_GRACE_MIN` 10) and `slow_download`
 (`MODEL_ETA_MIN_OBSERVE_S` 120, `BOOT_MAX_DOWNLOAD_ETA_MIN` 20), a generic rule for a boot that vanished by
-itself (`boot_failed`), all of them putting the machine on the bad-machine list, and parallel ranged model
+itself (`boot_failed`, blaming the machine only for its own failures: see the README table), the machine going on the bad-machine list, and parallel ranged model
 downloads (`DOWNLOAD_CONNECTIONS` 4). Runbook: `deploy/web/README.md` "Slow boots". Unverified live: the
 early destroy path, markers in `vastai logs`, ranges through the HF CDN/xet redirect, the thresholds.
 

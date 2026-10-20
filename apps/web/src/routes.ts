@@ -89,9 +89,9 @@ const RETRY_ELSEWHERE = "It was released; try Start again, a different machine i
 const START_FAILURE_MESSAGES: Record<StartFailureCode, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
-  slow_boot: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  slow_boot: `The rented machine did not finish starting up in time. ${RETRY_ELSEWHERE}`,
   slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
-  boot_failed: "The rented machine gave up during its boot and was removed; try Start again, a different machine is chosen.",
+  boot_failed: "The rented machine's boot failed and it removed itself; try Start again.",
 };
 
 /** The fixed text of a start failure; slow_download names the measured speed (a number only) when known. */

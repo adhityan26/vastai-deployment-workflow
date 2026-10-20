@@ -209,8 +209,12 @@ describe("form helpers", () => {
       `${slow} (about 2.8 MB/s to the model host). ${retry}`,
     );
     expect(startFailureText({ code: "slow_download", message: "", measured_mb_s: null })).toBe(`${slow}. ${retry}`);
-    expect(startFailureText({ code: "slow_boot", message: "", measured_mb_s: 2.8 })).toBe(`${slow}. ${retry}`);
-    expect(startFailureText({ code: "boot_failed", message: "" })).toContain("a different machine is chosen");
+    expect(startFailureText({ code: "slow_boot", message: "", measured_mb_s: 2.8 })).toBe(
+      `The rented machine did not finish starting up in time. ${retry}`,
+    );
+    expect(startFailureText({ code: "boot_failed", message: "" })).toBe(
+      "The rented machine's boot failed and it removed itself; try Start again.",
+    );
     expect(parseState({ ...base, start_failure: { code: "slow_download", message: "m", measured_mb_s: 2.8 } })!.start_failure?.measured_mb_s).toBe(2.8);
     for (const bad of [-1, "2.8", Number.NaN, 1e9]) {
       expect(parseState({ ...base, start_failure: { code: "slow_download", message: "m", measured_mb_s: bad } })!.start_failure?.measured_mb_s).toBeNull();

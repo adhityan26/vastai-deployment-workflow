@@ -262,23 +262,31 @@ What happened on 2026-10-19 (two paid boots lost):
 
 Vast's `inet_down` (and `VAST_MIN_DOWNLOAD_MBPS`) is a property of the machine's uplink as Vast measured
 it, not of the route to Hugging Face, its CDN or the apt/PyPI mirrors: both machines above passed the
-500 Mbps filter. So the guards below measure what the boot itself sees, and every machine they give up on
-is put on the bad-machine list (`VAST_BAD_MACHINE_TTL_MIN`, default 60, the same list the stuck start
+500 Mbps filter. So the guards below measure what the boot itself sees, and a machine they give up on for
+its own fault is put on the bad-machine list (`VAST_BAD_MACHINE_TTL_MIN`, default 60, the same list the stuck start
 uses, kept in the usage file) so the next Start rents a different one. Only the machine id is kept, not
 the region.
 
 1. **Network probe on the instance (first boot step, `net_probe`).** Before anything is installed,
-   `instance/bootstrap.sh` downloads the first `NET_PROBE_BYTES` (default 24 MiB) of the profile's
-   smallest pinned model that is at least that large (the Real-ESRGAN file of the shipped profile; the
-   URL comes from the profile, never from code) and measures the body speed (first byte to end). Below
-   `NET_PROBE_MIN_MBPS` (default 20 MB/s) it waits 5 s and measures once more (a transient dip); still
-   slow, it prints `[boot] net_probe: measured <N> MB/s (minimum <M> MB/s)` and `[boot] FAILED:
-   slow_network` to the container log and destroys itself with the image's stock vastai CLI (the
-   emergency path, exit code 14). That is a few paid seconds instead of a 25 minute wait. A probe that
-   cannot run (no curl, no usable profile entry, an HTTP error, a stalled transfer, a bad key value) only
-   logs a warning and the boot goes on; it never destroys on its own malfunction. It sends no token
-   (the pinned files are public). `NET_PROBE_MIN_MBPS=0` turns it off. The web passes both keys to the
-   instance (they are read before the instance config exists, with the schema defaults).
+   `instance/bootstrap.sh` reads the first `NET_PROBE_BYTES` (default 48 MiB) of the profile's largest
+   pinned model (the text encoder of the shipped profile: the same repo and Hugging Face storage path
+   as most of the 15 GB; the URL comes from the profile, never from code) in two halves over one
+   connection (`curl --next`) and times only the second half, first body byte to end. The first half
+   pays for TCP slow start, TLS and the redirect: on a 120 ms round trip a healthy 55 MB/s link reads
+   only about 20 MB/s over its first 24 MiB. Below `NET_PROBE_MIN_MBPS` (default 6 MB/s, more than
+   twice the 2.8 MB/s of the Lithuania boot) it waits 5 s and measures once more (a transient dip, or
+   the image entrypoint competing for the link); still slow, it prints `[boot] net_probe: measured <N>
+   MB/s (minimum <M> MB/s)` and `[boot] FAILED: slow_network` to the container log and destroys itself
+   with the image's stock vastai CLI (the emergency path, exit code 14). That is a few paid seconds
+   instead of a 25 minute wait. A sample cut by curl's time cap counts only with at least 4 MiB or 2 s
+   of body. It never probes on a container restart (the first-boot time file exists) or when every
+   pinned model is already on disk, so a restarted or ready instance is never destroyed by it. A probe
+   that cannot run (no curl, no usable profile entry, an HTTP error, too little data, a bad key value)
+   only logs a warning and the boot goes on; it never destroys on its own malfunction. It sends no
+   token (the pinned files are public). `NET_PROBE_MIN_MBPS=0` turns it off. The web passes both keys
+   to the instance (they are read before the instance config exists, with the schema defaults). The
+   threshold is deliberately low: a single stream undercounts what the parallel downloader gets, and
+   the web's download rule below catches the middle band.
 2. **Agent silent (web, `slow_boot`).** Vast says the container runs, but the agent has never answered
    (counted from the first reconcile that saw it running, so a long unbilled image pull does not count)
    for `BOOT_AGENT_GRACE_MIN` (default 10; at least 2 and below `BOOT_TIMEOUT_MIN`). A healthy agent
@@ -287,15 +295,32 @@ the region.
    averages the overall bytes (across the profile files) since the first sample of a window; once the
    window is `MODEL_ETA_MIN_OBSERVE_S` (default 120) long, a remaining time above
    `BOOT_MAX_DOWNLOAD_ETA_MIN` (default 20) at that speed is slow. For 15 GB that is below about
-   12.5 MB/s at the start; 55 MB/s gives an ETA of about 5 min, 2.8 MB/s about 90 min. The agent's
-   status carries bytes only, so the web computes the rate itself (the page does the same for its own
-   speed and ETA). Fewer bytes than at the window start (a file restarted) starts a new window.
+   12.5 MB/s at the start; 55 MB/s gives an ETA of about 5 min, 2.8 MB/s about 90 min. Also slow: a
+   download that at that speed would end (plus 2 min for the rest of the boot) after
+   `BOOT_TIMEOUT_MIN`. Without it a band of about 12.5-15 MB/s (or a late start) was doomed: under the
+   ETA limit, yet the boot timeout released it later without blaming the machine. A healthy 18-20 MB/s
+   download that starts on time is not released. The agent's status carries bytes only, so the web
+   computes the rate itself (the page does the same for its own speed and ETA). Fewer bytes than at
+   the previous sample (a retry restarted a file) start a new window.
 4. **A boot that vanished (web, `boot_failed`).** An instance that disappears while it is still
-   booting (it never reached ready) and that the web did not stop (no Destroy button, no web release)
-   gave up by itself: its machine goes on the list too. When the boot console had read the probe's
-   `[boot] FAILED: slow_network` (only while an admin watched it), the page shows `slow_download` with
-   the probe's speed. The machine id comes from the last Vast row or the chosen offer in memory, so after
-   a web restart it can be unknown; then nothing is avoided.
+   booting (it never reached ready) and that the web did not stop (no Destroy button, no web release,
+   no recorded stop) gave up by itself. The page says so; whether its machine goes on the list depends
+   on why, from the boot console's `[boot] FAILED: <code>` (only read while an admin watched it) and the
+   reason of the last failing agent status the web saw. Where the web cannot tell it is the machine, it
+   does not blame it:
+
+   | Failure code(s) seen                                                   | Machine avoided |
+   |------------------------------------------------------------------------|-----------------|
+   | `slow_network` (the probe; the page then shows `slow_download` with its speed) | yes     |
+   | `disk_insufficient`                                                    | yes             |
+   | none at all (it vanished without a word, e.g. the host died)           | yes             |
+   | `tailscale_failed`, auth key problems                                  | no (service-wide) |
+   | `download_failed` (mostly Hugging Face 401/403/5xx)                    | no (service-wide) |
+   | git clone, `node_install_failed`, `node_import_failed`, `comfyui_start_failed`, `config_invalid`, `agent_start_failed`, `supervisor_failed`, `failsafe_failed` | no (a code or setup problem) |
+   | the generic `boot_failed`, or any other code                           | no (cannot tell) |
+
+   The machine id comes from the last Vast row or the chosen offer in memory, so after a web restart
+   it can be unknown; then nothing is avoided either.
 
 Rules 2 and 3 use the stuck-start discipline: two consecutive reconciles whose first and last are at
 least a minute apart (and, for rule 2, `BOOT_AGENT_GRACE_MIN` apart), keyed by hostname and instance id;
@@ -305,8 +330,10 @@ uses the normal destroy path: usage reason "Boot failed", console end reason `sl
 `slow_download`, a `lifecycle: slow boot|slow download` warning with the instance and machine ids
 (never a hostname), and `start_failure` in `GET /api/state`; the page says "The rented machine's network
 is too slow (about N MB/s to the model host). It was released; try Start again, a different machine is
-chosen." (N only for `slow_download`, a number only). The unreachable rule (`UNREACHABLE_DESTROY_MIN`,
-15) still covers an agent that answered once and then went silent.
+chosen." for `slow_download` (N, a number only, when known) and "The rented machine did not finish
+starting up in time. It was released; try Start again, a different machine is chosen." for
+`slow_boot`. The unreachable rule (`UNREACHABLE_DESTROY_MIN`, 15) still covers an agent that answered
+once and then went silent.
 
 5. **Faster downloads.** The agent fetches each model file over `DOWNLOAD_CONNECTIONS` (default 4,
    max 16; 1 = the old single stream) parallel byte ranges when the server answers HEAD with
@@ -317,8 +344,9 @@ chosen." (N only for `slow_download`, a number only). The unreachable rule (`UNR
 
 Tuning: raise `NET_PROBE_MIN_MBPS` or lower `BOOT_MAX_DOWNLOAD_ETA_MIN` to be stricter (more releases,
 fewer slow boots); keep `BOOT_MAX_DOWNLOAD_ETA_MIN` plus the rest of a boot (about 3 min) below
-`BOOT_TIMEOUT_MIN`, or the boot timeout releases first without naming the machine. Measuring on a live
-instance: `curl -sS -L -o /dev/null -r 0-25165823 -w '%{speed_download}\n' <resolve URL>`.
+`BOOT_TIMEOUT_MIN` (the doomed-download rule then releases it in time). Measuring on a live instance:
+`curl -sS -L -o /dev/null -r 0-25165823 -w '%{speed_download}\n' <resolve URL> --next -sS -L -o /dev/null
+-r 25165824-50331647 -w '%{speed_download}\n' <resolve URL>` (the second number is what the probe uses).
 
 ## Boot console
 
