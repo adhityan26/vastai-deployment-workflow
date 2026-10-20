@@ -7,6 +7,7 @@ export * from "./console.js";
 export * from "./gallery.js";
 export * from "./generate.js";
 export * from "./lifecycle.js";
+export * from "./offer-choice.js";
 export * from "./menu.js";
 export * from "./profile.js";
 export * from "./progress.js";

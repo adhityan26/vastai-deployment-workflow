@@ -189,8 +189,10 @@ class FakeVast {
     this.searches.push(filters);
     return this.offers;
   }
-  async createInstance(_offer: number, req: CreateRequest): Promise<{ id: number }> {
+  createdOffers: number[] = [];
+  async createInstance(offer: number, req: CreateRequest): Promise<{ id: number }> {
     this.creates++;
+    this.createdOffers.push(offer);
     const id = this.nextId++;
     this.instances.push({ id, label: req.label, actual_status: "loading", start_date: NOW_S, dph_total: 0.3 });
     return { id };
@@ -280,6 +282,7 @@ async function harness(
     vastMinVramGb: 24,
     vastMaxDph: "0.50",
     vastMinDownloadMbps: 500,
+    startOfferListMax: 3,
     vastMinReliability: "0.98",
     vastAllowedGpus: ["RTX A5000", "RTX 3090", "RTX 4090"],
     comfyPort: comfy.port,
@@ -581,7 +584,7 @@ describe("request hygiene", () => {
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe("invalid_json");
     expect(bad.body).not.toMatch(/at .*\.ts/);
-    const extra = await post("/api/start", a, { confirm: true, offer_id: 1 });
+    const extra = await post("/api/start", a, { confirm: true, vast_offer: 1 });
     expect(extra.statusCode).toBe(400);
     expect((await post("/api/start", a, { confirm: "true" })).statusCode).toBe(400);
     expect(h.vast.creates).toBe(0);
@@ -2041,7 +2044,7 @@ describe("GPU choice", () => {
     expect(h.vast.searches).toHaveLength(before);
     expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).json().error.code).toBe("no_offers");
     expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).statusCode).toBe(409);
-    for (const q of ["gpu=a&gpu=b", "gpu=", `gpu=${"x".repeat(65)}`, "offer_id=5", "gpu=RTX%204090&max_dph=9"]) {
+    for (const q of ["gpu=a&gpu=b", "gpu=", `gpu=${"x".repeat(65)}`, "vast_offer=5"]) {
       const res = await call("GET", `/api/estimate?${q}`, a);
       expect(res.statusCode, q).toBe(400);
       expect(res.json().error.code, q).toBe("invalid_body");
@@ -2058,8 +2061,8 @@ describe("GPU choice", () => {
       { confirm: true, gpu: ["RTX 4090"] },
       { confirm: true, gpu: null },
       { confirm: true, gpu: "x".repeat(65) },
-      { confirm: true, gpu: "RTX 4090", offer_id: 40 },
-      { confirm: true, gpu: "RTX 4090", max_dph: 9 },
+      { confirm: true, gpu: "RTX 4090", vast_offer: 40 },
+      { confirm: true, gpu: "RTX 4090", host: "203.0.113.9" },
       { gpu: "RTX 4090" },
     ]) {
       const res = await post("/api/start", a, body);
@@ -3028,5 +3031,108 @@ describe("menu", () => {
     const body = (await call("GET", "/api/state", await member())).json();
     for (const i of body.menu.items) expect(item.properties.icon.enum).toContain(i.icon);
     expect(Object.keys(body.menu).sort()).toEqual(["categories", "items"]);
+  });
+});
+
+describe("advanced server choice (offers, filters, explicit offer)", () => {
+  const rtx = (id: number, dph: number, geo: string, down: number, rel: number): Offer => ({
+    id, dph_total: dph, gpu_name: "RTX A5000", gpu_ram: 24564, geolocation: geo, inet_down: down, reliability2: rel, machine_id: 7000 + id, host_id: 9, public_ipaddr: "203.0.113.9",
+  });
+  const offers = [
+    rtx(1, 0.3, "Lithuania, LT", 600, 0.99),
+    rtx(2, 0.4, "Quebec, CA", 900, 0.995),
+    rtx(3, 0.25, "Texas, US", 700, 0.98),
+    rtx(4, 0.45, "Tokyo, JP", 800, 0.999),
+  ];
+  beforeEach(async () => {
+    h = await harness({ ready: false });
+    h.vast.offers = offers;
+  });
+
+  it("GET /api/offers: 401 anonymous, 403 member, a bounded list in the public shape for an admin", async () => {
+    expect((await call("GET", "/api/offers")).statusCode).toBe(401);
+    expect((await call("GET", "/api/offers", await member())).statusCode).toBe(403);
+    const res = await call("GET", "/api/offers", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.json().offers.map((o: { id: number }) => o.id)).toEqual([3, 1, 2]);
+    expect(res.json().offers[0]).toEqual({ id: 3, gpu_name: "RTX A5000", dph: 0.25, vram_gb: 24, location: "Texas, US", region: "north_america", down_mbps: 700, reliability: 0.98 });
+    for (const secret of ["machine", "host", "203.0.113.9", "7003"]) expect(res.body).not.toContain(secret);
+  });
+
+  it("GET /api/offers filters and sorts by the query", async () => {
+    const a = await admin();
+    const ids = async (q: string) => (await call("GET", `/api/offers?${q}`, a)).json().offers?.map((o: { id: number }) => o.id);
+    expect(await ids("region=north_america")).toEqual([3, 2]);
+    expect(await ids("max_dph=0.3")).toEqual([3, 1]);
+    expect(await ids("min_down_mbps=800")).toEqual([2, 4]);
+    expect(await ids("sort=speed")).toEqual([2, 4, 3]);
+    expect(await ids("sort=reliability&region=asia")).toEqual([4]);
+  });
+
+  it.each([
+    "region=mars", "max_dph=0", "max_dph=0.51", "max_dph=abc", "min_down_mbps=-1", "min_down_mbps=1.5", "sort=random", "offer_id=0", "host=1.2.3.4", "gpu=Tesla%20P40",
+  ])("GET /api/offers?%s is refused with 400 and the list is not read", async (q) => {
+    const before = h.vast.searches.length;
+    const res = await call("GET", `/api/offers?${q}`, await admin());
+    expect(res.statusCode).toBe(400);
+    expect(h.vast.searches).toHaveLength(before);
+  });
+
+  it("estimate and gpus follow the filters", async () => {
+    const a = await admin();
+    expect((await call("GET", "/api/estimate?region=asia", a)).json()).toMatchObject({ dph: 0.45, location: "Tokyo, JP" });
+    const gpus = (await call("GET", "/api/gpus?region=europe", a)).json().gpus;
+    expect(gpus[0]).toMatchObject({ name: "RTX A5000", dph: 0.3, location: "Lithuania, LT" });
+    expect((await call("GET", "/api/estimate?region=oceania", a)).statusCode).toBe(409);
+  });
+
+  it("start with filters rents the first of the filtered order; with offer_id exactly that offer", async () => {
+    const a = await admin();
+    expect((await post("/api/start", a, { confirm: true, region: "asia" })).statusCode).toBe(200);
+    expect(h.vast.createdOffers).toEqual([4]);
+    await post("/api/destroy", a);
+    h.clock.ms += 3_600_001;
+    h = await harness({ ready: false });
+    h.vast.offers = offers;
+    const res = await post("/api/start", await admin(), { confirm: true, offer_id: 2 });
+    expect(res.statusCode).toBe(200);
+    expect(h.vast.createdOffers).toEqual([2]);
+    expect(res.body).not.toMatch(/offer_id|machine/);
+  });
+
+  it("start with an offer that vanished: 409 offer_gone, nothing rented and nothing billed", async () => {
+    const a = await admin();
+    h.vast.offers = offers.filter((o) => o.id !== 2);
+    const res = await post("/api/start", a, { confirm: true, offer_id: 2 });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("offer_gone");
+    expect(h.vast.creates).toBe(0);
+    expect((await h.registry.all()).every((r) => r.status === "gone")).toBe(true);
+    expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200); // the next plain Start works
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["an unknown region", { region: "mars" }],
+    ["a price above VAST_MAX_DPH", { max_dph: 0.9 }],
+    ["a text offer id", { offer_id: "2" }],
+    ["an unknown member", { machine_id: 7002 }],
+  ])("start with %s is 400 and creates nothing", async (_n, extra) => {
+    const res = await post("/api/start", await admin(), { confirm: true, ...extra });
+    expect(res.statusCode).toBe(400);
+    expect(h.vast.creates).toBe(0);
+  });
+
+  it("an invalid request does not use up the Start rate limit", async () => {
+    const a = await admin();
+    for (let i = 0; i < 5; i++) expect((await post("/api/start", a, { confirm: true, region: "mars" })).statusCode).toBe(400);
+    expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200);
+  });
+
+  it("the shipped OpenAPI document describes the offers route and the new request members", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    expect(doc.paths["/api/offers"].get).toBeDefined();
+    const start = doc.paths["/api/start"].post.requestBody.content["application/json"].schema.properties;
+    expect(Object.keys(start)).toEqual(expect.arrayContaining(["region", "max_dph", "min_down_mbps", "sort", "offer_id"]));
   });
 });

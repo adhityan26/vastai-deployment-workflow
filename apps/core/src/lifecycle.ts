@@ -13,6 +13,7 @@ import {
   type ConsoleStoreLike,
   type PhaseInfo,
 } from "./console.js";
+import { filterAndSortOffers, parseStartFilters, publicOffer, type PublicOffer, type StartFilters } from "./offer-choice.js";
 import {
   CreateRejected,
   DestroyError,
@@ -95,6 +96,14 @@ const WATCHDOG_STOPS: Readonly<Record<string, { reason: StopReason }>> = {
   slow_download: { reason: "boot_failed" },
   unreachable: { reason: "agent_unreachable" },
 };
+
+/** The offer an admin picked is no longer available (or no longer passes the filters). Nothing was rented. */
+export class OfferGoneError extends Error {
+  constructor() {
+    super("the chosen Vast offer is no longer available");
+    this.name = "OfferGoneError";
+  }
+}
 
 export class NoOffersError extends Error {
   constructor() {
@@ -592,11 +601,12 @@ export class Lifecycle {
     models: readonly string[],
     base: OfferFilters = this.baseFilters(),
     avoid: ReadonlySet<number> = new Set(),
+    choice: StartFilters = {},
   ): Promise<Offer[]> {
     const filters: OfferFilters = { ...base, allowedGpus: models };
     const minRamMb = filters.minVramGb * MB_PER_GB;
     const offers = await this.deps.vast.searchOffers(filters);
-    return offers
+    const matching = offers
       .filter((o) => {
         const machine = positiveId(o["machine_id"]);
         return machine === null || !avoid.has(machine);
@@ -610,8 +620,33 @@ export class Lifecycle {
       .filter((o) => typeof o.gpu_name === "string" && models.includes(normalizeGpuName(o.gpu_name)))
       .filter((o) => typeof o.dph_total === "number" && Number.isFinite(o.dph_total) && o.dph_total > 0)
       .filter((o) => o.dph_total <= filters.maxDph)
-      .filter((o) => typeof o.gpu_ram === "number" && Number.isFinite(o.gpu_ram) && o.gpu_ram >= minRamMb)
-      .sort((a, b) => a.dph_total - b.dph_total);
+      .filter((o) => typeof o.gpu_ram === "number" && Number.isFinite(o.gpu_ram) && o.gpu_ram >= minRamMb);
+    // The admin's own region/price/speed filters and sort come after every configured limit: they only narrow.
+    return filterAndSortOffers(matching, choice);
+  }
+
+  /** Check the filter members of a request against the configured limits (a request can only narrow them). */
+  parseFilters(raw: unknown): StartFilters {
+    return parseStartFilters(raw, { maxDph: this.baseFilters().maxDph });
+  }
+
+  /** The offer an explicit choice names, else the first of the filtered order; NoOffers/OfferGone when none. */
+  private pickOffer(list: readonly Offer[], choice: StartFilters): Offer {
+    if (choice.offerId !== undefined) {
+      const found = list.find((o) => o.id === choice.offerId);
+      if (found === undefined) throw new OfferGoneError();
+      return found;
+    }
+    const first = list[0];
+    if (first === undefined) throw new NoOffersError();
+    return first;
+  }
+
+  /** The best offers now (after the configured limits, the bad-machine list and the filters), for the dialog. */
+  async offers(gpu?: string, choice: StartFilters = {}): Promise<PublicOffer[]> {
+    const models = this.modelsFor(gpu);
+    const list = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
+    return list.slice(0, intCfg(this.cfg, "startOfferListMax", "START_OFFER_LIST_MAX", 1)).map(publicOffer);
   }
 
   private badMachineTtl(): number {
@@ -639,9 +674,9 @@ export class Lifecycle {
   }
 
   /** Every allowed model in config order with its cheapest matching offer (one Vast search). */
-  async gpuOptions(): Promise<GpuOption[]> {
+  async gpuOptions(choice: StartFilters = {}): Promise<GpuOption[]> {
     const models = this.allowedModels();
-    const offers = await this.offersFor(models, this.baseFilters(), await this.badMachines());
+    const offers = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
     return models.map((name) => {
       const best = offers.find((o) => normalizeGpuName(o.gpu_name as string) === name);
       if (best === undefined) return { name, dph: null, vram_gb: null, available: false, location: null, down_mbps: null };
@@ -662,11 +697,10 @@ export class Lifecycle {
    * Cheapest matching offer and its upper-bound cost; read-only (for the confirmation dialog).
    * `gpu` restricts the search to that allowed model; without it every allowed model counts.
    */
-  async estimate(gpu?: string): Promise<CostEstimate> {
+  async estimate(gpu?: string, choice: StartFilters = {}): Promise<CostEstimate> {
     const models = this.modelsFor(gpu);
-    const offer = (await this.offersFor(models, this.baseFilters(), await this.badMachines()))[0];
-    if (offer === undefined) throw new NoOffersError();
-    return this.estimateFor(offer);
+    const list = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
+    return this.estimateFor(this.pickOffer(list, choice));
   }
 
   private buildEnv(hostname: string, token: string, authKey: string): Record<string, string> {
@@ -704,7 +738,7 @@ export class Lifecycle {
    * (`creating`) is written before any Vast call. A definite failure marks it gone; an ambiguous
    * create failure leaves it `creating` for reconcile to resolve by its label.
    */
-  start(gpu?: string, by?: string | null): Promise<StartResult> {
+  start(gpu?: string, by?: string | null, choice: StartFilters = {}): Promise<StartResult> {
     // Validate the model before sharing an attempt or writing anything.
     let models: string[];
     try {
@@ -713,7 +747,7 @@ export class Lifecycle {
       return Promise.reject(err);
     }
     if (this.starting) return this.starting;
-    const run = this.exclusive(() => this.doStart(models, by ?? null));
+    const run = this.exclusive(() => this.doStart(models, by ?? null, choice));
     this.starting = run;
     const clear = (): void => {
       if (this.starting === run) this.starting = null;
@@ -722,7 +756,7 @@ export class Lifecycle {
     return run;
   }
 
-  private async doStart(models: readonly string[], by: string | null): Promise<StartResult> {
+  private async doStart(models: readonly string[], by: string | null, choice: StartFilters): Promise<StartResult> {
     const { registry, vast } = this.deps;
     const hostname = this.deps.newHostname();
     const token = this.deps.newToken();
@@ -745,7 +779,7 @@ export class Lifecycle {
       await registry.markGone(record.tailnet_hostname);
       this.endUsage(hostname);
       this.endConsole(record.tailnet_hostname, "start_failed");
-      if (err instanceof NoOffersError) throw err;
+      if (err instanceof NoOffersError || err instanceof OfferGoneError) throw err;
       throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason);
     };
 
@@ -772,13 +806,12 @@ export class Lifecycle {
       return failBeforeCreate(err, "config_invalid");
     }
 
-    let offer: Offer | undefined;
+    let offer: Offer;
     try {
-      offer = (await this.offersFor(models, filters, avoid))[0];
+      offer = this.pickOffer(await this.offersFor(models, filters, avoid, choice), choice);
     } catch (err) {
       return failBeforeCreate(err, "vast_unavailable");
     }
-    if (offer === undefined) return failBeforeCreate(new NoOffersError(), "vast_unavailable");
 
     let request: CreateRequest;
     try {

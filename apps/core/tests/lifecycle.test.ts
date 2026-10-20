@@ -18,6 +18,7 @@ import {
   type OfferFilters,
   type VastInstance,
 } from "../src/vast.js";
+import { StartFilterError } from "../src/offer-choice.js";
 import { loadProfile, type ModelSpec } from "../src/profile.js";
 import { TailscaleError } from "../src/tailscale.js";
 import { UsageHistory, UsageStore, usageFileCap } from "../src/usage.js";
@@ -27,6 +28,7 @@ import {
   Lifecycle,
   NoGpuConfiguredError,
   NoOffersError,
+  OfferGoneError,
   overallDownload,
   ONSTART_CMD,
   RefusedError,
@@ -65,6 +67,7 @@ const cfg = {
   netProbeMinMbps: 20,
   downloadConnections: 4,
   vastBadMachineTtlMin: 60,
+  startOfferListMax: 3,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
   webDestroyRetries: 3,
@@ -1554,6 +1557,19 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     expect(second.record.vast_instance_id).toBe(901);
     expect(s.vast.calls).not.toContain("vast.destroy:901");
   });
+
+  describe("advanced offer choice and the bad-machine list", () => {
+    it("the offer list skips a stuck machine, and an explicit choice of one is refused before anything is created", async () => {
+      const s = stuckSetup();
+      await s.life.start();
+      await releaseStuck(s);
+      expect((await s.life.offers()).map((o) => o.id)).toEqual([12]);
+      const before = s.vast.createdOffers.length;
+      await expect(s.life.start(undefined, null, { offerId: 11 })).rejects.toBeInstanceOf(OfferGoneError);
+      expect(s.vast.createdOffers).toHaveLength(before);
+      expect((await s.registry.all()).filter((r) => r.status === "creating" || r.status === "booting")).toEqual([]);
+    });
+  });
 });
 
 describe("Lifecycle server location (where the rented machine is)", () => {
@@ -2011,5 +2027,110 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       expect((await s.life.estimate()).offer_id).toBe(11);
       expect(s.logs.find((l) => l.includes("boot failed"))).toContain("nothing is avoided");
     });
+  });
+});
+
+describe("Lifecycle advanced offer choice", () => {
+  const rtx = (id: number, dph: number, geo: string, down: number, rel: number): Offer => ({
+    id,
+    dph_total: dph,
+    gpu_name: "RTX 3090",
+    gpu_ram: 24576,
+    geolocation: geo,
+    inet_down: down,
+    reliability2: rel,
+    machine_id: 1000 + id,
+  });
+  const offers = [
+    rtx(1, 0.3, "Lithuania, LT", 600, 0.99),
+    rtx(2, 0.4, "Quebec, CA", 900, 0.995),
+    rtx(3, 0.25, "Texas, US", 700, 0.98),
+    rtx(4, 0.45, "Tokyo, JP", 800, 0.999),
+  ];
+  function make() {
+    const s = setup();
+    s.vast.offers = offers;
+    return s;
+  }
+
+  it("offers(): the filtered and sorted list, at most START_OFFER_LIST_MAX long, in the public shape", async () => {
+    const { life } = make();
+    expect((await life.offers()).map((o) => o.id)).toEqual([3, 1, 2]); // cheapest first, cut at 3
+    expect((await life.offers(undefined, { sort: "speed" })).map((o) => o.id)).toEqual([2, 4, 3]);
+    expect((await life.offers(undefined, { region: "north_america" })).map((o) => o.id)).toEqual([3, 2]);
+    expect((await life.offers(undefined, { maxDph: 0.3 })).map((o) => o.id)).toEqual([3, 1]);
+    expect((await life.offers(undefined, { minDownMbps: 800 })).map((o) => o.id)).toEqual([2, 4]);
+    const first = (await life.offers())[0]!;
+    expect(first).toEqual({ id: 3, gpu_name: "RTX 3090", dph: 0.25, vram_gb: 24, location: "Texas, US", region: "north_america", down_mbps: 700, reliability: 0.98 });
+    expect(JSON.stringify(await life.offers())).not.toMatch(/machine|1003/);
+  });
+
+  it("offers(gpu) restricts to that model and refuses a model outside the allow-list", async () => {
+    const { life } = make();
+    await expect(life.offers("Tesla P40")).rejects.toBeInstanceOf(GpuNotAllowedError);
+    expect((await life.offers("RTX 3090")).length).toBe(3);
+  });
+
+  it("start rents the first of the filtered order, not the cheapest overall", async () => {
+    const { life, vast } = make();
+    const out = await life.start(undefined, null, { region: "asia" });
+    expect(vast.createdOffers).toEqual([4]);
+    expect(out.estimate.offer_id).toBe(4);
+    expect(out.estimate.location).toBe("Tokyo, JP");
+  });
+
+  it("start with sort=speed rents the fastest", async () => {
+    const { life, vast } = make();
+    await life.start(undefined, null, { sort: "speed" });
+    expect(vast.createdOffers).toEqual([2]);
+  });
+
+  it("start with an explicit offer rents exactly that one, even when it is not the first", async () => {
+    const { life, vast } = make();
+    const out = await life.start(undefined, null, { offerId: 2 });
+    expect(vast.createdOffers).toEqual([2]);
+    expect(out.estimate.dph).toBe(0.4);
+  });
+
+  it("an offer that vanished (or no longer passes the filters) is a clear refusal: no record kept, nothing created", async () => {
+    const { life, vast, registry } = make();
+    expect((await life.offers()).map((o) => o.id)).toContain(2);
+    vast.offers = offers.filter((o) => o.id !== 2); // gone between listing and renting
+    await expect(life.start(undefined, null, { offerId: 2 })).rejects.toBeInstanceOf(OfferGoneError);
+    await expect(life.start(undefined, null, { offerId: 4, region: "europe" })).rejects.toBeInstanceOf(OfferGoneError); // fails the filter
+    await expect(life.estimate(undefined, { offerId: 2 })).rejects.toBeInstanceOf(OfferGoneError);
+    expect(vast.createdOffers).toEqual([]);
+    expect((await registry.all()).every((r) => r.status === "gone")).toBe(true);
+    // The next plain Start still works.
+    await life.start();
+    expect(vast.createdOffers).toEqual([3]);
+  });
+
+  it("filters that match nothing are NoOffersError, for start and estimate", async () => {
+    const { life, vast } = make();
+    await expect(life.start(undefined, null, { region: "oceania" })).rejects.toBeInstanceOf(NoOffersError);
+    await expect(life.estimate(undefined, { maxDph: 0.01 })).rejects.toBeInstanceOf(NoOffersError);
+    expect(vast.createdOffers).toEqual([]);
+  });
+
+  it("estimate and gpuOptions follow the filters", async () => {
+    const { life } = make();
+    expect((await life.estimate(undefined, { region: "europe" })).offer_id).toBe(1);
+    const options = await life.gpuOptions({ region: "asia" });
+    expect(options.find((o) => o.name === "RTX 3090")).toMatchObject({ dph: 0.45, available: true, location: "Tokyo, JP" });
+    expect(options.find((o) => o.name === "RTX 4090")).toMatchObject({ available: false });
+  });
+
+  it("the Vast query keeps the configured limits whatever the request says", async () => {
+    const { life, vast } = make();
+    await life.offers(undefined, { maxDph: 0.3, minDownMbps: 800 });
+    expect(vast.searches[0]).toMatchObject({ maxDph: 0.5, minDownloadMbps: 500 });
+  });
+
+  it("parseFilters narrows only: a price above VAST_MAX_DPH is refused", () => {
+    const { life } = make();
+    expect(life.parseFilters({ max_dph: 0.5 })).toEqual({ maxDph: 0.5 });
+    expect(() => life.parseFilters({ max_dph: 0.51 })).toThrow(StartFilterError);
+    expect(life.parseFilters(undefined)).toEqual({});
   });
 });
