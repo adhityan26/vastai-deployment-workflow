@@ -43,6 +43,19 @@ import {
   referenceHint,
   CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
+  DEFAULT_START_FILTERS,
+  REGION_CHOICES,
+  SORT_CHOICES,
+  START_FILTERS_STORAGE_KEY,
+  filterBodyMembers,
+  filterQueryString,
+  offerLabel,
+  parseOffers,
+  parseStoredFilters,
+  startFilterProblem,
+  startFiltersAreDefault,
+  type OfferView,
+  type StartFilterState,
   TOOL_STORAGE_KEY,
   chainTargets,
   chooseEntry,
@@ -77,6 +90,7 @@ import {
   controls,
   downloadPercent,
   downloadText,
+  errorCode,
   errorReason,
   errorText,
   estimatePath,
@@ -153,7 +167,7 @@ export interface App {
 }
 
 class ApiError extends Error {
-  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null) {
+  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null, readonly code: string | null = null) {
     super(message);
   }
 }
@@ -276,7 +290,7 @@ export function mountApp(doc: Document, env: Env): App {
       throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
     }
     if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
-    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status);
+    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status, errorCode(json));
     return json;
   }
 
@@ -491,6 +505,21 @@ export function mountApp(doc: Document, env: Env): App {
       return null;
     }
   }
+  function readFilters(): StartFilterState {
+    try {
+      return parseStoredFilters(doc.defaultView?.localStorage.getItem(START_FILTERS_STORAGE_KEY) ?? null);
+    } catch {
+      return DEFAULT_START_FILTERS; // storage unavailable: no remembered choice
+    }
+  }
+  function writeFilters(f: StartFilterState): void {
+    try {
+      doc.defaultView?.localStorage.setItem(START_FILTERS_STORAGE_KEY, JSON.stringify(f));
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+
   function writeRemembered(name: string): void {
     try {
       doc.defaultView?.localStorage.setItem(GPU_STORAGE_KEY, name);
@@ -521,6 +550,62 @@ export function mountApp(doc: Document, env: Env): App {
       select.disabled = true;
       const gpuNote = make("p", "", "muted");
       gpuNote.hidden = true;
+      // Advanced server choice: filters (remembered per device), a list of matching servers, an explicit pick.
+      let filters = readFilters();
+      let chosenOffer: number | null = null;
+      const advanced = make("details");
+      advanced.id = "start-advanced";
+      advanced.open = !startFiltersAreDefault(filters);
+      advanced.append(make("summary", "Advanced server choice"));
+      const field = (labelText: string, id: string, control: HTMLElement): HTMLElement => {
+        const row = make("div", undefined, "start-field");
+        const label = make("label", labelText);
+        label.htmlFor = id;
+        control.id = id;
+        row.append(label, control);
+        return row;
+      };
+      const choiceSelect = (list: readonly { value: string; label: string }[], value: string): HTMLSelectElement => {
+        const sel = make("select");
+        for (const c of list) {
+          const o = make("option", c.label);
+          o.value = c.value;
+          sel.append(o);
+        }
+        sel.value = value;
+        return sel;
+      };
+      const regionSel = choiceSelect(REGION_CHOICES, filters.region);
+      const sortSel = choiceSelect(SORT_CHOICES, filters.sort);
+      const priceIn = make("input");
+      priceIn.type = "text";
+      priceIn.inputMode = "decimal";
+      priceIn.autocomplete = "off";
+      priceIn.placeholder = "no limit";
+      priceIn.value = filters.maxDph;
+      const speedIn = make("input");
+      speedIn.type = "text";
+      speedIn.inputMode = "numeric";
+      speedIn.autocomplete = "off";
+      speedIn.placeholder = "no minimum";
+      speedIn.value = filters.minDown;
+      const showOffers = make("button", "Show matching servers");
+      showOffers.type = "button";
+      const offerList = make("div", undefined, "start-offers");
+      offerList.setAttribute("role", "radiogroup");
+      offerList.setAttribute("aria-label", "Servers");
+      offerList.hidden = true;
+      const offerNote = make("p", "", "muted");
+      offerNote.hidden = true;
+      advanced.append(
+        field("Region", "start-region", regionSel),
+        field("Highest price per hour (USD)", "start-max-price", priceIn),
+        field("Lowest download speed (Mbps)", "start-min-speed", speedIn),
+        field("Order", "start-sort", sortSel),
+        showOffers,
+        offerNote,
+        offerList,
+      );
       const estBox = make("div", undefined, "estimate");
       estBox.setAttribute("aria-live", "polite");
       const errBox = make("div", undefined, "alert bad");
@@ -531,7 +616,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -570,7 +655,7 @@ export function mountApp(doc: Document, env: Env): App {
         modalOk.disabled = true;
         if (select.value === "") return;
         try {
-          const est = parseEstimate(await call("GET", estimatePath(select.value)));
+          const est = parseEstimate(await call("GET", estimatePath(select.value, filterQueryString(filters, chosenOffer))));
           if (seq !== estimateSeq || token !== dialogToken) return;
           if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
           estimate = est;
@@ -608,7 +693,7 @@ export function mountApp(doc: Document, env: Env): App {
         clearMessages();
         render();
         try {
-          const res = await call("POST", API.start, { confirm: true, gpu: chosen });
+          const res = await call("POST", API.start, { confirm: true, gpu: chosen, ...filterBodyMembers(filters, chosenOffer) });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
           const started = parseEstimate(res !== null && typeof res === "object" ? (res as Record<string, unknown>)["estimate"] : null);
@@ -620,6 +705,11 @@ export function mountApp(doc: Document, env: Env): App {
           if (authLost(err)) return;
           showError(err);
           showBanner(err instanceof Error ? err.message : "Something went wrong.");
+          if (err instanceof ApiError && err.code === "offer_gone") {
+            // The chosen server vanished: nothing was rented. Forget the pick and list the servers again.
+            resetOffers();
+            void loadOffers();
+          }
           select.disabled = false;
           modalOk.disabled = estimate === null;
           modalOk.focus();
@@ -632,17 +722,23 @@ export function mountApp(doc: Document, env: Env): App {
       modal.hidden = false;
       modalCancel.focus();
 
-      void (async () => {
+      const gpusPath = (): string => {
+        const q = filterQueryString(filters, null);
+        return q === "" ? API.gpus : `${API.gpus}?${q}`;
+      };
+
+      /** Read the GPU models (they follow the filters) and rebuild the select; false when it could not. */
+      const populateGpus = async (keep: string | null): Promise<boolean> => {
         try {
-          const list = parseGpus(await call("GET", API.gpus));
-          if (token !== dialogToken) return;
+          const list = parseGpus(await call("GET", gpusPath()));
+          if (token !== dialogToken) return false;
           if (list === null) throw new ApiError("The GPU list was not understood. Nothing was started.");
           gpus = list;
         } catch (err) {
-          if (token !== dialogToken || authLost(err)) return;
+          if (token !== dialogToken || authLost(err)) return false;
           loading.hidden = true;
           showError(err);
-          return;
+          return false;
         }
         loading.hidden = true;
         select.replaceChildren(
@@ -653,17 +749,112 @@ export function mountApp(doc: Document, env: Env): App {
             return o;
           }),
         );
-        const pick = chooseGpu(readRemembered(), gpus);
+        const pick = chooseGpu(keep ?? readRemembered(), gpus);
         if (pick === null) {
           select.value = "";
           select.disabled = true;
           gpuNote.textContent = gpus.length === 0 ? "No GPU model is configured." : "No GPU model has offers right now. Try again later.";
           gpuNote.hidden = false;
-          return;
+          return true;
         }
+        gpuNote.hidden = true;
         select.value = pick;
         select.disabled = false;
-        select.addEventListener("change", () => void loadEstimate());
+        return true;
+      };
+
+      const resetOffers = (): void => {
+        chosenOffer = null;
+        offerList.replaceChildren();
+        offerList.hidden = true;
+        offerNote.hidden = true;
+      };
+
+      /** Take the filter inputs; false (with the problem shown) when they cannot be sent. */
+      const takeFilters = (): boolean => {
+        const next: StartFilterState = { region: regionSel.value, maxDph: priceIn.value.trim(), minDown: speedIn.value.trim(), sort: sortSel.value };
+        const problem = startFilterProblem(next);
+        if (problem !== null) {
+          estimateSeq++;
+          estimate = null;
+          showEstimate();
+          modalOk.disabled = true;
+          showError(new ApiError(problem));
+          return false;
+        }
+        filters = next;
+        writeFilters(filters);
+        return true;
+      };
+
+      const onFiltersChanged = async (): Promise<void> => {
+        if (startSubmitting) return;
+        if (!takeFilters()) return;
+        resetOffers();
+        clearError();
+        if (await populateGpus(select.value === "" ? null : select.value)) await loadEstimate();
+      };
+      for (const control of [regionSel, sortSel, priceIn, speedIn]) control.addEventListener("change", () => void onFiltersChanged());
+
+      const loadOffers = async (): Promise<void> => {
+        if (!takeFilters() || select.value === "") return;
+        offerNote.hidden = false;
+        offerNote.textContent = "Loading servers…";
+        showOffers.disabled = true;
+        try {
+          const query = [`gpu=${encodeURIComponent(select.value)}`, filterQueryString(filters, null)].filter((p) => p !== "").join("&");
+          const list = parseOffers(await call("GET", `${API.offers}?${query}`));
+          if (token !== dialogToken) return;
+          if (list === null) throw new ApiError("The server list was not understood. Nothing was started.");
+          renderOffers(list);
+        } catch (err) {
+          if (token !== dialogToken || authLost(err)) return;
+          offerNote.hidden = true;
+          showError(err);
+        } finally {
+          showOffers.disabled = false;
+        }
+      };
+      showOffers.addEventListener("click", () => void loadOffers());
+
+      const renderOffers = (list: OfferView[]): void => {
+        chosenOffer = null;
+        offerList.replaceChildren();
+        if (list.length === 0) {
+          offerList.hidden = true;
+          offerNote.hidden = false;
+          offerNote.textContent = "No server matches these filters right now.";
+          return;
+        }
+        offerNote.hidden = true;
+        offerList.hidden = false;
+        const choices: { id: number | null; text: string }[] = [
+          { id: null, text: "Automatic: the first server of this list when you start" },
+          ...list.map((o) => ({ id: o.id, text: offerLabel(o) })),
+        ];
+        choices.forEach((c, i) => {
+          const row = make("label", undefined, "start-offer");
+          const radio = make("input");
+          radio.type = "radio";
+          radio.name = "start-offer";
+          radio.checked = i === 0;
+          radio.addEventListener("change", () => {
+            if (!radio.checked) return;
+            chosenOffer = c.id;
+            void loadEstimate();
+          });
+          row.append(radio, make("span", c.text));
+          offerList.append(row);
+        });
+      };
+
+      void (async () => {
+        if (!(await populateGpus(null))) return;
+        if (select.value === "") return;
+        select.addEventListener("change", () => {
+          resetOffers();
+          void loadEstimate();
+        });
         await loadEstimate();
       })();
     });

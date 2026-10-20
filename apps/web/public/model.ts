@@ -26,6 +26,7 @@ export const API = {
   edit: "/api/edit",
   upscale: "/api/upscale",
   credit: "/api/credit",
+  offers: "/api/offers",
   history: "/api/history",
   gallery: "/api/gallery",
   galleryDelete: "/api/gallery/delete",
@@ -471,9 +472,143 @@ export function chooseGpu(remembered: string | null, list: readonly GpuOption[])
   return best === null ? null : best.name;
 }
 
-/** GET /api/estimate path for a model name (encoded); the bare path when no model is chosen. */
-export function estimatePath(gpu: string | null): string {
-  return gpu === null ? API.estimate : `${API.estimate}?gpu=${encodeURIComponent(gpu)}`;
+/** GET /api/estimate path for a model name (encoded); the bare path when no model is chosen. `extra` is a ready query part. */
+export function estimatePath(gpu: string | null, extra = ""): string {
+  const query = [gpu === null ? "" : `gpu=${encodeURIComponent(gpu)}`, extra].filter((p) => p !== "").join("&");
+  return query === "" ? API.estimate : `${API.estimate}?${query}`;
+}
+
+// ---- advanced server choice (Start dialog) ----
+
+// Where the dialog's filter choice is remembered in this browser (a preference, no secret).
+export const START_FILTERS_STORAGE_KEY = "vast-comfy.start-filters"; // config-lint: ok (browser storage key, not configuration)
+export const REGION_CHOICES: readonly { value: string; label: string }[] = [
+  { value: "any", label: "Anywhere" },
+  { value: "north_america", label: "North America" },
+  { value: "south_america", label: "South America" },
+  { value: "europe", label: "Europe" },
+  { value: "asia", label: "Asia" },
+  { value: "oceania", label: "Oceania" },
+  { value: "africa", label: "Africa" },
+];
+export const SORT_CHOICES: readonly { value: string; label: string }[] = [
+  { value: "price", label: "Cheapest first" },
+  { value: "speed", label: "Fastest download first" },
+  { value: "reliability", label: "Most reliable first" },
+];
+const MAX_PRICE_TEXT = /^[0-9]{1,6}(\.[0-9]{1,6})?$/;
+const WHOLE_TEXT = /^[0-9]{1,9}$/;
+
+/** What the filter inputs hold, as text; the defaults mean "no filter". */
+export interface StartFilterState { region: string; maxDph: string; minDown: string; sort: string }
+export const DEFAULT_START_FILTERS: StartFilterState = { region: "any", maxDph: "", minDown: "", sort: "price" };
+
+export function startFiltersAreDefault(f: StartFilterState): boolean {
+  return f.region === "any" && f.maxDph.trim() === "" && f.minDown.trim() === "" && f.sort === "price";
+}
+
+/** Why the inputs cannot be sent, or null. The server checks again against its own limits. */
+export function startFilterProblem(f: StartFilterState): string | null {
+  if (!REGION_CHOICES.some((r) => r.value === f.region)) return "Choose a region from the list.";
+  if (!SORT_CHOICES.some((r) => r.value === f.sort)) return "Choose an order from the list.";
+  const price = f.maxDph.trim();
+  if (price !== "" && (!MAX_PRICE_TEXT.test(price) || Number(price) <= 0)) return "Maximum price must be a number above 0, for example 0.40.";
+  const speed = f.minDown.trim();
+  if (speed !== "" && !WHOLE_TEXT.test(speed)) return "Minimum download speed must be a whole number of Mbps.";
+  return null;
+}
+
+/** The query part for /api/estimate, /api/gpus and /api/offers: only the members that are set. */
+export function filterQueryString(f: StartFilterState, offerId: number | null): string {
+  const parts: string[] = [];
+  if (f.region !== "any") parts.push(`region=${encodeURIComponent(f.region)}`);
+  if (f.maxDph.trim() !== "") parts.push(`max_dph=${encodeURIComponent(f.maxDph.trim())}`);
+  if (f.minDown.trim() !== "") parts.push(`min_down_mbps=${encodeURIComponent(f.minDown.trim())}`);
+  if (f.sort !== "price") parts.push(`sort=${encodeURIComponent(f.sort)}`);
+  if (offerId !== null) parts.push(`offer_id=${offerId}`);
+  return parts.join("&");
+}
+
+/** The members added to the Start body: only what is set, so a plain Start sends exactly what it always did. */
+export function filterBodyMembers(f: StartFilterState, offerId: number | null): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (f.region !== "any") out["region"] = f.region;
+  if (f.maxDph.trim() !== "") out["max_dph"] = Number(f.maxDph.trim());
+  if (f.minDown.trim() !== "") out["min_down_mbps"] = Number(f.minDown.trim());
+  if (f.sort !== "price") out["sort"] = f.sort;
+  if (offerId !== null) out["offer_id"] = offerId;
+  return out;
+}
+
+/** The remembered choice when it parses and every member is valid; otherwise the defaults. */
+export function parseStoredFilters(text: string | null): StartFilterState {
+  if (text === null) return DEFAULT_START_FILTERS;
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!isObj(v)) return DEFAULT_START_FILTERS;
+    const keys = Object.keys(v);
+    if (keys.some((k) => !["region", "maxDph", "minDown", "sort"].includes(k))) return DEFAULT_START_FILTERS;
+    const state = { ...DEFAULT_START_FILTERS };
+    for (const k of ["region", "maxDph", "minDown", "sort"] as const) {
+      if (v[k] === undefined) continue;
+      if (typeof v[k] !== "string") return DEFAULT_START_FILTERS;
+      state[k] = v[k];
+    }
+    return startFilterProblem(state) === null ? state : DEFAULT_START_FILTERS;
+  } catch {
+    return DEFAULT_START_FILTERS;
+  }
+}
+
+/** One offer of GET /api/offers. Never a machine or host id (the server does not send one). */
+export interface OfferView {
+  id: number;
+  gpu_name: string | null;
+  dph: number;
+  vram_gb: number | null;
+  location: string | null;
+  region: string | null;
+  down_mbps: number | null;
+  reliability: number | null;
+}
+
+/** Check GET /api/offers; entries that fail validation are dropped. Null when the payload is unusable. */
+export function parseOffers(json: unknown): OfferView[] | null {
+  if (!isObj(json) || !Array.isArray(json["offers"])) return null;
+  return json["offers"].flatMap((o): OfferView[] => {
+    if (!isObj(o) || !posInt(o["id"])) return [];
+    const dph = num(o["dph"]);
+    if (dph === null || dph <= 0) return [];
+    const down = num(o["down_mbps"]);
+    const rel = num(o["reliability"]);
+    const place = typeof o["location"] === "string" && o["location"] !== "" && o["location"].length <= MAX_LOCATION ? o["location"] : null;
+    return [{
+      id: o["id"],
+      gpu_name: typeof o["gpu_name"] === "string" && o["gpu_name"].length <= MAX_GPU_NAME ? o["gpu_name"] : null,
+      dph,
+      vram_gb: posInt(o["vram_gb"]) ? o["vram_gb"] : null,
+      location: place,
+      region: typeof o["region"] === "string" ? o["region"] : null,
+      down_mbps: down !== null && down >= 0 ? down : null,
+      reliability: rel !== null && rel >= 0 && rel <= 1 ? rel : null,
+    }];
+  });
+}
+
+/** "RTX 3090 - $0.31/h - Quebec, CA - 812 Mbps down - reliability 99%" (unknown parts left out). */
+export function offerLabel(o: OfferView): string {
+  const parts = [o.gpu_name, formatPrice(o.dph).replace(/\/hour$/, "/h")];
+  if (o.location !== null) parts.push(o.location);
+  if (o.down_mbps !== null) parts.push(`${o.down_mbps} Mbps down`);
+  if (o.reliability !== null) parts.push(`reliability ${Math.round(o.reliability * 100)}%`);
+  return parts.filter((p): p is string => p !== null).join(" - ");
+}
+
+/** The `code` of an API error body, only when it is a short plain identifier. */
+export function errorCode(body: unknown): string | null {
+  if (!isObj(body) || !isObj(body["error"])) return null;
+  const c = body["error"]["code"];
+  return typeof c === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(c) ? c : null;
 }
 
 /** The `reason` of an API error body, only when it is a short plain string. */

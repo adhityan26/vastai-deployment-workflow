@@ -637,6 +637,27 @@ The recipe "Face swap" was not ported: the live `faceswap` style (the owner's te
 `anything2real` and `faceswap` are unchanged and have no defaults. Try each sample on a real instance and adjust its
 `defaults` (or set `enabled: false` to withdraw it).
 
+## Advanced server choice (Start dialog)
+
+The location of the machine decides how fast a boot is (see "Slow boots"), so the Start dialog has a closed
+"Advanced server choice" section (admins only, like Start itself):
+
+- **Filters:** region (North/South America, Europe, Asia, Oceania, Africa; read from the country code at the end of
+  Vast's location text such as "Quebec, CA", so an offer with an unknown place never matches a region), highest price
+  per hour, lowest reported download speed and an order (cheapest, fastest download, most reliable). A filter can only
+  NARROW the configured limits: a price above `VAST_MAX_DPH` is refused (`400 invalid_filter`), and the Vast query itself
+  keeps `VAST_MAX_DPH`, `VAST_MIN_DOWNLOAD_MBPS` and the reliability minimum. An offer that reports no speed does not
+  pass a minimum speed. The filter choice is remembered per device (localStorage `vast-comfy.start-filters`, validated on read).
+- **Pick a server:** "Show matching servers" lists at most `START_OFFER_LIST_MAX` offers (price, place, speed,
+  reliability) from `GET /api/offers`; "Automatic" (the default) rents the first of the order, a radio rents exactly that offer
+  (`offer_id`). Offer ids are Vast offer ids; machine ids, host ids and addresses never leave the server.
+- **Safety:** the bad-machine list (stuck or slow starts) is applied first, so a machine on it is neither listed nor
+  rentable even by id. If the chosen offer vanished between the list and Start, or no longer passes the filters, the answer is
+  `409 offer_gone`: no instance is created, nothing is billed, and the dialog reads the list again. Malformed filters are
+  `400` and do not use the hourly Start limit.
+- **Not verified live:** Vast's real `geolocation` text (the region parser expects a trailing two-letter country code), that every
+  offer carries `inet_down` and `reliability2`, and the look of the section on a phone.
+
 ## Vast credit (admin)
 
 Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a

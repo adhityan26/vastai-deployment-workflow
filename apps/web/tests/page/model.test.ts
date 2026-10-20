@@ -94,6 +94,16 @@ import {
   menuGroups,
   usableMenu,
   type MenuEntry,
+  START_FILTERS_STORAGE_KEY,
+  errorCode,
+  DEFAULT_START_FILTERS,
+  filterBodyMembers,
+  filterQueryString,
+  offerLabel,
+  parseOffers,
+  parseStoredFilters,
+  startFilterProblem,
+  startFiltersAreDefault,
 } from "../../public/model.js";
 import { DEFAULT_ICON, ICONS } from "../../public/icons.js";
 import { MENU_ICONS, loadProfile, menuItems } from "@vast-comfy/core";
@@ -1006,5 +1016,63 @@ describe("menu icons", () => {
   it("draws exactly the closed set the profile may name", () => {
     expect(Object.keys(ICONS).sort()).toEqual([...MENU_ICONS].sort());
     expect(Object.hasOwn(ICONS, DEFAULT_ICON)).toBe(true);
+  });
+});
+
+describe("advanced server choice (Start dialog)", () => {
+  const f = (over: Partial<typeof DEFAULT_START_FILTERS> = {}) => ({ ...DEFAULT_START_FILTERS, ...over });
+
+  it("reads the error code only when it is a plain identifier", () => {
+    expect(errorCode({ error: { code: "offer_gone" } })).toBe("offer_gone");
+    for (const bad of [null, {}, { error: {} }, { error: { code: "Offer Gone" } }, { error: { code: "<b>" } }, { error: { code: 5 } }]) expect(errorCode(bad)).toBeNull();
+  });
+
+  it("the defaults mean no filter at all: nothing in the query or the body", () => {
+    expect(startFiltersAreDefault(DEFAULT_START_FILTERS)).toBe(true);
+    expect(filterQueryString(DEFAULT_START_FILTERS, null)).toBe("");
+    expect(filterBodyMembers(DEFAULT_START_FILTERS, null)).toEqual({});
+    expect(startFiltersAreDefault(f({ region: "europe" }))).toBe(false);
+  });
+
+  it("builds the query and the body from what was chosen, only the members that are set", () => {
+    const chosen = f({ region: "europe", maxDph: "0.4", minDown: "300", sort: "speed" });
+    expect(filterQueryString(chosen, null)).toBe("region=europe&max_dph=0.4&min_down_mbps=300&sort=speed");
+    expect(filterQueryString(chosen, 42)).toBe("region=europe&max_dph=0.4&min_down_mbps=300&sort=speed&offer_id=42");
+    expect(filterBodyMembers(chosen, 42)).toEqual({ region: "europe", max_dph: 0.4, min_down_mbps: 300, sort: "speed", offer_id: 42 });
+    expect(filterBodyMembers(f({ sort: "price" }), null)).toEqual({}); // price is the default order
+    expect(filterBodyMembers(f({ maxDph: " 0.5 " }), null)).toEqual({ max_dph: 0.5 });
+  });
+
+  it("checks the inputs before anything is sent", () => {
+    expect(startFilterProblem(f())).toBeNull();
+    expect(startFilterProblem(f({ maxDph: "0.4", minDown: "300" }))).toBeNull();
+    for (const bad of [f({ maxDph: "abc" }), f({ maxDph: "0" }), f({ maxDph: "-1" }), f({ maxDph: "1e3" }), f({ minDown: "1.5" }), f({ minDown: "-3" }), f({ minDown: "x" }), f({ region: "mars" }), f({ sort: "random" })]) {
+      expect(startFilterProblem(bad), JSON.stringify(bad)).toEqual(expect.any(String));
+    }
+  });
+
+  it("reads the remembered choice only when every member is valid, else the defaults", () => {
+    const ok = JSON.stringify({ region: "asia", maxDph: "0.3", minDown: "100", sort: "reliability" });
+    expect(parseStoredFilters(ok)).toEqual({ region: "asia", maxDph: "0.3", minDown: "100", sort: "reliability" });
+    for (const bad of [null, "", "{", "[]", "5", JSON.stringify({ region: "mars" }), JSON.stringify({ maxDph: 5 }), JSON.stringify({ sort: "<b>" }), JSON.stringify({ region: "asia", extra: 1 })]) {
+      expect(parseStoredFilters(bad), String(bad)).toEqual(DEFAULT_START_FILTERS);
+    }
+    expect(START_FILTERS_STORAGE_KEY).toBe("vast-comfy.start-filters");
+  });
+
+  it("parses the offer list and drops entries it cannot trust", () => {
+    const good = { id: 7, gpu_name: "RTX 3090", dph: 0.31, vram_gb: 24, location: "Quebec, CA", region: "north_america", down_mbps: 812, reliability: 0.99 };
+    const list = parseOffers({ offers: [good, { ...good, id: 0 }, { ...good, id: "8" }, { ...good, dph: "x" }, null, { ...good, id: 9, location: 5, down_mbps: -4, reliability: 7 }] });
+    expect(list!.map((o) => o.id)).toEqual([7, 9]);
+    expect(list![1]).toMatchObject({ location: null, down_mbps: null, reliability: null });
+    expect(parseOffers({})).toBeNull();
+    expect(parseOffers("x")).toBeNull();
+  });
+
+  it("labels an offer with price, place, speed and reliability, leaving out what is unknown", () => {
+    expect(offerLabel({ id: 7, gpu_name: "RTX 3090", dph: 0.31, vram_gb: 24, location: "Quebec, CA", region: "north_america", down_mbps: 812, reliability: 0.991 })).toBe(
+      "RTX 3090 - $0.31/h - Quebec, CA - 812 Mbps down - reliability 99%",
+    );
+    expect(offerLabel({ id: 8, gpu_name: null, dph: 0.2, vram_gb: null, location: null, region: null, down_mbps: null, reliability: null })).toBe("$0.20/h");
   });
 });

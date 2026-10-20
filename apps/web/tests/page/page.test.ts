@@ -1799,3 +1799,162 @@ describe("Advanced: negative prompt and guidance", () => {
     expect(negative().value).toBe("photorealistic");
   });
 });
+
+describe("start dialog: advanced server choice", () => {
+  const OFFERS = {
+    offers: [
+      { id: 21, gpu_name: "RTX A5000", dph: 0.25, vram_gb: 24, location: "Texas, US", region: "north_america", down_mbps: 700, reliability: 0.98 },
+      { id: 22, gpu_name: "RTX A5000", dph: 0.31, vram_gb: 24, location: '<img src=x onerror="alert(1)">', region: null, down_mbps: 900, reliability: 0.995 },
+    ],
+  };
+  const EU = "region=europe";
+  const routes2 = (extra: Record<string, Handler> = {}): Record<string, Handler> => ({
+    [`GET /api/gpus?${EU}`]: { body: GPUS },
+    [`GET /api/estimate?gpu=RTX%20A5000&${EU}`]: est("RTX A5000", 0.3, { location: "Lithuania, LT" }),
+    [`GET /api/offers?gpu=RTX%20A5000&${EU}`]: { body: OFFERS },
+    [`GET /api/estimate?gpu=RTX%20A5000&${EU}&offer_id=22`]: est("RTX A5000", 0.31),
+    ...extra,
+  });
+  const region = () => q<HTMLSelectElement>("#start-region")!;
+  const setRegion = async (value: string) => {
+    region().value = value;
+    region().dispatchEvent(new Event("change"));
+    await flush();
+  };
+  const startPosts = () => posts("/api/start").map((c) => c.body);
+  const lastPath = (prefix: string) => calls.filter((c) => c.path.startsWith(prefix)).at(-1)!.path;
+
+  it("is closed and neutral by default: a plain Start sends exactly what it always did and asks for no filter", async () => {
+    await adminNone();
+    await openStart();
+    expect(q<HTMLDetailsElement>("#start-advanced")!.open).toBe(false);
+    expect(document.querySelector('label[for="start-region"]')!.textContent).toBe("Region");
+    expect([...region().options].map((o) => o.value)).toEqual(["any", "north_america", "south_america", "europe", "asia", "oceania", "africa"]);
+    expect(calls.filter((c) => c.path.startsWith("/api/gpus")).map((c) => c.path)).toEqual(["/api/gpus"]);
+    expect(calls.some((c) => c.path.startsWith("/api/offers"))).toBe(false);
+    q("#modal-ok")!.click();
+    await flush();
+    expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000" }]);
+  });
+
+  it("a region filter re-reads the GPU list and the estimate with the filter, remembers it, and sends it with Start", async () => {
+    await adminNone(routes2());
+    await openStart();
+    await setRegion("europe");
+    expect(lastPath("/api/gpus")).toBe("/api/gpus?region=europe");
+    expect(lastPath("/api/estimate")).toBe("/api/estimate?gpu=RTX%20A5000&region=europe");
+    expect(q("#modal")!.textContent).toContain("Server: Lithuania, LT");
+    expect(JSON.parse(window.localStorage.getItem("vast-comfy.start-filters")!)).toEqual({ region: "europe", maxDph: "", minDown: "", sort: "price" });
+    q("#modal-ok")!.click();
+    await flush();
+    expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000", region: "europe" }]);
+  });
+
+  it("opens with the remembered filters applied and the section open", async () => {
+    window.localStorage.setItem("vast-comfy.start-filters", JSON.stringify({ region: "europe", maxDph: "", minDown: "", sort: "price" }));
+    await adminNone(routes2());
+    await openStart();
+    expect(q<HTMLDetailsElement>("#start-advanced")!.open).toBe(true);
+    expect(region().value).toBe("europe");
+    expect(lastPath("/api/gpus")).toBe("/api/gpus?region=europe");
+    expect(lastPath("/api/estimate")).toBe("/api/estimate?gpu=RTX%20A5000&region=europe");
+  });
+
+  it.each(["{", JSON.stringify({ region: "mars" }), JSON.stringify({ maxDph: "abc" }), JSON.stringify({ sort: "<b>" })])("ignores a remembered choice that is not valid (%s)", async (stored) => {
+    window.localStorage.setItem("vast-comfy.start-filters", stored);
+    await adminNone();
+    await openStart();
+    expect(region().value).toBe("any");
+    expect(calls.filter((c) => c.path.startsWith("/api/gpus")).map((c) => c.path)).toEqual(["/api/gpus"]);
+  });
+
+  it("shows why bad inputs cannot be used and sends nothing while they are bad", async () => {
+    await adminNone();
+    await openStart();
+    const price = q<HTMLInputElement>("#start-max-price")!;
+    const before = calls.length;
+    price.value = "abc";
+    price.dispatchEvent(new Event("change"));
+    await flush();
+    expect(q("#modal")!.textContent).toContain("Maximum price must be a number above 0");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(true);
+    expect(calls).toHaveLength(before);
+    const speed = q<HTMLInputElement>("#start-min-speed")!;
+    price.value = "";
+    speed.value = "1.5";
+    speed.dispatchEvent(new Event("change"));
+    await flush();
+    expect(q("#modal")!.textContent).toContain("whole number of Mbps");
+    expect(posts("/api/start")).toHaveLength(0);
+  });
+
+  it("lists the matching servers as text, starts with Automatic, and a picked server goes to the estimate and to Start", async () => {
+    await adminNone(routes2());
+    await openStart();
+    await setRegion("europe");
+    q<HTMLButtonElement>("#start-advanced button")!.click();
+    await flush();
+    expect(lastPath("/api/offers")).toBe("/api/offers?gpu=RTX%20A5000&region=europe");
+    const rows = [...document.querySelectorAll(".start-offer")];
+    expect(rows).toHaveLength(3);
+    expect(rows[0]!.textContent).toContain("Automatic");
+    expect((rows[0]!.querySelector("input") as HTMLInputElement).checked).toBe(true);
+    expect(rows[1]!.textContent).toBe("RTX A5000 - $0.25/h - Texas, US - 700 Mbps down - reliability 98%");
+    expect(document.querySelector("#start-advanced img")).toBeNull(); // the hostile location is text
+    expect(rows[2]!.textContent).toContain('<img src=x onerror="alert(1)">');
+    const second = rows[2]!.querySelector("input") as HTMLInputElement;
+    second.checked = true;
+    second.dispatchEvent(new Event("change"));
+    await flush();
+    expect(lastPath("/api/estimate")).toBe("/api/estimate?gpu=RTX%20A5000&region=europe&offer_id=22");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000", region: "europe", offer_id: 22 }]);
+    expect(window.localStorage.getItem("vast-comfy.start-filters")).not.toContain("22"); // the pick is not remembered
+  });
+
+  it("says so when no server matches", async () => {
+    await adminNone(routes2({ [`GET /api/offers?gpu=RTX%20A5000&${EU}`]: { body: { offers: [] } } }));
+    await openStart();
+    await setRegion("europe");
+    q<HTMLButtonElement>("#start-advanced button")!.click();
+    await flush();
+    expect(q("#modal")!.textContent).toContain("No server matches these filters right now.");
+    expect(document.querySelectorAll(".start-offer")).toHaveLength(0);
+  });
+
+  it("when the chosen server vanished: the reason is shown, nothing started, the pick is forgotten and the list is read again", async () => {
+    await adminNone(routes2({ "POST /api/start": { status: 409, body: { error: { code: "offer_gone", message: "that offer is no longer available; choose another or refresh the list" } } } }));
+    await openStart();
+    await setRegion("europe");
+    q<HTMLButtonElement>("#start-advanced button")!.click();
+    await flush();
+    const second = document.querySelectorAll(".start-offer input")[2] as HTMLInputElement;
+    second.checked = true;
+    second.dispatchEvent(new Event("change"));
+    await flush();
+    const offerReads = calls.filter((c) => c.path.startsWith("/api/offers")).length;
+    q("#modal-ok")!.click();
+    await flush();
+    expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000", region: "europe", offer_id: 22 }]);
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(q("#modal")!.textContent).toContain("no longer available");
+    expect(q("#notice")!.hidden).toBe(true);
+    expect(calls.filter((c) => c.path.startsWith("/api/offers")).length).toBe(offerReads + 1);
+    q("#modal-ok")!.click(); // a second try is a plain automatic one
+    await flush();
+    expect(startPosts().at(-1)).toEqual({ confirm: true, gpu: "RTX A5000", region: "europe" });
+  });
+
+  it("works when localStorage throws", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    await adminNone(routes2());
+    await openStart();
+    await setRegion("europe");
+    expect(region().value).toBe("europe");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000", region: "europe" }]);
+  });
+});
