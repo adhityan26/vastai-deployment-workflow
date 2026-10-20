@@ -1085,6 +1085,7 @@
             "type": "string",
             "enum": [
               "image_pull",
+              "net_probe",
               "install_tools",
               "failsafe",
               "tailscale",
@@ -1172,7 +1173,7 @@
           },
           "phases": {
             "type": "array",
-            "description": "Always every phase in this fixed order: image_pull, install_tools, failsafe, tailscale, agent, nodes, models, comfyui, ready",
+            "description": "Always every phase in this fixed order: image_pull, net_probe, install_tools, failsafe, tailscale, agent, nodes, models, comfyui, ready",
             "items": {
               "$ref": "#/components/schemas/ConsolePhase"
             }

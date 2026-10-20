@@ -58,13 +58,14 @@ export interface PhaseInfo {
 
 /**
  * The boot steps the instance announces, in order. This is the ONE list the instance side
- * (instance/bootstrap.sh, Task 3) must follow: before step i (1-based) starts it prints exactly
+ * (instance/bootstrap.sh BOOT_STEP_IDS; a Python test compares the two) must follow: before step i (1-based) starts it prints exactly
  *   [boot] step <i>/<BOOT_STEPS.length>: <id>
  * and when the boot dies it prints exactly
  *   [boot] FAILED: <code>          (code: lowercase letters, digits, underscore; at most 64)
  * as a whole line on PID 1 stdout. Ids are fixed; display names are short English.
  */
 export const BOOT_STEPS = [
+  { id: "net_probe", name: "Check network" },
   { id: "install_tools", name: "Install tools" },
   { id: "failsafe", name: "Start failsafe" },
   { id: "tailscale", name: "Join Tailscale" },

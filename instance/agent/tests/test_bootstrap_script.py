@@ -170,7 +170,8 @@ def test_emergency_destroy_uses_the_stock_cli_from_path_without_y_and_never_prin
     assert "command -v vastai" in body
     assert " -y" not in body
     assert "destroy instance" in body and '--api-key "$CONTAINER_API_KEY"' in body
-    assert "HANDLED=1" in body and "exit 1" in body
+    # Exit 1 unless the caller names another non-zero code (slow_network: 14).
+    assert "HANDLED=1" in body and 'code="${2:-1}"' in body and body.count('exit "$code"') == 2 and "exit 0" not in body
     for line in function_body("emergency_destroy"):
         if re.search(r"\b(echo|printf)\b", line) and "CONTAINER_API_KEY" in line:
             assert '//"$CONTAINER_API_KEY"/' in line, line  # printed only with the key stripped
@@ -189,7 +190,7 @@ def test_bootstrap_uses_the_venv_python_for_the_boot_cli():
     assert "COMFY_PYTHON" not in SCRIPT.read_text()
 
 
-@pytest.mark.parametrize("key", ["VENV_DIR", "VASTAI_VERSION"])
+@pytest.mark.parametrize("key", ["VENV_DIR", "VASTAI_VERSION", "NET_PROBE_BYTES", "NET_PROBE_MIN_MBPS", "HF_BASE_URL"])
 def test_pre_config_fallbacks_match_the_schema_defaults(key):
     assert f'${{{key}:-{schema_default(key)}}}' in SCRIPT.read_text()
 
@@ -754,3 +755,183 @@ def test_install_tailscale_fails_when_the_download_hangs(tmp_path, bindir):
     result = source_and_run(tmp_path, "install_tailscale && echo done || echo failed",
                             tailscale_env(tmp_path, TAILSCALE_INSTALL_TIMEOUT_S="1"))
     assert result.stdout.strip() == "failed" and time.monotonic() - started < 15
+
+
+# --- boot step markers and the early network probe (step net_probe) -----------------------------------------
+
+CONSOLE_TS = INSTANCE.parent / "apps" / "core" / "src" / "console.ts"
+STEP_IDS = ["net_probe", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready"]
+
+
+def script_step_ids():
+    line = lines()[index_of("BOOT_STEP_IDS=")].strip()
+    return line.split("=", 1)[1].strip('"').split()
+
+
+def test_the_step_list_equals_the_web_boot_steps_and_the_documented_list():
+    block = CONSOLE_TS.read_text().split("export const BOOT_STEPS = [", 1)[1].split("] as const;", 1)[0]
+    assert re.findall(r'id: "([a-z_]+)"', block) == script_step_ids() == STEP_IDS
+
+
+def test_every_step_marker_is_printed_once_in_order_before_its_step():
+    calls = [line.strip().split()[1] for line in code_lines() if re.match(r"\s*boot_step [a-z_]+$", line)]
+    assert calls == STEP_IDS
+    order = [index_of("boot_step net_probe"), index_of("net_probe || emergency_destroy slow_network"),
+             index_of("boot_step install_tools"), index_of_call("install_runtime"), index_of("write-env"),
+             index_of("boot_step failsafe"), index_of("boot begin"), index_of("boot_step tailscale"),
+             index_of("install_tailscale ||"), index_of("boot_step agent"), index_of("ctl start agent"),
+             index_of("boot_step nodes"), index_of("install-nodes"), index_of("boot_step models"),
+             index_of("install-models"), index_of("boot_step comfyui"), index_of("copy-workflows"),
+             index_of("mark-ready"), index_of("BOOT_DONE=1"), index_of("boot_step ready")]
+    assert order == sorted(order) and len(set(order)) == len(order)
+
+
+def test_the_probe_runs_first_and_a_slow_network_ends_in_the_stock_cli_destroy_with_its_own_code():
+    guard = index_of('[ "${BASH_SOURCE[0]}" = "$0" ] || return 0')
+    assert guard < index_of("boot_step net_probe") < index_of_call("install_runtime")
+    assert lines()[index_of("net_probe || emergency_destroy")].strip() == \
+        'net_probe || emergency_destroy slow_network "$EXIT_SLOW_NETWORK"'
+    from vastcomfy_agent.boot import EXIT_CONFIG, EXIT_SLOW_NETWORK
+
+    assert f"EXIT_SLOW_NETWORK={EXIT_SLOW_NETWORK}" in SCRIPT.read_text() and EXIT_SLOW_NETWORK == EXIT_CONFIG + 1
+
+
+def test_the_probe_sends_no_token_and_names_no_url():
+    body = "\n".join(function_body("net_probe") + function_body("net_probe_measure") + function_body("net_probe_url"))
+    assert "HF_TOKEN" not in body and "Authorization" not in body
+    assert not any("console_line" in line and "$url" in line for line in function_body("net_probe"))
+
+
+def probe_curl(bindir, tmp_path, answers):
+    """Fake curl: call n prints answers[n-1] = (write_out, rc) to stdout and exits rc; args are logged."""
+    count = tmp_path / "curl.count"
+    log = tmp_path / "curl.log"
+    cases = "".join(f"  {n}) printf '%s' '{out}'; exit {rc};;\n" for n, (out, rc) in enumerate(answers, 1))
+    write_exec(bindir / "curl",
+               f'#!/bin/sh\nn=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"\n'
+               f'printf "%s\\n" "$*" >> "{log}"\ncase "$n" in\n{cases}esac\nexit 0\n')
+    return log
+
+
+def probe_env(tmp_path, **extra):
+    env = {"PROFILE": "image", "NET_PROBE_BYTES": "25165824", "NET_PROBE_MIN_MBPS": "20"}
+    env.update(extra)
+    return env
+
+
+def run_probe(tmp_path, bindir, answers, snippet="net_probe; echo rc=$?", **env):
+    os.symlink(sys.executable, bindir / "python3")
+    log = probe_curl(bindir, tmp_path, answers)
+    sink = tmp_path / "pid1.log"
+    sink.write_text("")
+    result = source_and_run(tmp_path, f'NET_PROBE_RETRY_S=0; BOOT_LOG_SINK="{sink}"; {snippet}', probe_env(tmp_path, **env))
+    calls = log.read_text().splitlines() if log.exists() else []
+    return result, calls, sink.read_text()
+
+
+FAST = ("206 25165824 0.500 0.957", 0)   # about 55 MB/s (the healthy Quebec boot)
+SLOW = ("206 25165824 0.500 9.500", 0)   # about 2.8 MB/s (the Lithuania boot)
+
+
+def test_a_fast_network_passes_with_one_ranged_download_of_the_profiles_own_file(tmp_path, bindir):
+    result, calls, sink = run_probe(tmp_path, bindir, [FAST])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0", result.stderr
+    assert len(calls) == 1
+    assert "-r 0-25165823" in calls[0] and "-L" in calls[0] and "--max-time 17" in calls[0]
+    # The smallest pinned model of at least 24 MiB in the shipped profile (the upscale model).
+    assert calls[0].endswith(
+        "https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged/resolve/5fd49b7b278836f48af63ecd314d0f98ab336105/"
+        "RealESRGAN_x4plus.safetensors")
+    assert "[boot] net_probe: measured 55.1 MB/s (minimum 20 MB/s)" in result.stdout
+    assert sink.splitlines() == ["[boot] net_probe: measured 55.1 MB/s (minimum 20 MB/s)"]
+
+
+def test_a_slow_network_is_retried_once_and_then_reported(tmp_path, bindir):
+    result, calls, _ = run_probe(tmp_path, bindir, [SLOW, SLOW])
+    assert result.stdout.strip().splitlines()[-1] == "rc=1"
+    assert len(calls) == 2
+    assert result.stdout.count("[boot] net_probe: measured 2.8 MB/s (minimum 20 MB/s)") == 2
+
+
+def test_a_transient_dip_passes_on_the_retry(tmp_path, bindir):
+    result, calls, _ = run_probe(tmp_path, bindir, [SLOW, FAST])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0" and len(calls) == 2
+
+
+def test_a_cut_slow_transfer_still_measures_the_link(tmp_path, bindir):
+    result, calls, _ = run_probe(tmp_path, bindir, [("206 3000000 0.500 17.000", 28)] * 2)
+    assert result.stdout.strip().splitlines()[-1] == "rc=1"
+    assert "measured 0.2 MB/s" in result.stdout
+
+
+@pytest.mark.parametrize("answer", [("000 0 0 0", 6), ("403 0 0.2 0.2", 0), ("206 0 0 17.0", 28), ("206 1000 0.1 0.2", 0),
+                                    ("garbage", 0), ("200 x", 0)])
+def test_a_probe_malfunction_is_a_warning_and_the_boot_goes_on(tmp_path, bindir, answer):
+    result, calls, sink = run_probe(tmp_path, bindir, [answer, answer])
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert len(calls) == 1
+    assert "warning: network probe failed" in result.stderr
+    assert "FAILED" not in result.stdout + sink
+
+
+@pytest.mark.parametrize("env,warning", [
+    ({"NET_PROBE_MIN_MBPS": "0"}, "network probe off"),
+    ({"NET_PROBE_BYTES": "12x"}, "NET_PROBE_BYTES is not a number"),
+    ({"NET_PROBE_MIN_MBPS": "-1"}, "NET_PROBE_MIN_MBPS is not a number"),
+    ({"NET_PROBE_BYTES": "1048575"}, "below 1 MiB"),
+    ({"PROFILE": "no-such-profile"}, "no pinned model file"),
+    ({"PROFILE": ""}, "no pinned model file"),
+    ({"HF_BASE_URL": "ftp://x"}, "no pinned model file"),
+])
+def test_the_probe_is_skipped_without_a_download_when_off_or_misconfigured(tmp_path, bindir, env, warning):
+    result, calls, _ = run_probe(tmp_path, bindir, [SLOW], **env)
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert calls == [] and warning in result.stderr
+
+
+def test_without_curl_the_probe_is_skipped(tmp_path, bindir):
+    only = tmp_path / "only"
+    only.mkdir()
+    for tool in ("awk", "cut", "tr"):
+        os.symlink(shutil.which(tool), only / tool)
+    os.symlink(sys.executable, only / "python3")
+    result = source_and_run(tmp_path, f'PATH="{only}"; net_probe; echo rc=$?', probe_env(tmp_path))
+    assert result.stdout.strip().splitlines()[-1] == "rc=0"
+    assert "curl or awk missing" in result.stderr
+
+
+def test_slow_network_prints_the_failed_marker_and_destroys_with_the_stock_cli_and_code_14(tmp_path, bindir):
+    vlog = sequenced_vastai(bindir, tmp_path, ["destroying instance 42.\\n"])
+    result, calls, sink = run_probe(
+        tmp_path, bindir, [SLOW, SLOW], snippet='net_probe || emergency_destroy slow_network "$EXIT_SLOW_NETWORK"; echo not-reached')
+    assert result.returncode == 14 and "not-reached" not in result.stdout
+    assert vlog.read_text().splitlines() == [DESTROY_CALL]
+    assert "[boot] FAILED: slow_network" in result.stdout.splitlines()
+    assert sink.splitlines()[-1] == "[boot] FAILED: slow_network"
+    assert "measured 2.8 MB/s" in sink
+    assert KEY not in result.stdout + result.stderr + sink
+
+
+def test_console_line_survives_an_unwritable_sink(tmp_path, bindir):
+    result = source_and_run(tmp_path, f'BOOT_LOG_SINK="{tmp_path}/missing/dir/x"; console_line hello; echo rc=$?')
+    assert result.stdout.splitlines() == ["hello", "rc=0"] and result.stderr == ""
+
+
+def test_step_markers_and_the_failed_marker_follow_the_web_grammar(tmp_path, bindir):
+    sink = tmp_path / "pid1.log"
+    sink.write_text("")
+    snippet = (f'BOOT_LOG_SINK="{sink}"; boot_step net_probe; boot_step models; boot_step ready; boot_step unknown; '
+               'boot_failed_marker "write_env_failed (exit 13)"; boot_failed_marker other')
+    result = source_and_run(tmp_path, snippet)
+    expected = ["[boot] step 1/9: net_probe", "[boot] step 7/9: models", "[boot] step 9/9: ready",
+                "[boot] FAILED: write_env_failed"]
+    assert result.stdout.splitlines() == expected and sink.read_text().splitlines() == expected
+    for line in expected:
+        assert re.fullmatch(r"\[boot\] step [1-9]/9: [a-z_]{1,32}|\[boot\] FAILED: [a-z0-9_]{1,64}", line)
+
+
+def test_emergency_destroy_prints_one_failed_marker(tmp_path, bindir):
+    sequenced_vastai(bindir, tmp_path, ["destroying instance 42.\\n"])
+    result = source_and_run(tmp_path, f'BOOT_LOG_SINK="{tmp_path}/none"; emergency_destroy "env_export_failed (x)"')
+    assert result.returncode == 1
+    assert [l for l in result.stdout.splitlines() if l.startswith("[boot]")] == ["[boot] FAILED: env_export_failed"]

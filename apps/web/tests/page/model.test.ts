@@ -606,7 +606,7 @@ describe("boot console model", () => {
   it("bootSentence follows the running phase and is null otherwise", () => {
     expect(bootSentence(parseConsole(payload())!)).toBe("Installing tools and joining Tailscale, usually 2-4 minutes");
     const run = (id: string) => parseConsole(payload({ phases: [{ id, name: "N", status: "running" }] }))!;
-    for (const id of ["image_pull", "install_tools", "failsafe", "agent", "nodes", "models", "comfyui"]) {
+    for (const id of ["image_pull", "net_probe", "install_tools", "failsafe", "agent", "nodes", "models", "comfyui"]) {
       expect(bootSentence(run(id))).toMatch(/\S/);
     }
     expect(bootSentence(run("something_new"))).toBe("N, in progress");

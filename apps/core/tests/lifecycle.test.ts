@@ -61,6 +61,8 @@ const cfg = {
   bootAgentGraceMin: 10,
   modelEtaMinObserveS: 120,
   bootMaxDownloadEtaMin: 20,
+  netProbeBytes: 25165824,
+  netProbeMinMbps: 20,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
@@ -257,6 +259,8 @@ describe("Lifecycle.start", () => {
       COMFYUI_ARGS: "--disable-auto-launch --port 18188",
       WORKSPACE: "/workspace", // config-lint: ok
       DATA_DIRECTORY: "/workspace/", // config-lint: ok
+      NET_PROBE_BYTES: "25165824",
+      NET_PROBE_MIN_MBPS: "20",
     });
     expect(out.record.status).toBe("booting");
     expect(out.record.vast_instance_id).toBe(900);

@@ -39,6 +39,8 @@ const cfg = {
   bootAgentGraceMin: 10,
   modelEtaMinObserveS: 120,
   bootMaxDownloadEtaMin: 20,
+  netProbeBytes: 25165824,
+  netProbeMinMbps: 20,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
@@ -269,10 +271,11 @@ describe("Lifecycle.console", () => {
 
   it("derives the phases from the markers, including a failed phase", async () => {
     const h = await harness();
-    h.vast.logText = "[boot] step 1/8: install_tools\n[boot] step 2/8: failsafe\n[boot] step 3/8: tailscale\n[boot] FAILED: tailscale_up\n";
+    h.vast.logText = "[boot] step 1/9: net_probe\n[boot] step 2/9: install_tools\n[boot] step 3/9: failsafe\n[boot] step 4/9: tailscale\n[boot] FAILED: tailscale_up\n";
     const p = await h.lc.console(0);
     expect(Object.fromEntries(p.phases.map((x) => [x.id, x.status]))).toEqual({
       image_pull: "done",
+      net_probe: "done",
       install_tools: "done",
       failsafe: "done",
       tailscale: "failed",

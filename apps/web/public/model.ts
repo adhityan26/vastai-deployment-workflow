@@ -1255,6 +1255,7 @@ export const PHASE_MARKS: Record<PhaseStatus, string> = { pending: "○", runnin
 // Plain sentences per phase id (ids are BOOT_STEPS in apps/core/src/console.ts, plus image_pull).
 const PHASE_SENTENCES: Record<string, string> = {
   image_pull: "Pulling the container image, usually 1-3 minutes",
+  net_probe: "Checking the network speed to the model host, a few seconds",
   install_tools: "Installing tools, usually under a minute",
   failsafe: "Starting the failsafe timer, a few seconds",
   tailscale: "Installing tools and joining Tailscale, usually 2-4 minutes",

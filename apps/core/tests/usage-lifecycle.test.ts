@@ -38,6 +38,8 @@ const cfg = {
   bootAgentGraceMin: 10,
   modelEtaMinObserveS: 120,
   bootMaxDownloadEtaMin: 20,
+  netProbeBytes: 25165824,
+  netProbeMinMbps: 20,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,

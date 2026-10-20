@@ -673,6 +673,9 @@ export class Lifecycle {
       COMFYUI_ARGS: `--disable-auto-launch --port ${comfyPort}`,
       WORKSPACE: "/workspace", // config-lint: ok (image contract, S1)
       DATA_DIRECTORY: "/workspace/", // config-lint: ok (image contract, S1)
+      // The early network probe of instance/bootstrap.sh (read before the instance schema can be read).
+      NET_PROBE_BYTES: String(intCfg(cfg, "netProbeBytes", "NET_PROBE_BYTES", 1048576)),
+      NET_PROBE_MIN_MBPS: String(intCfg(cfg, "netProbeMinMbps", "NET_PROBE_MIN_MBPS", 0)),
       // The instance writes it into ComfyUI's arguments before its own ComfyUI restart (instance/bootstrap.sh).
       ...(typeof cfg["comfyPreviewMethod"] === "string" && cfg["comfyPreviewMethod"] !== ""
         ? { COMFY_PREVIEW_METHOD: cfg["comfyPreviewMethod"] }

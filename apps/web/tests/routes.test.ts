@@ -300,6 +300,8 @@ async function harness(
     bootAgentGraceMin: 10,
     modelEtaMinObserveS: 120,
     bootMaxDownloadEtaMin: 20,
+    netProbeBytes: 25165824,
+    netProbeMinMbps: 20,
     vastBadMachineTtlMin: 60,
     unreachableDestroyMin: 15,
     reconcileGraceMin: 10,
@@ -2176,9 +2178,9 @@ describe("boot console route", () => {
     expect(body.instance).toEqual({ state: "ready", ended: false, ended_reason: null });
     expect(body.lines.map((l: { text: string }) => l.text)).toEqual(["[boot] step 1/8: install_tools", "hello"]);
     expect(body.phases.map((p: { id: string }) => p.id)).toEqual([
-      "image_pull", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready",
+      "image_pull", "net_probe", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready",
     ]);
-    expect(body.phases[1]).toEqual({ id: "install_tools", name: "Install tools", status: "running" });
+    expect(body.phases[2]).toEqual({ id: "install_tools", name: "Install tools", status: "running" });
   });
 
   it("validates after", async () => {

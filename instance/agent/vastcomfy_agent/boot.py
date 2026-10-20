@@ -31,6 +31,8 @@ EXIT_MISSING_CREDS = 10
 EXIT_HARD_CAP = 11
 EXIT_FAILED = 12
 EXIT_CONFIG = 13
+# Not a boot CLI code: instance/bootstrap.sh exits with it after its early network probe gave up (slow_network).
+EXIT_SLOW_NETWORK = 14
 
 CREDENTIAL_KEYS = ("CONTAINER_ID", "CONTAINER_API_KEY")
 

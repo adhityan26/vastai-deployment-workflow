@@ -338,9 +338,9 @@ describe("ConsoleBuffer lifecycle", () => {
 describe("phases", () => {
   it("lists every phase in the fixed order", () => {
     expect(BOOT_PHASES.map((p) => p.id)).toEqual([
-      "image_pull", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready",
+      "image_pull", "net_probe", "install_tools", "failsafe", "tailscale", "agent", "nodes", "models", "comfyui", "ready",
     ]);
-    expect(BOOT_STEPS).toHaveLength(8);
+    expect(BOOT_STEPS).toHaveLength(9);
     const b = buffer();
     expect(new Set(Object.values(statuses(b)))).toEqual(new Set(["pending"]));
     expect(b.phases().every((p) => p.name.length > 0 && p.name.length <= 20)).toBe(true);
@@ -358,13 +358,13 @@ describe("phases", () => {
   it("derives the steps from the markers", () => {
     const b = buffer();
     b.setVastStatus("loading");
-    b.append("vast_logs", ["[boot] step 1/8: install_tools", "apt output", "[boot] step 3/8: tailscale"]);
+    b.append("vast_logs", ["[boot] step 2/9: install_tools", "apt output", "[boot] step 4/9: tailscale"]);
     expect(statuses(b)).toMatchObject({
-      image_pull: "done", install_tools: "done", failsafe: "done", tailscale: "running", agent: "pending", ready: "pending",
+      image_pull: "done", net_probe: "done", install_tools: "done", failsafe: "done", tailscale: "running", agent: "pending", ready: "pending",
     });
     b.append("vast_logs", ["[boot] FAILED: tailscale_up"]);
     expect(statuses(b)).toMatchObject({ failsafe: "done", tailscale: "failed", agent: "pending" });
-    b.append("vast_logs", ["[boot] step 8/8: ready"]);
+    b.append("vast_logs", ["[boot] step 9/9: ready"]);
     expect(new Set(Object.values(statuses(b)))).toEqual(new Set(["done"]));
   });
 
@@ -372,7 +372,7 @@ describe("phases", () => {
     const b = buffer();
     b.setVastStatus("running");
     b.append("vast_logs", ["[boot] FAILED: clone_failed"]);
-    expect(statuses(b)).toMatchObject({ image_pull: "done", install_tools: "failed", failsafe: "pending" });
+    expect(statuses(b)).toMatchObject({ image_pull: "done", net_probe: "failed", install_tools: "pending" });
   });
 
   it("reads only the exact marker grammar from the container log", () => {

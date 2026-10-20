@@ -12,6 +12,16 @@ PY="$VENV_DIR/bin/python"
 VASTAI_FALLBACK=0
 BOOT_DONE=0
 HANDLED=0
+FAIL_MARKED=0
+# The boot steps in order. apps/core/src/console.ts BOOT_STEPS is the one list the web follows; keep them equal
+# (a test compares them). Each step prints `[boot] step <n>/<total>: <id>` before it starts.
+BOOT_STEP_IDS="net_probe install_tools failsafe tailscale agent nodes models comfyui ready"
+# What `vastai logs` shows is the stdout of the container's PID 1; markers go there too (best effort).
+BOOT_LOG_SINK=/proc/1/fd/1
+# Exit code of a boot that gave up on a too slow network (beside the boot CLI codes 10-13 in boot.py).
+EXIT_SLOW_NETWORK=14
+# Pause before the one retry of a slow probe (a transient dip), seconds.
+NET_PROBE_RETRY_S=5
 
 # Run a command with its output in a file, killed after SECS seconds (no timeout binary; same pattern as
 # failsafe.sh run_with_timeout). Returns 124 when killed.
@@ -32,26 +42,61 @@ bounded_run() {  # secs outfile command...
   wait "$pid"
 }
 
+# One line for the boot console: on stdout and, unless stdout already is the container log, on PID 1's stdout.
+# Best effort: an unwritable sink is skipped silently and never fails the script.
+console_line() {
+  printf '%s\n' "$1"
+  if [ -w "$BOOT_LOG_SINK" ] && ! [ /proc/self/fd/1 -ef "$BOOT_LOG_SINK" ]; then
+    { printf '%s\n' "$1" >> "$BOOT_LOG_SINK"; } 2>/dev/null || true
+  fi
+  return 0
+}
+
+boot_step() {  # id: print the step marker before the step starts
+  local total n=0 id
+  total="$(set -- $BOOT_STEP_IDS; echo $#)"
+  for id in $BOOT_STEP_IDS; do
+    n=$((n + 1))
+    if [ "$id" = "$1" ]; then
+      console_line "[boot] step $n/$total: $1"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# `[boot] FAILED: <code>` once per boot; the code is the first word of the reason, cut to the marker grammar.
+boot_failed_marker() {
+  local code
+  [ "$FAIL_MARKED" = 1 ] && return 0
+  FAIL_MARKED=1
+  code="$(printf '%s' "${1%% *}" | tr -c 'a-z0-9_' '_' | cut -c1-64)"
+  [ -n "$code" ] || code=boot_failed
+  console_line "[boot] FAILED: $code"
+}
+
 # Last resort when the configured destroy path cannot be trusted (no or broken configuration, or a dead
 # failsafe): destroy with the image's own CLI (PATH, else STOCK_VASTAI_BIN) and the credentials Vast put in the
 # environment. The stock CLI does not know -y (S1). Up to 3 bounded attempts, stopping early on a success text
 # (a line starting with "destroying instance", or "failed with error 404: instance", after removing the id and
 # the key). KEEP_ON_FAILURE is ignored on purpose: this path errs on the side of destroying. Always exits
-# non-zero, whether or not the destroy worked; the CLI output is printed with the key removed.
+# non-zero (1, or the code given as the second argument), whether or not the destroy worked; the CLI output is
+# printed with the key removed.
 emergency_destroy() {
-  local cli out text rc attempt=1 tmp
+  local cli out text rc attempt=1 tmp code="${2:-1}"
   local secs="${DESTROY_TIMEOUT_S:-60}"  # config-lint: ok (also runs before the schema can be read; schema default of DESTROY_TIMEOUT_S)
   local pause="${DESTROY_BACKOFF_S:-5}"  # config-lint: ok (also runs before the schema can be read; short pre-config backoff)
   local stock="${STOCK_VASTAI_BIN:-/opt/instance-tools/bin/vastai}"  # config-lint: ok (before the schema can be read; schema default of STOCK_VASTAI_BIN)
   case "$secs" in ''|*[!0-9]*) secs=60 ;; esac
   case "$pause" in ''|*[!0-9]*) pause=5 ;; esac
   HANDLED=1
+  boot_failed_marker "$1"
   echo "bootstrap: $1; emergency destroy with the image vastai CLI" >&2
   cli="$(command -v vastai)" || cli=""
   if [ -z "$cli" ] && [ -x "$stock" ]; then cli="$stock"; fi
   if [ -z "$cli" ] || [ -z "${CONTAINER_ID:-}" ] || [ -z "${CONTAINER_API_KEY:-}" ]; then
     echo "bootstrap: emergency destroy impossible: vastai CLI or container credentials missing" >&2
-    exit 1
+    exit "$code"
   fi
   tmp="$(mktemp 2>/dev/null)" || tmp=/dev/null
   while [ "$attempt" -le 3 ]; do
@@ -69,7 +114,80 @@ emergency_destroy() {
     attempt=$((attempt + 1))
   done
   [ "$tmp" = /dev/null ] || rm -f "$tmp"
-  exit 1
+  exit "$code"
+}
+
+# --- early network probe (step net_probe) ----------------------------------------------------------------------
+# Vast's advertised download speed does not predict the speed to the model host (2026-10-19: 888 Mbps advertised,
+# 2.8 MB/s from Hugging Face). Before anything heavy runs, download the first NET_PROBE_BYTES of one of the
+# profile's own pinned files and measure the speed; below NET_PROBE_MIN_MBPS (MB/s, 10^6 bytes) twice, 5 s apart,
+# the boot gives up: a few paid seconds instead of a 25 minute wait. No configuration exists yet, so the keys
+# are read from the environment with their schema defaults. The probe never destroys on its own malfunction:
+# curl or awk missing, no usable profile entry, an HTTP error or a stalled transfer are a warning, and the boot
+# goes on (the web's slow-boot rules still apply). No token is sent: the pinned files are public.
+
+net_probe_url() {  # min_bytes: the URL of the profile file to probe (stdout), via the standard-library helper
+  local profile="$HERE/profiles/${PROFILE:-}.yaml"  # config-lint: ok (PROFILE comes from the web, schema key)
+  [ -n "${PROFILE:-}" ] && [ -f "$profile" ] || return 1
+  command -v python3 > /dev/null 2>&1 || return 1
+  python3 -I "$HERE/agent/vastcomfy_agent/net_probe.py" url --profile "$profile" \
+    --base "${HF_BASE_URL:-https://huggingface.co}" --min-bytes "$1" 2> /dev/null  # config-lint: ok (before the schema can be read; schema default of HF_BASE_URL)
+}
+
+# url bytes max_s: one ranged download, printing the speed in MB/s (one decimal). Fails on a probe malfunction:
+# a curl error other than its own timeout, an HTTP status other than 200/206, or too little data to measure.
+# The speed counts the body only (from the first byte to the end), not DNS, TLS or the redirect.
+net_probe_measure() {
+  local out rc
+  out="$(curl -sS -L -o /dev/null -r "0-$(($2 - 1))" --max-time "$3" \
+    -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' "$1" 2> /dev/null)"
+  rc=$?
+  case "$rc" in 0|28) ;; *) return 1 ;; esac  # 28: the time cap cut the transfer; what arrived still measures the link
+  set -- $out
+  [ "$#" -eq 4 ] || return 1
+  case "$1" in 200|206) ;; *) return 1 ;; esac
+  awk -v rc="$rc" -v size="$2" -v first="$3" -v total="$4" 'BEGIN {
+    if (size + 0 <= 0 || (rc == 0 && size + 0 < 1048576)) exit 1
+    body = total - first
+    if (body < 0.001) body = 0.001
+    printf "%.1f\n", size / body / 1000000
+  }'
+}
+
+# Returns 1 only when the network is too slow twice; 0 otherwise (also when the probe is off or broken).
+net_probe() {
+  local bytes="${NET_PROBE_BYTES:-25165824}" min="${NET_PROBE_MIN_MBPS:-20}" url max_s speed attempt=1  # config-lint: ok (before the schema can be read; schema defaults of NET_PROBE_BYTES and NET_PROBE_MIN_MBPS)
+  case "$bytes" in ''|*[!0-9]*) echo "bootstrap: warning: network probe skipped (NET_PROBE_BYTES is not a number)" >&2; return 0 ;; esac
+  case "$min" in ''|*[!0-9]*) echo "bootstrap: warning: network probe skipped (NET_PROBE_MIN_MBPS is not a number)" >&2; return 0 ;; esac
+  if [ "$min" -eq 0 ]; then
+    echo "bootstrap: network probe off (NET_PROBE_MIN_MBPS=0)" >&2
+    return 0
+  fi
+  if [ "$bytes" -lt 1048576 ]; then
+    echo "bootstrap: warning: network probe skipped (NET_PROBE_BYTES below 1 MiB)" >&2
+    return 0
+  fi
+  if ! command -v curl > /dev/null 2>&1 || ! command -v awk > /dev/null 2>&1; then
+    echo "bootstrap: warning: network probe skipped (curl or awk missing)" >&2
+    return 0
+  fi
+  if ! url="$(net_probe_url "$bytes")" || [ -z "$url" ]; then
+    echo "bootstrap: warning: network probe skipped (no pinned model file found in the profile)" >&2
+    return 0
+  fi
+  # Long enough for the range at twice the minimum time, plus connection setup; a slower link is cut and measured.
+  max_s=$((15 + 2 * bytes / (min * 1000000)))
+  while :; do
+    if ! speed="$(net_probe_measure "$url" "$bytes" "$max_s")"; then
+      echo "bootstrap: warning: network probe failed (download error); continuing without it" >&2
+      return 0
+    fi
+    console_line "[boot] net_probe: measured $speed MB/s (minimum $min MB/s)"
+    awk -v s="$speed" -v m="$min" 'BEGIN { exit !(s + 0 < m + 0) }' || return 0
+    [ "$attempt" -ge 2 ] && return 1
+    attempt=$((attempt + 1))
+    sleep "$NET_PROBE_RETRY_S"
+  done
 }
 
 # Our own venv (the image venv /venv/main belongs to ComfyUI). Editable install: the agent reads
@@ -130,7 +248,7 @@ pre_failsafe_failed() {
   esac
 }
 
-die_with() { HANDLED=1; boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
+die_with() { HANDLED=1; boot_failed_marker "$1"; boot fail "$1" --env-file "$ENV_FILE"; exit $?; }
 ctl() { "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" "$@"; }
 
 # The failsafe exits at startup for the same faults that break the configured Destroyer (for example a
@@ -138,6 +256,7 @@ ctl() { "$SUPERVISORCTL_BIN" -c "$SUPERVISOR_CONF" "$@"; }
 # gone instance only hits the 404 gone marker.
 failsafe_failed_closed() {
   HANDLED=1
+  boot_failed_marker failsafe_failed
   boot fail failsafe_failed --env-file "$ENV_FILE"
   emergency_destroy failsafe_failed
 }
@@ -178,7 +297,13 @@ disable_comfy_manager() {
 
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
+# Step net_probe: is the network to the model host fast enough at all? Only the stock CLI can destroy here
+# (emergency_destroy, as onstart.sh does): it needs nothing this script installs.
+boot_step net_probe
+net_probe || emergency_destroy slow_network "$EXIT_SLOW_NETWORK"
+
 # Step 0: agent venv and the pinned vastai CLI. No configuration exists yet.
+boot_step install_tools
 install_runtime
 
 # Step 1: credentials. Writes the instance .env from the environment (schema keys only).
@@ -189,6 +314,7 @@ ENV_FILE="$(boot write-env)" || write_env_failed $?
 on_exit() {
   local rc=$?
   trap - EXIT
+  [ "$rc" -ne 0 ] && [ "${BOOT_DONE:-0}" != 1 ] && boot_failed_marker boot_failed
   if [ "$rc" -ne 0 ] && [ "${BOOT_DONE:-0}" != 1 ] && [ "${HANDLED:-0}" != 1 ]; then
     case "$rc" in
       11|12|13) ;;
@@ -214,6 +340,7 @@ eval "$EXPORTS"  # non-secret keys for the shell steps below
 check_runtime_binaries || emergency_destroy runtime_binaries_missing
 
 # Step 2: new boot, time files (written only on the very first boot).
+boot_step failsafe
 boot begin --env-file "$ENV_FILE" || pre_failsafe_failed $? begin_failed
 boot init-times --env-file "$ENV_FILE" || pre_failsafe_failed $? init_times_failed
 
@@ -224,6 +351,7 @@ sleep 1
 kill -0 "$FAILSAFE_PID" 2>/dev/null || failsafe_failed_closed
 
 # Step 4: install Tailscale (S2), then register tailscaled and agent (rendered with literal values) with the image's running supervisord.
+boot_step tailscale
 install_tailscale || die_with tailscale_failed
 wait_for_supervisor || die_with supervisor_failed
 boot render-supervisor-conf --env-file "$ENV_FILE" || exit $?
@@ -243,15 +371,19 @@ boot wipe-key TS_AUTHKEY --env-file "$ENV_FILE" || exit $?
 # which ports (COMFY_PORT, AGENT_PORT) are reachable.
 
 # Step 6: agent (reachable over Tailscale from here on).
+boot_step agent
 ctl start agent || die_with agent_start_failed
 boot wait --target agent --env-file "$ENV_FILE" || exit $?
 
 # Steps 7-8: nodes, then models (state moves to downloading).
+boot_step nodes
 boot install-nodes --env-file "$ENV_FILE" || exit $?
+boot_step models
 boot install-models --env-file "$ENV_FILE" || exit $?
 
 # Step 9: bundled workflows (never overwrites), the ComfyUI arguments, then restart the image's ComfyUI (already
 # running since the entrypoint) once so it loads the new nodes and the preview method.
+boot_step comfyui
 boot copy-workflows --env-file "$ENV_FILE" || exit $?
 # ComfyUI's arguments with the preview method (COMFY_PREVIEW_METHOD) go where the image's start script reads them,
 # so the restart below runs with previews. Only an invalid configuration fails here; a failed write is a warning
@@ -266,3 +398,4 @@ boot verify-nodes --env-file "$ENV_FILE" || exit $?
 # Step 10: ready (starts the idle timer).
 boot mark-ready --env-file "$ENV_FILE" || exit $?
 BOOT_DONE=1
+boot_step ready
