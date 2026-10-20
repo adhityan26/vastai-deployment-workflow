@@ -41,6 +41,20 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...base, VAST_START_STUCK_MIN: "24", BOOT_TIMEOUT_MIN: "25" }, schema)["vastStartStuckMin"]).toBe(24);
   });
 
+  it("slow boot keys default to 10 min, 120 s and 20 min; the agent grace stays below the boot timeout", () => {
+    const cfg = loadConfig(base, schema);
+    expect(cfg["bootAgentGraceMin"]).toBe(10);
+    expect(cfg["modelEtaMinObserveS"]).toBe(120);
+    expect(cfg["bootMaxDownloadEtaMin"]).toBe(20);
+    expect(() => loadConfig({ ...base, BOOT_AGENT_GRACE_MIN: "1" }, schema)).toThrow(/BOOT_AGENT_GRACE_MIN: below the minimum 2/);
+    expect(() => loadConfig({ ...base, BOOT_MAX_DOWNLOAD_ETA_MIN: "0" }, schema)).toThrow(/BOOT_MAX_DOWNLOAD_ETA_MIN: below the minimum 1/);
+    expect(() => loadConfig({ ...base, MODEL_ETA_MIN_OBSERVE_S: "0" }, schema)).toThrow(/MODEL_ETA_MIN_OBSERVE_S: below the minimum 1/);
+    expect(() => loadConfig({ ...base, BOOT_AGENT_GRACE_MIN: "25", BOOT_TIMEOUT_MIN: "25" }, schema)).toThrow(
+      /BOOT_AGENT_GRACE_MIN: must be less than BOOT_TIMEOUT_MIN/,
+    );
+    expect(loadConfig({ ...base, BOOT_AGENT_GRACE_MIN: "24", BOOT_TIMEOUT_MIN: "25" }, schema)["bootAgentGraceMin"]).toBe(24);
+  });
+
   it("the preview method defaults to latent2rgb and only takes its listed choices", () => {
     expect(loadConfig(base, schema)["comfyPreviewMethod"]).toBe("latent2rgb");
     for (const ok of ["none", "latent2rgb", "taesd", "auto"]) expect(loadConfig({ ...base, COMFY_PREVIEW_METHOD: ok }, schema)["comfyPreviewMethod"]).toBe(ok);

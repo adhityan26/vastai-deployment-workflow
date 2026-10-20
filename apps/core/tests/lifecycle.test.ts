@@ -58,6 +58,9 @@ const cfg = {
   startHardCapHours: 6,
   bootTimeoutMin: 25,
   vastStartStuckMin: 5,
+  bootAgentGraceMin: 10,
+  modelEtaMinObserveS: 120,
+  bootMaxDownloadEtaMin: 20,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
@@ -1309,6 +1312,7 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     expect(view.start_failure).toEqual({
       code: "start_stuck",
       server: { location: "Quebec, CA", down_mbps: 860, up_mbps: null, reliability: null, machine_id: BAD },
+      measured_mb_s: null,
     });
     const line = logs.find((l) => l.includes("start stuck"));
     expect(line).toContain("instance 900");
@@ -1500,6 +1504,7 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
     expect((await life2.view()).start_failure).toEqual({
       code: "start_stuck",
       server: { location: "Quebec, CA", down_mbps: 860, up_mbps: null, reliability: null, machine_id: BAD },
+      measured_mb_s: null,
     });
     await life2.start();
     expect(s.vast.createdOffers).toEqual([11, 12]);
@@ -1583,5 +1588,341 @@ describe("Lifecycle server location (where the rented machine is)", () => {
     vast.offers = [offer(11, 0.1, { inet_down: 499 }), offer(13, 0.3, { inet_down: 500 })];
     await life.start();
     expect(vast.createdOffers).toEqual([13]);
+  });
+});
+
+describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that vanished", () => {
+  const BAD = 56685310;
+  const GOOD = 777;
+  const MIN = 60;
+  const MB = 1_000_000;
+  // About the shipped profile: 15 GB in three files, downloaded in this order.
+  const models: ModelSpec[] = [
+    { file: "a.gguf", size_bytes: 4_600 * MB },
+    { file: "b.safetensors", size_bytes: 9_400 * MB },
+    { file: "c.safetensors", size_bytes: 1_000 * MB },
+  ];
+  const runningRow = { actual_status: "running", cur_state: "running", intended_status: "running", last_started: T0 + 60, machine_id: BAD };
+
+  function slowSetup(over: Parameters<typeof setup>[0] = {}) {
+    const s = setup({ models, ...over });
+    s.vast.offers = [
+      { id: 11, dph_total: 0.2, gpu_name: "RTX A5000", gpu_ram: 24576, machine_id: BAD, geolocation: "Lithuania, LT", inet_down: 888 },
+      { id: 12, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24576, machine_id: GOOD },
+    ];
+    s.agent.statusImpl = async () => {
+      throw new Unreachable("agent not reachable");
+    };
+    const at = async (t: number, row?: Record<string, unknown>) => {
+      if (row !== undefined && s.vast.instances[0] !== undefined) Object.assign(s.vast.instances[0], row);
+      s.time.now = t;
+      return s.life.reconcile();
+    };
+    /** The agent reports the overall download at `bytes` (across the profile files, in order). */
+    const downloading = (bytes: number) => {
+      let before = 0;
+      for (const m of models) {
+        if (bytes < before + m.size_bytes || m === models.at(-1)) {
+          const done = Math.min(bytes - before, m.size_bytes);
+          s.agent.statusImpl = async () =>
+            status("downloading", { progress: { phase: "models", file: m.file, bytes_done: done, bytes_total: m.size_bytes } });
+          return;
+        }
+        before += m.size_bytes;
+      }
+    };
+    return { ...s, at, downloading };
+  }
+
+  const reasons = (r: { destroyed: { reason: string }[] }) => r.destroyed.map((d) => d.reason);
+
+  describe("slow_boot: Vast says running, the agent never answers", () => {
+    it("the live case (stuck in install_tools): released once BOOT_AGENT_GRACE_MIN of silence held, machine avoided", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      expect(reasons(await s.at(T0 + 2 * MIN, { actual_status: "loading" }))).toEqual([]);
+      expect(reasons(await s.at(T0 + 3 * MIN, runningRow))).toEqual([]); // first silent sighting
+      for (const m of [5, 8, 12]) expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+      const report = await s.at(T0 + 13 * MIN);
+      expect(reasons(report)).toEqual(["slow_boot"]);
+      expect(s.agent.destroyCalls).toEqual(["watchdog"]);
+      expect(s.vast.calls).toContain("vast.destroy:900");
+      const view = await s.life.view();
+      expect(view.state).toBe("none");
+      expect(view.start_failure).toMatchObject({ code: "slow_boot", measured_mb_s: null });
+      expect(view.start_failure?.server?.machine_id).toBe(BAD);
+      expect((await s.life.estimate()).offer_id).toBe(12);
+      const line = s.logs.find((l) => l.includes("slow boot"));
+      expect(line).toContain(`machine ${BAD}`);
+      expect(line).toContain("avoiding the machine for 60 min");
+      for (const l of s.logs) {
+        expect(l).not.toContain(HOST);
+        expect(l).not.toContain(TOKEN);
+        expect(l).not.toContain(AUTH_KEY);
+      }
+      // Well before BOOT_TIMEOUT_MIN (25).
+      expect(s.time.now - T0).toBeLessThan(25 * MIN);
+    });
+
+    it("one silent sample is not enough, however late", async () => {
+      const s = slowSetup({ cfg: { bootTimeoutMin: 60 } });
+      await s.life.start();
+      expect(reasons(await s.at(T0 + 20 * MIN, runningRow))).toEqual([]);
+      expect(reasons(await s.at(T0 + 20 * MIN + 30))).toEqual([]);
+      expect(reasons(await s.at(T0 + 30 * MIN))).toEqual(["slow_boot"]);
+    });
+
+    it("a long image pull does not count: silence is measured from the first running sighting", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      for (const m of [3, 6, 9, 12]) expect(reasons(await s.at(T0 + m * MIN, { actual_status: "loading" }))).toEqual([]);
+      expect(reasons(await s.at(T0 + 13 * MIN, runningRow))).toEqual([]);
+      expect(reasons(await s.at(T0 + 16 * MIN))).toEqual([]);
+      expect(reasons(await s.at(T0 + 22 * MIN))).toEqual([]);
+      expect(reasons(await s.at(T0 + 23 * MIN))).toEqual(["slow_boot"]);
+    });
+
+    it("an agent that answered once is never a slow boot (the unreachable rule covers it)", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.agent.statusImpl = async () => status("booting");
+      expect(reasons(await s.at(T0 + 3 * MIN, runningRow))).toEqual([]);
+      s.agent.statusImpl = async () => {
+        throw new Unreachable("down");
+      };
+      // The unreachable timer starts at the first silent sighting (4 min) and runs UNREACHABLE_DESTROY_MIN (15).
+      for (const m of [4, 10, 15, 18]) expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+      expect(reasons(await s.at(T0 + 19 * MIN))).toEqual(["unreachable"]);
+      expect((await s.life.view()).start_failure).toBeNull();
+    });
+
+    it("a ready instance is never released as slow", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.agent.statusImpl = async () => status("ready");
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.agent.statusImpl = async () => {
+        throw new Unreachable("down");
+      };
+      for (const m of [4, 10, 14, 17]) expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+    });
+
+    it("a failed Vast list is no sample and resets nothing", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      expect(reasons(await s.at(T0 + 3 * MIN, runningRow))).toEqual([]);
+      s.vast.listError = new VastError("down");
+      expect(reasons(await s.at(T0 + 8 * MIN))).toEqual([]);
+      s.vast.listError = null;
+      expect(reasons(await s.at(T0 + 13 * MIN))).toEqual(["slow_boot"]);
+    });
+
+    it("a web restart starts the sighting over: it only delays the release", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      expect(reasons(await s.at(T0 + 3 * MIN, runningRow))).toEqual([]);
+      // The unreachable rule (kept in the registry) would fire at 18 min: move it out of the way.
+      const life2 = new Lifecycle({
+        cfg: { ...cfg, unreachableDestroyMin: 60 } as unknown as AppsConfig, vast: s.vast, registry: s.registry,
+        agentFor: () => s.agent, clock: () => s.time.now, profileModels: models,
+        tsAuthKey: async () => AUTH_KEY, newToken: () => TOKEN, newHostname: () => "vast-other", sleep: async () => undefined,
+      });
+      s.time.now = T0 + 13 * MIN;
+      expect(reasons(await life2.reconcile())).toEqual([]);
+      s.time.now = T0 + 22 * MIN;
+      expect(reasons(await life2.reconcile())).toEqual([]);
+      s.time.now = T0 + 23 * MIN;
+      expect(reasons(await life2.reconcile())).toEqual(["slow_boot"]);
+    });
+
+    it("after a restart, an agent seen before (usage file) still counts as answered", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "slow-usage-"));
+      const usageFile = join(dir, "usage.json");
+      const usage = () => new UsageHistory({ maxEntries: 20, slackS: 120 }, new UsageStore(usageFile, usageFileCap(20)));
+      const s = slowSetup({ usage: usage() });
+      await s.life.start();
+      s.agent.statusImpl = async () => status("booting");
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.agent.statusImpl = async () => {
+        throw new Unreachable("down");
+      };
+      const life2 = new Lifecycle({
+        cfg, vast: s.vast, registry: s.registry, agentFor: () => s.agent, clock: () => s.time.now, profileModels: models,
+        tsAuthKey: async () => AUTH_KEY, newToken: () => TOKEN, newHostname: () => "vast-other", sleep: async () => undefined,
+        usage: usage(),
+      });
+      for (const m of [4, 9, 14]) {
+        s.time.now = T0 + m * MIN;
+        expect(reasons(await life2.reconcile())).toEqual([]);
+      }
+    });
+  });
+
+  describe("slow_download: the agent's download progress is too slow", () => {
+    it("the live case (about 2.8 MB/s): released after two slow samples with the measured speed, machine avoided", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(0);
+      expect(reasons(await s.at(T0 + 3 * MIN, runningRow))).toEqual([]); // window starts
+      s.downloading(2.8 * MB * 60);
+      expect(reasons(await s.at(T0 + 4 * MIN))).toEqual([]); // 60 s < MODEL_ETA_MIN_OBSERVE_S
+      s.downloading(2.8 * MB * 120);
+      expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]); // slow 1
+      s.downloading(2.8 * MB * 180);
+      expect(reasons(await s.at(T0 + 6 * MIN))).toEqual(["slow_download"]); // slow 2, a minute later
+      const view = await s.life.view();
+      expect(view.start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 2.8 });
+      expect(view.start_failure?.server).toMatchObject({ machine_id: BAD, location: "Lithuania, LT", down_mbps: 888 });
+      expect((await s.life.estimate()).offer_id).toBe(12);
+      const line = s.logs.find((l) => l.includes("slow download"));
+      expect(line).toContain("about 2.8 MB/s");
+      expect(line).toContain(`machine ${BAD}`);
+      expect(s.logs.join("\n")).not.toContain(HOST);
+    });
+
+    it("a healthy download (about 55 MB/s, ETA about 5 min) is never released and boots to ready", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      let bytes = 0;
+      s.downloading(bytes);
+      await s.at(T0 + 2 * MIN, runningRow);
+      for (let m = 3; m <= 6; m++) {
+        bytes += 55 * MB * 60;
+        s.downloading(bytes);
+        expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+      }
+      s.agent.statusImpl = async () => status("ready");
+      expect((await s.at(T0 + 7 * MIN)).ready).toEqual([HOST]);
+      expect((await s.life.view()).start_failure).toBeNull();
+    });
+
+    it("a speed just fast enough (15 GB left at 13 MB/s, about 19 min) is not released", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      let bytes = 0;
+      s.downloading(bytes);
+      await s.at(T0 + 3 * MIN, runningRow);
+      for (let m = 4; m <= 9; m++) {
+        bytes += 13 * MB * 60;
+        s.downloading(bytes);
+        expect(reasons(await s.at(T0 + m * MIN))).toEqual([]);
+      }
+    });
+
+    it("a good sample resets the slow run, and a failed agent read is no sample", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(0);
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.downloading(1 * MB * 120);
+      expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]); // slow 1
+      // A burst: the average since the window start is now fast enough.
+      s.downloading(14_000 * MB);
+      expect(reasons(await s.at(T0 + 6 * MIN))).toEqual([]); // good: resets
+      s.downloading(14_000 * MB);
+      expect(reasons(await s.at(T0 + 30 * MIN, undefined))).toEqual(["boot_timeout"]);
+    });
+
+    it("an agent read that fails between two slow samples does not break the run", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(0);
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.downloading(1 * MB * 120);
+      expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]); // slow 1
+      s.agent.statusImpl = async () => {
+        throw new Unreachable("blip");
+      };
+      expect(reasons(await s.at(T0 + 6 * MIN))).toEqual([]);
+      s.downloading(1 * MB * 240);
+      expect(reasons(await s.at(T0 + 7 * MIN))).toEqual(["slow_download"]);
+      expect((await s.life.view()).start_failure).toMatchObject({ measured_mb_s: 1 });
+    });
+
+    it("fewer bytes than at the window start (a file restarted) starts a new window", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.downloading(5_000 * MB);
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.downloading(5_000 * MB + MB);
+      expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]); // slow 1
+      s.downloading(4_600 * MB); // the second file starts over
+      expect(reasons(await s.at(T0 + 6 * MIN))).toEqual([]); // new window
+      s.downloading(4_600 * MB + MB);
+      expect(reasons(await s.at(T0 + 7 * MIN))).toEqual([]); // 60 s: not judged yet
+      expect(reasons(await s.at(T0 + 8 * MIN))).toEqual([]); // slow 1
+      expect(reasons(await s.at(T0 + 9 * MIN))).toEqual(["slow_download"]);
+    });
+
+    it("no model list (no profile) never judges the download", async () => {
+      const s = setup();
+      s.agent.statusImpl = async () =>
+        status("downloading", { progress: { phase: "models", file: "a.gguf", bytes_done: 0, bytes_total: 100 } });
+      await s.life.start();
+      for (const m of [3, 6, 9, 12]) {
+        s.time.now = T0 + m * MIN;
+        expect(reasons(await s.life.reconcile())).toEqual([]);
+      }
+    });
+  });
+
+  describe("a boot that vanished by itself (generic rule)", () => {
+    async function vanish(s: ReturnType<typeof slowSetup>, from: number) {
+      s.vast.instances = [];
+      expect((await s.at(T0 + from * MIN)).gone).toEqual([]);
+      return s.at(T0 + (from + 1) * MIN);
+    }
+
+    it("puts the machine on the bad list for the TTL and shows boot_failed", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      s.agent.statusImpl = async () => status("booting");
+      await s.at(T0 + 3 * MIN, runningRow);
+      const report = await vanish(s, 10);
+      expect(report.gone).toEqual([{ tailnet_hostname: HOST, reason: "vanished" }]);
+      expect((await s.life.view()).start_failure).toMatchObject({ code: "boot_failed", measured_mb_s: null });
+      expect((await s.life.estimate()).offer_id).toBe(12);
+      const line = s.logs.find((l) => l.includes("boot failed"));
+      expect(line).toContain(`machine ${BAD}`);
+      expect(line).toContain("disappeared during its boot");
+      s.time.now = T0 + 11 * MIN + 60 * MIN;
+      expect((await s.life.estimate()).offer_id).toBe(11);
+    });
+
+    it("never after the Destroy button (the record was stopping) or once the instance was ready", async () => {
+      const s = slowSetup();
+      await s.life.start();
+      await s.at(T0 + 3 * MIN, runningRow);
+      s.vast.destroyQueue = [new DestroyError("vast busy"), new DestroyError("vast busy"), new DestroyError("vast busy")];
+      await expect(s.life.destroy("admin")).rejects.toThrow();
+      expect((await s.registry.active())?.status).toBe("stopping");
+      s.vast.instances = [];
+      await s.at(T0 + 10 * MIN);
+      await s.at(T0 + 11 * MIN);
+      expect(await s.registry.active()).toBeNull();
+      expect((await s.life.view()).start_failure).toBeNull();
+      expect((await s.life.estimate()).offer_id).toBe(11);
+
+      const r = slowSetup();
+      await r.life.start();
+      r.agent.statusImpl = async () => status("ready");
+      await r.at(T0 + 3 * MIN, runningRow);
+      await vanish(r, 10);
+      expect((await r.life.view()).start_failure).toBeNull();
+      expect((await r.life.estimate()).offer_id).toBe(11);
+    });
+
+    it("an unknown machine is not avoided (and nothing breaks)", async () => {
+      const s = slowSetup();
+      s.vast.offers = [{ id: 11, dph_total: 0.2, gpu_name: "RTX A5000", gpu_ram: 24576 }];
+      await s.life.start();
+      await s.at(T0 + 3 * MIN, { actual_status: "running" });
+      await vanish(s, 10);
+      const failure = (await s.life.view()).start_failure;
+      expect(failure).toMatchObject({ code: "boot_failed" });
+      expect(failure?.server?.machine_id ?? null).toBeNull();
+      expect((await s.life.estimate()).offer_id).toBe(11);
+      expect(s.logs.find((l) => l.includes("boot failed"))).toContain("nothing is avoided");
+    });
   });
 });

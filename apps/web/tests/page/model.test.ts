@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  startFailureText,
   advancedLabel,
   advancedRequest,
   knobsFor,
@@ -201,9 +202,24 @@ describe("form helpers", () => {
     expect(errorText(500, "<html>")).toContain("500");
     expect(errorText(401, null)).toContain("sign in");
   });
+  it("words the slow network failures, naming the measured speed only for slow_download", () => {
+    const slow = "The rented machine's network is too slow";
+    const retry = "It was released; try Start again, a different machine is chosen.";
+    expect(startFailureText({ code: "slow_download", message: "", measured_mb_s: 2.8 })).toBe(
+      `${slow} (about 2.8 MB/s to the model host). ${retry}`,
+    );
+    expect(startFailureText({ code: "slow_download", message: "", measured_mb_s: null })).toBe(`${slow}. ${retry}`);
+    expect(startFailureText({ code: "slow_boot", message: "", measured_mb_s: 2.8 })).toBe(`${slow}. ${retry}`);
+    expect(startFailureText({ code: "boot_failed", message: "" })).toContain("a different machine is chosen");
+    expect(parseState({ ...base, start_failure: { code: "slow_download", message: "m", measured_mb_s: 2.8 } })!.start_failure?.measured_mb_s).toBe(2.8);
+    for (const bad of [-1, "2.8", Number.NaN, 1e9]) {
+      expect(parseState({ ...base, start_failure: { code: "slow_download", message: "m", measured_mb_s: bad } })!.start_failure?.measured_mb_s).toBeNull();
+    }
+  });
+
   it("parses a start failure and drops a broken one", () => {
     expect(parseState({ ...base })!.start_failure).toBeNull();
-    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m", server: null });
+    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m", server: null, measured_mb_s: null });
     expect(parseState({ ...base, start_failure: { code: 5 } })!.start_failure).toBeNull();
     expect(parseState({ ...base, start_failure: "start_stuck" })!.start_failure).toBeNull();
   });

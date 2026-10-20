@@ -432,11 +432,12 @@
               "object",
               "null"
             ],
-            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code, its fixed plain text and where the server was.",
+            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code, its fixed plain text (slow_download names the measured speed, a number only), where the server was and the measured speed.",
             "required": [
               "code",
               "message",
-              "server"
+              "server",
+              "measured_mb_s"
             ],
             "properties": {
               "code": {
@@ -456,6 +457,15 @@
                   }
                 ],
                 "description": "Where the released server was, when known (location, download speed; machine_id for admins)"
+              },
+              "measured_mb_s": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "slow_download: the measured model download speed in MB/s (one decimal), when known; null otherwise"
               }
             }
           },
@@ -1147,6 +1157,8 @@
                   "boot_timeout",
                   "start_stuck",
                   "boot_stopped",
+                  "slow_boot",
+                  "slow_download",
                   "unreachable",
                   "destroy_retry",
                   "destroy_requested",
@@ -1333,9 +1345,12 @@
       "StartFailureCode": {
         "enum": [
           "start_stuck",
-          "boot_stopped"
+          "boot_stopped",
+          "slow_boot",
+          "slow_download",
+          "boot_failed"
         ],
-        "description": "Fixed code of a start that failed after POST /api/start returned. The container of a booting instance did not run on two consecutive reconciles at least a minute apart, once the instance was older than VAST_START_STUCK_MIN (an image still loading, a running container whose agent is not up yet and 'created' with a running intent are never stuck). start_stuck: it never started (last_started null; exited/stopped, created with a stopped intent or state, or a stopped intent without status); the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN. boot_stopped: it had started and then stopped during the boot; the machine is not avoided. Either way the web released it (usage reason boot_failed)."
+        "description": "Fixed code of a start that failed after POST /api/start returned. Every release below needs two consecutive reconciles at least a minute apart (a failed Vast or agent read is no sample) and only ever judges a record that is still booting (never one that reached ready). start_stuck: the container never started (last_started null; exited/stopped, created with a stopped intent or state, or a stopped intent without status) once the instance was older than VAST_START_STUCK_MIN (an image still loading, a running container whose agent is not up yet and 'created' with a running intent are never stuck). boot_stopped: it had started and then stopped during the boot; the machine is not avoided. slow_boot: Vast reports it running but its agent has never answered once the instance is BOOT_AGENT_GRACE_MIN old. slow_download: the model download, at the average speed seen over at least MODEL_ETA_MIN_OBSERVE_S, would still take more than BOOT_MAX_DOWNLOAD_ETA_MIN; also shown when the instance's own early network probe gave up (container log marker '[boot] FAILED: slow_network'). boot_failed: the instance disappeared during its boot without the web asking (it gave up by itself). The web released or noted it (usage reason boot_failed); for every code except boot_stopped the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN when its machine id is known."
       },
       "ServerInfo": {
         "type": "object",

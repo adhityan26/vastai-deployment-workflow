@@ -482,7 +482,7 @@ describe("UsageHistory stuck starts (kept next to the sessions, tolerant loader)
     const again = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
     const list = again.stuckStarts();
     expect(list).toHaveLength(16);
-    expect(list.at(-1)).toEqual(rec({ hostname: "vast-19", at: T0 + 19 }));
+    expect(list.at(-1)).toEqual(rec({ hostname: "vast-19", at: T0 + 19, measured_mb_s: null }));
     expect(list[0]!.hostname).toBe("vast-4");
   });
 
@@ -494,9 +494,15 @@ describe("UsageHistory stuck starts (kept next to the sessions, tolerant loader)
     };
     writeFileSync(path, JSON.stringify({ version: 1, entries: [session], stuck: [
       rec(), rec({ code: "other" }), rec({ machine_id: -1 }), rec({ location: "<b>" }), rec({ hostname: "bad host" }), rec({ extra: 1 }), 5,
+      rec({ code: "slow_download", measured_mb_s: 2.8 }), rec({ code: "slow_download", measured_mb_s: -1 }),
+      rec({ code: "slow_download", measured_mb_s: 2.85 }), rec({ code: "slow_boot", measured_mb_s: null }), rec({ code: "boot_failed" }),
     ] }));
     const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
-    expect(h.stuckStarts()).toEqual([rec()]);
+    // A record written before measured_mb_s existed loads with it null.
+    expect(h.stuckStarts()).toEqual([
+      rec({ measured_mb_s: null }), rec({ code: "slow_download", measured_mb_s: 2.8 }),
+      rec({ code: "slow_boot", measured_mb_s: null }), rec({ code: "boot_failed", measured_mb_s: null }),
+    ]);
     expect(h.list(T0 + 1)).toHaveLength(1);
     writeFileSync(path, JSON.stringify({ version: 1, entries: [session], stuck: "nope" }));
     const g = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));

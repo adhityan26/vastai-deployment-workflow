@@ -36,6 +36,9 @@ const cfg = {
   startHardCapHours: 6,
   bootTimeoutMin: 25,
   vastStartStuckMin: 5,
+  bootAgentGraceMin: 10,
+  modelEtaMinObserveS: 120,
+  bootMaxDownloadEtaMin: 20,
   vastBadMachineTtlMin: 60,
   unreachableDestroyMin: 15,
   reconcileGraceMin: 10,
@@ -164,6 +167,42 @@ describe("Lifecycle.console", () => {
     expect(h.vast.logCalls).toEqual([{ id: ID, tail: 300 }]);
     // after: only newer lines.
     expect(texts(await h.lc.console(5))).toEqual(["host [host] joined"]);
+  });
+
+  it("a boot that gave up with the probe's slow_network marker shows slow_download with the probe's speed", async () => {
+    const h = await harness();
+    Object.assign(h.vast.instances[0]!, { machine_id: 555 });
+    h.vast.logText = [
+      "[boot] step 1/9: net_probe",
+      "[boot] net_probe: measured 3.1 MB/s (minimum 20 MB/s)",
+      "[boot] net_probe: measured 2.8 MB/s (minimum 20 MB/s)",
+      "[boot] FAILED: slow_network",
+      "",
+    ].join("\n");
+    await h.lc.console(0);
+    h.clock.t = T0 + 9 * 60;
+    await h.lc.reconcile(); // the last row seen names the machine
+    h.vast.instances = [];
+    h.clock.t = T0 + 10 * 60;
+    expect((await h.lc.reconcile()).gone).toEqual([]);
+    h.clock.t = T0 + 11 * 60;
+    expect((await h.lc.reconcile()).gone).toEqual([{ tailnet_hostname: HOST, reason: "vanished" }]);
+    const failure = (await h.lc.view()).start_failure;
+    expect(failure).toMatchObject({ code: "slow_download", measured_mb_s: 2.8 });
+    expect(failure?.server?.machine_id).toBe(555);
+    expect((await h.lc.console(0)).instance).toMatchObject({ ended: true, ended_reason: "vanished" });
+  });
+
+  it("another FAILED code after the probe is a plain boot_failed", async () => {
+    const h = await harness();
+    h.vast.logText = "[boot] net_probe: measured 2.8 MB/s (minimum 20 MB/s)\n[boot] step 4/9: tailscale\n[boot] FAILED: tailscale_failed\n";
+    await h.lc.console(0);
+    h.vast.instances = [];
+    h.clock.t = T0 + 10 * 60;
+    await h.lc.reconcile();
+    h.clock.t = T0 + 11 * 60;
+    await h.lc.reconcile();
+    expect((await h.lc.view()).start_failure).toMatchObject({ code: "boot_failed", measured_mb_s: null });
   });
 
   it("reads Vast at most once per BOOT_LOG_POLL_MIN_S", async () => {

@@ -120,7 +120,7 @@ export interface ApiState {
   failed: { reason: string | null } | null;
   destroy_failed: { error: string } | null;
   /** The newest start failed after Start returned (fixed code plus the server's plain text). */
-  start_failure: { code: string; message: string; server: ServerView | null } | null;
+  start_failure: { code: string; message: string; server: ServerView | null; measured_mb_s: number | null } | null;
   /** Where the active instance's server is. */
   server: ServerView | null;
   dph: number | null;
@@ -353,7 +353,12 @@ export function parseState(json: unknown): ApiState | null {
     destroy_failed: df ? { error: typeof df["error"] === "string" ? df["error"] : "" } : null,
     start_failure:
       sf && typeof sf["code"] === "string"
-        ? { code: sf["code"], message: typeof sf["message"] === "string" ? sf["message"] : "", server: parseServer(sf["server"]) }
+        ? {
+            code: sf["code"],
+            message: typeof sf["message"] === "string" ? sf["message"] : "",
+            server: parseServer(sf["server"]),
+            measured_mb_s: measuredMbS(sf["measured_mb_s"]),
+          }
         : null,
     server: parseServer(json["server"]),
     dph: num(json["dph"]),
@@ -1206,6 +1211,8 @@ const END_REASON_TEXT: Record<string, string> = {
   boot_timeout: "the boot took too long",
   start_stuck: "the rented machine did not start",
   boot_stopped: "the container stopped during the boot",
+  slow_boot: "the rented machine's network was too slow (the agent never answered)",
+  slow_download: "the rented machine's model download was too slow",
   unreachable: "the agent stayed unreachable",
   destroy_retry: "destroyed after a retry",
   destroy_requested: "destroy requested",
@@ -1215,12 +1222,26 @@ const END_REASON_TEXT: Record<string, string> = {
 };
 
 // Page text per start failure code; an unknown code shows the server's message.
+const SLOW_NETWORK_TEXT = "The rented machine's network is too slow";
+const RETRY_ELSEWHERE = "It was released; try Start again, a different machine is chosen.";
 const START_FAILURE_TEXT: Record<string, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
+  slow_boot: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  boot_failed: "The rented machine gave up during its boot and was removed; try Start again, a different machine is chosen.",
 };
 
-export function startFailureText(f: { code: string; message: string }): string {
+/** A measured speed in MB/s from the server: a finite number 0..100000, else null. */
+function measuredMbS(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100_000 ? Math.round(v * 10) / 10 : null;
+}
+
+export function startFailureText(f: { code: string; message: string; measured_mb_s?: number | null }): string {
+  const mbS = f.measured_mb_s ?? null;
+  if (f.code === "slow_download" && mbS !== null) {
+    return `${SLOW_NETWORK_TEXT} (about ${mbS} MB/s to the model host). ${RETRY_ELSEWHERE}`;
+  }
   return START_FAILURE_TEXT[f.code] ?? (f.message !== "" ? f.message : "The start failed; try Start again.");
 }
 

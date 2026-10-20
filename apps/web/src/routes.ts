@@ -84,10 +84,23 @@ const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
 };
 
 // Plain text per fixed code of a start that failed after Start returned (GET /api/state start_failure).
+const SLOW_NETWORK_TEXT = "The rented machine's network is too slow";
+const RETRY_ELSEWHERE = "It was released; try Start again, a different machine is chosen.";
 const START_FAILURE_MESSAGES: Record<StartFailureCode, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
+  slow_boot: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  boot_failed: "The rented machine gave up during its boot and was removed; try Start again, a different machine is chosen.",
 };
+
+/** The fixed text of a start failure; slow_download names the measured speed (a number only) when known. */
+export function startFailureMessage(code: StartFailureCode, measuredMbS: number | null): string {
+  if (code === "slow_download" && measuredMbS !== null && Number.isFinite(measuredMbS)) {
+    return `${SLOW_NETWORK_TEXT} (about ${measuredMbS} MB/s to the model host). ${RETRY_ELSEWHERE}`;
+  }
+  return START_FAILURE_MESSAGES[code];
+}
 
 /** An error's class name for a log line, or a fixed word when it is not a plain identifier. */
 function errorName(err: unknown): string {
@@ -211,8 +224,9 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
     start_failure: view.start_failure
       ? {
           code: view.start_failure.code,
-          message: START_FAILURE_MESSAGES[view.start_failure.code],
+          message: startFailureMessage(view.start_failure.code, view.start_failure.measured_mb_s),
           server: publicServer(view.start_failure.server, isAdmin, scrub),
+          measured_mb_s: view.start_failure.measured_mb_s,
         }
       : null,
     server: publicServer(view.server, isAdmin, scrub),

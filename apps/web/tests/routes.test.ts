@@ -297,6 +297,9 @@ async function harness(
     startHardCapHours: 6,
     bootTimeoutMin: 25,
     vastStartStuckMin: 5,
+    bootAgentGraceMin: 10,
+    modelEtaMinObserveS: 120,
+    bootMaxDownloadEtaMin: 20,
     vastBadMachineTtlMin: 60,
     unreachableDestroyMin: 15,
     reconcileGraceMin: 10,
@@ -628,12 +631,28 @@ describe("GET /api/state", () => {
         code: "start_stuck",
         message: "The rented machine did not start. It was released; try Start again.",
         server: expected,
+        measured_mb_s: null,
       });
     }
     expect((await call("GET", "/api/state", await member())).body).not.toContain("45608");
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     expect(doc.components.schemas.State.required).toContain("start_failure");
-    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck", "boot_stopped"]);
+    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_failed"]);
+  });
+
+  it("words slow_download with the measured speed (a number only)", async () => {
+    const { startFailureMessage } = await import("../src/routes.js");
+    expect(startFailureMessage("slow_download", 2.8)).toBe(
+      "The rented machine's network is too slow (about 2.8 MB/s to the model host). It was released; try Start again, a different machine is chosen.",
+    );
+    expect(startFailureMessage("slow_download", null)).toBe(
+      "The rented machine's network is too slow. It was released; try Start again, a different machine is chosen.",
+    );
+    expect(startFailureMessage("slow_boot", 2.8)).toBe(startFailureMessage("slow_download", null));
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const sf = doc.components.schemas.State.properties.start_failure;
+    expect(sf.required).toEqual(["code", "message", "server", "measured_mb_s"]);
+    expect(sf.properties.measured_mb_s.type).toEqual(["number", "null"]);
   });
 
   it("shows where the server is: location and speeds for everyone, the machine id for admins only", async () => {

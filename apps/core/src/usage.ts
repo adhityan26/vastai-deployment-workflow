@@ -94,9 +94,23 @@ export interface UsageEntry {
   last_agent: AgentObservation | null;
 }
 
-/** Why a start was released after Start returned: never started, or stopped during the boot. */
-export const STUCK_CODES = ["start_stuck", "boot_stopped"] as const;
+/**
+ * Why a start was released (or ended) after Start returned: never started, stopped during the boot,
+ * the agent never answered (slow_boot), the model download was too slow (slow_download), or the
+ * instance disappeared during its boot without the web asking (boot_failed).
+ */
+export const STUCK_CODES = ["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_failed"] as const;
 export type StuckCode = (typeof STUCK_CODES)[number];
+/** Codes whose machine is avoided for VAST_BAD_MACHINE_TTL_MIN (boot_stopped does not blame the machine). */
+export const BAD_MACHINE_CODES: ReadonlySet<StuckCode> = new Set(["start_stuck", "slow_boot", "slow_download", "boot_failed"]);
+/** Largest download speed (MB/s) a stuck record keeps; anything above is not a measurement. */
+export const MAX_MEASURED_MB_S = 100_000;
+
+/** A measured speed in MB/s fit to keep and show: finite, 0..MAX_MEASURED_MB_S, one decimal; else null. */
+export function measuredMbS(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > MAX_MEASURED_MB_S) return null;
+  return Math.round(raw * 10) / 10;
+}
 
 /**
  * One start the web released because its container did not run. Kept in the usage file under
@@ -111,16 +125,22 @@ export interface StuckStart {
   machine_id: number | null;
   location: string | null;
   down_mbps: number | null;
+  /** slow_download: the model download speed the web measured (MB/s, one decimal); else null. */
+  measured_mb_s: number | null;
 }
 
-const STUCK_KEYS = ["hostname", "code", "at", "machine_id", "location", "down_mbps"].sort().join(",");
+const STUCK_BASE_KEYS = ["hostname", "code", "at", "machine_id", "location", "down_mbps"];
+// Records written before measured_mb_s existed have only the base keys; both shapes load.
+const STUCK_KEYS = [STUCK_BASE_KEYS.sort().join(","), [...STUCK_BASE_KEYS, "measured_mb_s"].sort().join(",")];
 
 function validStuck(v: unknown): v is StuckStart {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;
-  if (Object.keys(r).sort().join(",") !== STUCK_KEYS) return false;
+  if (!STUCK_KEYS.includes(Object.keys(r).sort().join(","))) return false;
   const machine = r["machine_id"];
+  const measured = r["measured_mb_s"] ?? null;
   return (
+    (measured === null || measuredMbS(measured) === measured) &&
     typeof r["hostname"] === "string" && HOSTNAME.test(r["hostname"]) &&
     (STUCK_CODES as readonly unknown[]).includes(r["code"]) &&
     typeof r["at"] === "number" && Number.isSafeInteger(r["at"]) &&
@@ -367,7 +387,7 @@ export class UsageHistory {
     const list: unknown[] = file !== null && Array.isArray(file["entries"]) ? file["entries"] : [];
     // Tolerant: a bad stuck record is dropped on its own; the sessions never depend on them.
     const stuck: unknown[] = file !== null && Array.isArray(file["stuck"]) ? file["stuck"] : [];
-    this.stuck = stuck.filter(validStuck).map((r) => ({ ...r })).slice(-STUCK_MAX);
+    this.stuck = stuck.filter(validStuck).map((r) => ({ ...r, measured_mb_s: r.measured_mb_s ?? null })).slice(-STUCK_MAX);
     const servers = file !== null && isObject(file["servers"]) ? file["servers"] : {};
     const valid = list.filter(validEntry).map((e) => cleanNames(structuredClone(e)));
     // At most one open entry survives (the newest); a duplicate hostname keeps its first entry.
@@ -554,6 +574,7 @@ export class UsageHistory {
       at: Math.floor(record.at),
       location: serverLocation(record.location),
       down_mbps: mbps(record.down_mbps),
+      measured_mb_s: measuredMbS(record.measured_mb_s),
     };
     if (!validStuck(clean)) return;
     this.stuck.push(clean);
@@ -565,6 +586,17 @@ export class UsageHistory {
   stuckStarts(): readonly StuckStart[] {
     this.all();
     return this.stuck;
+  }
+
+  /** An agent status was seen for this open session (in this process or in the saved file). */
+  agentSeen(hostname: string): boolean {
+    const e = this.open(hostname);
+    return e !== undefined && (this.fresh.has(hostname) || e.last_agent !== null);
+  }
+
+  /** The web asked to stop this open session (any reason); the first request is kept. */
+  stopRequested(hostname: string): boolean {
+    return this.open(hostname)?.pending_stop != null;
   }
 
   /** The web service is about to stop the instance for `reason`; the first request wins. */

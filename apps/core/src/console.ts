@@ -26,7 +26,8 @@ export interface ConsoleLine {
  * Why the console's instance ended, as a fixed identifier: destroyed (Destroy button),
  * start_failed (the Start that created the console failed), the reconcile reasons hard_cap,
  * boot_timeout, start_stuck (the container never started), boot_stopped (it stopped during the
- * boot), unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
+ * boot), slow_boot (it ran but its agent never answered), slow_download (the model download was
+ * too slow), unreachable, destroy_retry, destroy_requested, vanished, never_created, and gone
  * (the record disappeared some other way). A restored state with any other value is refused.
  */
 export const CONSOLE_END_REASONS = [
@@ -36,6 +37,8 @@ export const CONSOLE_END_REASONS = [
   "boot_timeout",
   "start_stuck",
   "boot_stopped",
+  "slow_boot",
+  "slow_download",
   "unreachable",
   "destroy_retry",
   "destroy_requested",
@@ -81,6 +84,12 @@ export const BOOT_PHASES: readonly { id: string; name: string }[] = [
 export const GAP_MARKER = "--- gap ---";
 const STEP_MARKER = /^\[boot\] step ([1-9][0-9]{0,2})\/([1-9][0-9]{0,2}): ([a-z_]{1,32})$/;
 const FAILED_MARKER = /^\[boot\] FAILED: ([a-z0-9_]{1,64})$/;
+/**
+ * What the instance's early network probe prints after each measurement (instance/bootstrap.sh):
+ *   [boot] net_probe: measured <N> MB/s (minimum <M> MB/s)
+ * N has at most one decimal. Display only, like the markers.
+ */
+const NET_PROBE_LINE = /^\[boot\] net_probe: measured ([0-9]{1,6}(?:\.[0-9])?) MB\/s\b/;
 const VAST_LOADING = "loading";
 const VAST_RUNNING = "running";
 
@@ -510,6 +519,21 @@ export class ConsoleBuffer {
   }
   get vastStatus(): string | null {
     return this.state.vast_status;
+  }
+  /** The code of the latest `[boot] FAILED:` marker after the latest step marker, or null. */
+  get failedCode(): string | null {
+    return this.state.failed;
+  }
+
+  /** The speed (MB/s) of the newest network probe line from the container log, or null. */
+  netProbeMbS(): number | null {
+    for (let i = this.state.lines.length - 1; i >= 0; i--) {
+      const line = this.state.lines[i]!;
+      if (line.source !== "vast_logs") continue;
+      const m = NET_PROBE_LINE.exec(line.text);
+      if (m) return Number(m[1]);
+    }
+    return null;
   }
 
   /** Vast's actual_status of the owner instance (drives the image_pull phase). */

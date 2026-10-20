@@ -151,6 +151,11 @@ export function loadConfig(env: Record<string, string | undefined>, schemaPath: 
   if (typeof stuck === "number" && typeof bootTimeout === "number" && stuck >= bootTimeout) {
     problems.push("VAST_START_STUCK_MIN: must be less than BOOT_TIMEOUT_MIN");
   }
+  // A silent agent must be noticed before the boot timeout would release the instance anyway.
+  const agentGrace = values[camelCase("BOOT_AGENT_GRACE_MIN")];
+  if (typeof agentGrace === "number" && typeof bootTimeout === "number" && agentGrace >= bootTimeout) {
+    problems.push("BOOT_AGENT_GRACE_MIN: must be less than BOOT_TIMEOUT_MIN");
+  }
   if (problems.length > 0) throw new ConfigError(problems);
   const secretNames = specs.filter((s) => s.secret).map((s) => s.name);
   return Object.freeze({ ...values, secretNames }) as AppsConfig;

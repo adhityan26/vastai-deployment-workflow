@@ -3,7 +3,7 @@ import type { AgentStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
-import type { StopReason, StuckCode, StuckStart, UsageHistory, UsageItem } from "./usage.js";
+import { BAD_MACHINE_CODES, measuredMbS, type StopReason, type StuckCode, type StuckStart, type UsageHistory, type UsageItem } from "./usage.js";
 import {
   ConsoleBuffer,
   logLines,
@@ -65,6 +65,12 @@ const STATUS_WORD = /^[a-z_]{1,32}$/; // a Vast status fit for a log line
 const STUCK_CONFIRMATIONS = 2;
 const STUCK_DWELL_S = 60;
 const STUCK_MEMORY_MAX = 16; // stuck starts kept in memory (the usage file keeps as many)
+// A slow boot (agent silent, download too slow) is released under the same discipline as a stuck
+// start: STUCK_CONFIRMATIONS consecutive samples, the first and the last STUCK_DWELL_S apart.
+const BYTES_PER_MB = 1_000_000; // MB/s as people (and curl, and the page) count it
+// What the instance's early network probe (instance/bootstrap.sh) prints into the container log
+// when it gives up: the web shows it as slow_download (display only; never a release decision).
+const INSTANCE_SLOW_NETWORK = "slow_network";
 const PERCENT = 100;
 const PERCENT_STEP = 10; // agent progress lines change in steps of 10 %, not on every poll
 const HOST_PLACEHOLDER = "[host]";
@@ -75,6 +81,8 @@ const WATCHDOG_STOPS: Readonly<Record<string, { reason: StopReason }>> = {
   boot_timeout: { reason: "boot_failed" },
   start_stuck: { reason: "boot_failed" },
   boot_stopped: { reason: "boot_failed" },
+  slow_boot: { reason: "boot_failed" },
+  slow_download: { reason: "boot_failed" },
   unreachable: { reason: "agent_unreachable" },
 };
 
@@ -275,7 +283,7 @@ export interface StatusView {
   /** GPU model of the active instance: Vast's row, else the offer chosen at start. */
   gpu_name: string | null;
   /** The newest start failed after Start returned (e.g. it was released as stuck); cleared by the next Start. */
-  start_failure: { code: StartFailureCode; server: ServerInfo | null } | null;
+  start_failure: { code: StartFailureCode; server: ServerInfo | null; measured_mb_s: number | null } | null;
   /** Where the active instance's server is: Vast's row, else the offer chosen at start (per field). */
   server: ServerInfo | null;
   download: DownloadView | null;
@@ -454,6 +462,23 @@ export class Lifecycle {
   // The current stuck sighting: which instance, since when, how many consecutive reconciles.
   // In memory only: after a restart it starts over, which only delays a release (the safe side).
   private stuckSeen: { hostname: string; id: number; since: number; count: number } | null = null;
+  // Slow boot sightings, in memory only like stuckSeen (a restart starts them over: it only delays).
+  // silentSeen: Vast says running and the agent never answered. downloadSeen: the window the
+  // download speed is measured over (first sample) and the run of consecutive too-slow samples.
+  private silentSeen: { hostname: string; id: number; since: number; count: number } | null = null;
+  private downloadSeen: {
+    hostname: string;
+    id: number;
+    firstAt: number;
+    firstBytes: number;
+    slowSince: number | null;
+    count: number;
+  } | null = null;
+  // The last hostname whose agent answered (one instance is active at a time).
+  private agentAnsweredHost: string | null = null;
+  // Where the active record's server is, from the last Vast row seen: an instance that vanished is no
+  // longer listed, so its machine must be known from before.
+  private lastServer: { hostname: string; server: ServerInfo } | null = null;
   // Boot console: the buffer (created on first use), when an admin last called console(), when
   // Vast was last read for it, the outcome of that read and the read in flight (single-flight).
   private consoleBuf: ConsoleBuffer | null = null;
@@ -945,6 +970,7 @@ export class Lifecycle {
               { ...NO_SERVER, location: stuck.location, down_mbps: stuck.down_mbps, machine_id: stuck.machine_id },
               NO_SERVER,
             ),
+            measured_mb_s: stuck.measured_mb_s ?? null,
           };
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
@@ -1452,6 +1478,7 @@ export class Lifecycle {
         const misses = (this.vanishMisses.get(hostname) ?? 0) + 1;
         if (misses >= VANISH_CONFIRMATIONS) {
           this.vanishMisses.delete(hostname);
+          this.noteVanishedBoot(record, now);
           await registry.markGone(hostname);
           this.endUsage(hostname); // inferred from the last agent status seen
           this.endConsole(hostname, "vanished");
@@ -1463,6 +1490,9 @@ export class Lifecycle {
       return report;
     }
     this.vanishMisses.delete(hostname);
+    const rowServer = serverInfo(inst);
+    const knownServer = this.lastServer?.hostname === hostname ? this.lastServer.server : NO_SERVER;
+    this.lastServer = { hostname, server: mergeServer(rowServer, knownServer) ?? NO_SERVER };
 
     // 4. Read the agent; track readiness and the unreachable timer.
     let agent: AgentStatus | null = null;
@@ -1511,11 +1541,18 @@ export class Lifecycle {
       }
     }
 
+    // Slow boots: only a record still booting (never one that reached ready) is judged.
+    if (agent !== null) this.agentAnsweredHost = hostname;
+    const silentHeld = this.sampleSilent(record, inst, agent, now);
+    const slowDownload = this.sampleDownload(record, agent, now);
+
     // 5. Enforcement.
     let reason: string | null = null;
     if (record.status === "stopping") reason = "destroy_retry";
     else if (now - startedAt >= hardCap) reason = "hard_cap";
     else if (stuckHeld !== null) reason = stuckHeld;
+    else if (silentHeld) reason = "slow_boot";
+    else if (slowDownload !== null) reason = "slow_download";
     else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
     else if (
       agent === null &&
@@ -1527,6 +1564,8 @@ export class Lifecycle {
     }
     if (reason === null) return report;
     if (reason === "start_stuck" || reason === "boot_stopped") this.noteStuck(record, inst, now, reason);
+    else if (reason === "slow_boot") this.noteStuck(record, inst, now, "slow_boot");
+    else if (reason === "slow_download") this.noteStuck(record, inst, now, "slow_download", slowDownload);
     try {
       const result = await this.destroyRecord(record, id, "watchdog", WATCHDOG_STOPS[reason] ?? null);
       this.endConsole(hostname, reason as ConsoleEndReason);
@@ -1543,35 +1582,178 @@ export class Lifecycle {
   }
 
   /**
-   * Remember a released start before its instance is destroyed: the page learns why and, when the
-   * container never started (start_stuck), the machine is avoided for VAST_BAD_MACHINE_TTL_MIN. A
-   * container that started and then stopped (boot_stopped) does not blame the machine. Called
-   * inside reconcile (exclusive): the record is the active one, never a newer Start's.
+   * One reconcile sample of "Vast says running, the agent has never answered" for a booting record.
+   * Held (slow_boot) after STUCK_CONFIRMATIONS consecutive samples whose first and last lie at least
+   * BOOT_AGENT_GRACE_MIN (and STUCK_DWELL_S) apart. The silence is counted from the first reconcile
+   * that saw the container running, not from the creation: an image pull (Vast `loading`, not billed)
+   * can take minutes, and the agent only starts after it. An agent that answered once (in this
+   * process or, after a restart, in the usage file) is never silent here: the unreachable rule covers it.
    */
-  private noteStuck(record: InstanceRecord, inst: VastInstance, now: number, code: StuckCode): void {
+  private sampleSilent(record: InstanceRecord, inst: VastInstance, agent: AgentStatus | null, now: number): boolean {
+    const hostname = record.tailnet_hostname;
+    const id = record.vast_instance_id;
+    const graceS = intCfg(this.cfg, "bootAgentGraceMin", "BOOT_AGENT_GRACE_MIN", 2) * SECONDS_PER_MINUTE;
+    let answered = this.agentAnsweredHost === hostname;
+    if (!answered) {
+      try {
+        answered = this.deps.usage?.agentSeen(hostname) ?? false;
+      } catch {
+        answered = false;
+      }
+    }
+    const silent = record.status === "booting" && agent === null && inst.actual_status === VAST_RUNNING && !answered;
+    if (!silent || id === null) {
+      if (this.silentSeen?.hostname === hostname) this.silentSeen = null;
+      return false;
+    }
+    const seen = this.silentSeen;
+    const next =
+      seen !== null && seen.hostname === hostname && seen.id === id
+        ? { ...seen, count: seen.count + 1 }
+        : { hostname, id, since: now, count: 1 };
+    this.silentSeen = next;
+    return next.count >= STUCK_CONFIRMATIONS && now - next.since >= Math.max(STUCK_DWELL_S, graceS);
+  }
+
+  /**
+   * One reconcile sample of the model download of a booting record. The speed is the average since
+   * the first sample of the window (overall bytes across the profile's files, from the agent's
+   * /status), judged once the window is MODEL_ETA_MIN_OBSERVE_S long. Too slow means the bytes left
+   * would take more than BOOT_MAX_DOWNLOAD_ETA_MIN at that speed. Returns the speed in MB/s when the
+   * slow download held (STUCK_CONFIRMATIONS consecutive slow samples, STUCK_DWELL_S apart), else null.
+   * A failed agent read is not a sample; a good sample resets the slow run; fewer bytes than at the
+   * start of the window (a file restarted) starts a new window.
+   */
+  private sampleDownload(record: InstanceRecord, agent: AgentStatus | null, now: number): number | null {
+    const hostname = record.tailnet_hostname;
+    const id = record.vast_instance_id;
+    if (agent === null) return null;
+    const reset = (): null => {
+      if (this.downloadSeen?.hostname === hostname) this.downloadSeen = null;
+      return null;
+    };
+    if (record.status !== "booting" || id === null) return reset();
+    const dl = overallDownload(agent.state ?? "", agent.progress, this.deps.profileModels ?? []);
+    if (dl === null) return reset();
+    const observeS = intCfg(this.cfg, "modelEtaMinObserveS", "MODEL_ETA_MIN_OBSERVE_S", 1);
+    const maxEtaS = intCfg(this.cfg, "bootMaxDownloadEtaMin", "BOOT_MAX_DOWNLOAD_ETA_MIN", 1) * SECONDS_PER_MINUTE;
+    const seen = this.downloadSeen;
+    if (seen === null || seen.hostname !== hostname || seen.id !== id || dl.bytes_done < seen.firstBytes) {
+      this.downloadSeen = { hostname, id, firstAt: now, firstBytes: dl.bytes_done, slowSince: null, count: 0 };
+      return null;
+    }
+    const observed = now - seen.firstAt;
+    if (observed < observeS) return null;
+    const rate = (dl.bytes_done - seen.firstBytes) / observed; // bytes per second
+    const left = Math.max(0, dl.bytes_total - dl.bytes_done);
+    const eta = left === 0 ? 0 : rate > 0 ? left / rate : Number.POSITIVE_INFINITY;
+    if (eta <= maxEtaS) {
+      this.downloadSeen = { ...seen, slowSince: null, count: 0 };
+      return null;
+    }
+    const next = { ...seen, slowSince: seen.slowSince ?? now, count: seen.count + 1 };
+    this.downloadSeen = next;
+    if (next.count < STUCK_CONFIRMATIONS || now - next.slowSince < STUCK_DWELL_S) return null;
+    return measuredMbS(rate / BYTES_PER_MB) ?? 0;
+  }
+
+  /**
+   * Generic rule: the record's instance disappeared while it was still booting (it never reached
+   * ready) and the web did not ask for that (no Destroy button, no web release: either sets the
+   * record to stopping or records a stop first). The instance gave up by itself (for example its own
+   * boot failure or the early network probe), so its machine is avoided for VAST_BAD_MACHINE_TTL_MIN
+   * when the machine is known (the last Vast row or the chosen offer, in this process only; after a
+   * restart it may be unknown and then nothing is avoided). When the boot console saw the probe's
+   * `[boot] FAILED: slow_network`, the page says slow_download with the speed the probe printed.
+   */
+  private noteVanishedBoot(record: InstanceRecord, now: number): void {
+    const hostname = record.tailnet_hostname;
+    if (record.status !== "booting" || this.destroyRequested.has(hostname)) return;
+    try {
+      if (this.deps.usage?.stopRequested(hostname)) return;
+    } catch {
+      // the usage file is best effort; the registry status above already says the web did not stop it
+    }
+    let code: StuckCode = "boot_failed";
+    let measured: number | null = null;
+    try {
+      const buf = this.consoleBuffer();
+      if (buf.owner === hostname && buf.failedCode === INSTANCE_SLOW_NETWORK) {
+        code = "slow_download";
+        measured = buf.netProbeMbS();
+      }
+    } catch {
+      // the console is optional
+    }
+    const known = this.lastServer?.hostname === hostname ? this.lastServer.server : NO_SERVER;
+    const offer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
+    this.recordStuck(record, record.vast_instance_id, null, mergeServer(known, offer) ?? NO_SERVER, now, code, measured);
+  }
+
+  /**
+   * Remember a released start before its instance is destroyed: the page learns why and, for the
+   * codes in BAD_MACHINE_CODES (never started, slow boot, slow download), the machine is avoided for
+   * VAST_BAD_MACHINE_TTL_MIN. A container that started and then stopped (boot_stopped) does not blame
+   * the machine. Called inside reconcile (exclusive): the record is the active one, never a newer Start's.
+   */
+  private noteStuck(record: InstanceRecord, inst: VastInstance, now: number, code: StuckCode, measured: number | null = null): void {
     const hostname = record.tailnet_hostname;
     const offerServer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
     const server = mergeServer(serverInfo(inst), offerServer) ?? NO_SERVER;
-    const avoid = code === "start_stuck" ? server.machine_id : null;
+    const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
+    this.recordStuck(record, inst.id, status, server, now, code, measured);
+  }
+
+  private recordStuck(
+    record: InstanceRecord,
+    instanceId: number | null,
+    status: string | null,
+    server: ServerInfo,
+    now: number,
+    code: StuckCode,
+    measured: number | null,
+  ): void {
+    const avoid = BAD_MACHINE_CODES.has(code) ? server.machine_id : null;
     const entry: StuckStart = {
-      hostname,
+      hostname: record.tailnet_hostname,
       code,
       at: now,
       machine_id: avoid,
       location: server.location,
       down_mbps: server.down_mbps,
+      measured_mb_s: code === "slow_download" ? measured : null,
     };
     this.memoryStuck.push(entry);
     this.memoryStuck.splice(0, Math.max(0, this.memoryStuck.length - STUCK_MEMORY_MAX));
     this.withUsage((u) => u.noteStuck(entry));
-    const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
+    const inst = instanceId ?? "unknown";
     const machine = server.machine_id ?? "unknown";
-    const text =
-      code === "start_stuck"
-        ? `lifecycle: start stuck: instance ${inst.id} on machine ${machine} did not start (actual_status=${status}); ` +
-          `releasing it and avoiding the machine for ${Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE)} min`
-        : `lifecycle: boot stopped: instance ${inst.id} on machine ${machine} stopped during the boot ` +
-          `(actual_status=${status}); releasing it`;
+    const ttl = Math.round(this.badMachineTtl() / SECONDS_PER_MINUTE);
+    const avoiding = avoid !== null ? `avoiding the machine for ${ttl} min` : "the machine is not known, nothing is avoided";
+    const speed = entry.measured_mb_s !== null ? `about ${entry.measured_mb_s} MB/s` : "speed unknown";
+    let text: string;
+    switch (code) {
+      case "start_stuck":
+        text = `lifecycle: start stuck: instance ${inst} on machine ${machine} did not start (actual_status=${status ?? "unknown"}); ` +
+          `releasing it and ${avoiding}`;
+        break;
+      case "boot_stopped":
+        text = `lifecycle: boot stopped: instance ${inst} on machine ${machine} stopped during the boot ` +
+          `(actual_status=${status ?? "unknown"}); releasing it`;
+        break;
+      case "slow_boot":
+        text = `lifecycle: slow boot: instance ${inst} on machine ${machine} runs but its agent never answered; ` +
+          `releasing it and ${avoiding}`;
+        break;
+      case "slow_download":
+        text = status === null
+          ? `lifecycle: slow network: instance ${inst} on machine ${machine} gave up during its boot (${speed}); ${avoiding}`
+          : `lifecycle: slow download: instance ${inst} on machine ${machine} downloads the models at ${speed}; ` +
+            `releasing it and ${avoiding}`;
+        break;
+      default:
+        text = `lifecycle: boot failed: instance ${inst} on machine ${machine} disappeared during its boot; ${avoiding}`;
+    }
     try {
       this.deps.log?.("warn", text);
     } catch {
