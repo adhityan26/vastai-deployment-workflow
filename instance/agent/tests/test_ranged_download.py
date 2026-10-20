@@ -29,6 +29,8 @@ class FakeHub:
         self.fail_once = set()  # range starts answered with a 500 the first time
         self.short_once = set()  # range starts that stop halfway (connection closed) the first time
         self.overlong = False
+        self.overlong_once = set()  # range starts answered once with 5 bytes more than asked
+        self.truncate_end = {}  # range end -> how many more answers for it stop halfway
         self.wrong_content_range = False
         self.requests = []  # (method, path, range, authorization, accept-encoding)
         self.lock = threading.Lock()
@@ -95,19 +97,24 @@ class FakeHub:
                     hub.fail_once.discard(start)
                     short = start in hub.short_once
                     hub.short_once.discard(start)
+                    if hub.truncate_end.get(end, 0) > 0:
+                        hub.truncate_end[end] -= 1
+                        short = True
+                    extra = hub.overlong or start in hub.overlong_once
+                    hub.overlong_once.discard(start)
                 if fail:
                     self.send_response(500)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                body = DATA[start:end + 1] + (b"extra" if hub.overlong else b"")
+                body = DATA[start:end + 1] + (b"extra" if extra else b"")
                 self.send_response(206)
                 first = start + 1 if hub.wrong_content_range else start
                 self.send_header("Content-Range", f"bytes {first}-{end}/{SIZE}")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if short:
-                    self.wfile.write(body[: len(body) // 2])
+                    self.wfile.write(body[: min(len(body) // 2, 4096)])
                     self.wfile.flush()
                     self.close_connection = True
                     return
@@ -296,13 +303,42 @@ def test_the_token_is_never_part_of_an_error(tmp_path, hub):
     assert TOKEN not in str(info.value)
 
 
-def test_boot_passes_download_connections_from_the_config():
-    from vastcomfy_agent.config import load_schema
+def test_an_overlong_answer_is_refused_and_retried_so_no_byte_of_the_next_segment_is_overwritten(tmp_path, hub):
+    hub.overlong_once = {0}
+    sleeps = []
+    path = downloader(hub, sleeps=sleeps).fetch(model(), tmp_path)
+    assert path.read_bytes() == DATA and sleeps == [1]
+    # The chunks before the excess were kept; the segment resumed after them.
+    assert [r[2] for r in ranged_gets(hub) if r[2].endswith("-249999")][1:] == ["bytes=249856-249999"]
 
-    spec = next(s for s in load_schema() if s.name == "DOWNLOAD_CONNECTIONS")
-    assert spec.default == 4 and spec.min == 1 and spec.max == 16 and "instance" in spec.components
-    import inspect
 
-    from vastcomfy_agent import boot
+def test_a_segment_that_makes_progress_on_every_try_is_not_failed_by_the_retry_count(tmp_path, hub):
+    hub.truncate_end = {249999: 3}  # three short reads in a row, each with data; retries is 3
+    sleeps = []
+    path = downloader(hub, retries=3, sleeps=sleeps).fetch(model(), tmp_path)
+    assert path.read_bytes() == DATA and len(sleeps) == 3
+    ends = [r[2].split("-")[1] for r in ranged_gets(hub)]
+    # The segment resumed four times; nothing was started over (no whole-file retry).
+    assert ends.count("249999") == 4 and all(ends.count(e) == 1 for e in ("499999", "749999", "1000002"))
 
-    assert "connections=b.cfg.download_connections" in inspect.getsource(boot.cmd_install_models)
+
+def test_a_server_that_always_truncates_ends_in_a_bounded_failure_with_backoff(tmp_path, hub):
+    hub.truncate_end = {249999: 10**9}
+    sleeps, outcome = [], {}
+
+    def run():
+        try:
+            downloader(hub, retries=2, sleeps=sleeps).fetch(model(), tmp_path)
+            outcome["result"] = "ok"
+        except DownloadError as exc:
+            outcome["result"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(60)
+    assert not worker.is_alive(), "the download never gave up"
+    assert isinstance(outcome["result"], DownloadError)
+    tries = [r for r in ranged_gets(hub) if r[2].endswith("-249999")]
+    assert 2 < len(tries) <= 2 * 2 * 8  # outer retries x the per-segment attempt cap
+    assert sleeps and set(sleeps) == {1}
+    assert list((tmp_path / "models/x").iterdir()) == []

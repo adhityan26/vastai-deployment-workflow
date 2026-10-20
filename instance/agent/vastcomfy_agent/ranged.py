@@ -33,6 +33,10 @@ CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 IDENTITY = {"Accept-Encoding": "identity"}
 
 
+# All tries of one segment are capped at DOWNLOAD_RETRIES times this (tries that made progress included).
+MAX_ATTEMPTS_PER_RETRY = 8
+
+
 class RangeUnsupported(Exception):
     """The server does not serve byte ranges of this file (the caller downloads it in one stream)."""
 
@@ -129,8 +133,14 @@ class RangedDownload:
             os.close(fd)
 
     def _fetch(self, fd: int, seg: Segment) -> None:
+        # `failures` counts tries in a row without progress (a try that brought bytes starts it over);
+        # `attempts` caps all tries of the segment, so a server that always sends a little and then
+        # drops the connection still ends in a bounded failure.
         failures = 0
+        attempts = 0
         while not self._abort.is_set() and seg.done < seg.length:
+            before = seg.done
+            attempts += 1
             try:
                 self._fetch_once(fd, seg)
                 if seg.done < seg.length and not self._abort.is_set():
@@ -138,8 +148,8 @@ class RangedDownload:
             except RangeUnsupported:
                 raise
             except (httpx.HTTPError, SegmentError, OSError) as exc:
-                failures += 1
-                if failures >= self._retries:
+                failures = 1 if seg.done > before else failures + 1
+                if failures >= self._retries or attempts >= self._retries * MAX_ATTEMPTS_PER_RETRY:
                     raise SegmentError(f"segment {seg.start}-{seg.end}: {exc}") from exc
                 self._sleep(self._backoff)
 

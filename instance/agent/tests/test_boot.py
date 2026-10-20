@@ -631,3 +631,44 @@ def test_node_import_failed_is_a_known_reason():
     from vastcomfy_agent.state import REASONS
 
     assert "node_import_failed" in REASONS
+
+
+BIG = 16 * 1024 * 1024 + 7
+
+
+def big_profile(tmp_path):
+    with_profile(tmp_path)
+    text = PROFILE.replace("size_bytes: 10", f"size_bytes: {BIG}")
+    (tmp_path / "repo" / "instance" / "profiles" / "image.yaml").write_text(text)
+
+
+def ranged_client(seen):
+    body = bytes(range(256)) * (BIG // 256 + 1)
+    body = body[:BIG]
+
+    def handler(request):
+        seen.append((request.method, request.headers.get("range")))
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"Accept-Ranges": "bytes", "Content-Length": str(BIG)})
+        rng = request.headers.get("range")
+        if rng is None:
+            return httpx.Response(200, content=body)
+        a, b = (int(x) for x in rng.split("=")[1].split("-"))
+        return httpx.Response(206, content=body[a:b + 1], headers={"Content-Range": f"bytes {a}-{b}/{BIG}"})
+
+    return httpx.Client(transport=httpx.MockTransport(handler)), body
+
+
+@pytest.mark.parametrize("connections,ranged", [("2", 2), ("1", 0)])
+def test_install_models_downloads_over_download_connections_ranges(tmp_path, connections, ranged):
+    environ = prepared(tmp_path, DOWNLOAD_CONNECTIONS=connections)
+    big_profile(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    seen = []
+    client, body = ranged_client(seen)
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=client,
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 0
+    assert (tmp_path / "comfy" / "models" / "x" / "m.bin").read_bytes() == body
+    assert len([s for s in seen if s[0] == "GET" and s[1] is not None]) == ranged
