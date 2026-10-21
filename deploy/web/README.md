@@ -461,8 +461,9 @@ image slots and hint, notes or prompt, quality/size/resolution, Advanced, the ac
 and Gallery cards follow it (the usage history is a dialog opened from the server panel, see "Usage history"). The server status lives in a server panel on the right (below). Arrow keys, Home and End move through the entries; the chosen
 entry is marked (`aria-current`) and remembered in this browser (`localStorage` key `vast-comfy.tool`, an entry id
 only; an id the current menu does not have falls back to the first entry). "Use as reference" and "Upscale" on a
-result or a saved image select the matching entry. Requests are the same as before the menu: an entry only picks
-the mode and the style (`/api/generate`, `/api/edit` or `/api/upscale`, with `style: {id, params}` for a style entry).
+result or a saved image select the matching entry ("Make a video" selects Video, see "Video"). Requests are the same
+as before the menu: an entry only picks the mode and the style (`/api/generate`, `/api/edit`, `/api/upscale` or
+`/api/video`, with `style: {id, params}` for a style entry; video and upscale take no style).
 
 The menu comes from the profile (`instance/profiles/image.yaml`) and is listed in `GET /api/state` under `menu`
 (categories and entries in display order: id, title, description, icon, category, tool, style, available; never
@@ -517,7 +518,8 @@ To add a tool: add a style under `styles:` (see the next section) with `enabled:
 `menu.categories` item.
 
 Icons are a closed set drawn by the page itself (inline SVG built in `apps/web/public/icons.ts`, nothing loaded from
-outside): `image`, `wand`, `user`, `users`, `swap`, `shirt`, `restore`, `sparkles`, `expand`, `camera`, `brush`. The
+outside): `image`, `wand`, `user`, `users`, `swap`, `shirt`, `restore`, `sparkles`, `expand`, `camera`, `brush`,
+`film`. The
 profile loader refuses any other name (the icon list in `apps/core/src/menu.ts`); the page draws an unknown name as
 `sparkles`. A new icon needs both lists changed (a test checks that they match).
 
@@ -591,6 +593,65 @@ squared must be at most `UPSCALE_MAX_INTERMEDIATE_PIXELS`, and input x factor sq
 about 2 MP (1448x1448) at any scale. Each scale's `factor` must equal model_factor x value, or the profile is refused. The image is validated like an edit reference (magic bytes, size,
 pixels). Every result also gets an "Upscale" button next to "Use as reference". UNVERIFIED on a real instance: the
 workflow `instance/workflows/image-upscale.json` has never run, and VRAM use of a large upscale is unknown.
+
+## Video
+
+A fourth mode, "Video" (menu category Create): a short clip from a prompt (text to video), or from a prompt plus
+exactly one start image (image to video: attach it with the picker, paste it, or press "Make a video" on a result or
+a saved image). One model does both, through native ComfyUI nodes only (no custom node): the workflow is
+`instance/workflows/video-ti2v.json`, the profile's `video:` section maps its inputs. The page offers the sizes and
+lengths of the profile (`video.sizes`, multiples of 32; `video.durations`, frames 4n+1 at `video.fps`) and an
+optional seed; there is no quality preset, negative prompt or guidance (the workflow keeps its own). The job runs
+like any other (same rate limit, same step counter over the websocket, previews if ComfyUI sends any) and the result
+is shown in `<video controls playsinline>` with a Download link.
+
+**It ships OFF.** Its three model files (about 18 GB) are not pinned yet: a cloud session cannot reach Hugging Face,
+and a `models:` line is never written from memory. To switch it on (laptop):
+
+1. Check the licence on the model card of each repo named in the comment under `models:` in
+   `instance/profiles/image.yaml`.
+2. Run the three `python3 scripts/pin_model.py ...` commands written in that comment and paste the printed lines
+   into `models:` (if a file is not in the named repo the script says so; it is then in the other repackaged repo).
+3. Set `video.enabled: true`. Both loaders now refuse the profile while a listed video file is missing from
+   `models:` or has another dest ("video model ... is not listed in models"), so a forgotten pin stops the web app
+   at startup and the instance at boot, never a job.
+4. Set `VAST_DISK_GB` in `.env` to at least `requires.disk_gb` (80): about 33 GB of models plus the image. The
+   instance's own disk check refuses a disk that is too small at boot.
+5. Optional: `VIDEO_TIMEOUT_S` (default 2400, must stay below `WEB_JOB_TTL_S`, 3600, or the web app refuses to
+   start), `VIDEO_MAX_BYTES` (largest result read from the instance, default 100 MiB) and `VIDEO_VIEW_TIMEOUT_S`
+   (one result download, default 300 s). Images keep `GENERATE_TIMEOUT_S`, `WEB_IMAGE_MAX_BYTES` and
+   `WEB_IMAGE_TIMEOUT_S`. These keys are read only while video is on.
+6. Push, bump `REPO_COMMIT`, deploy, Start. The boot downloads the extra files (minutes more on a fast host, far
+   longer on a slow one: the slow-download guard may release such a machine) and, with video on, also requires the
+   section's `node_classes` from ComfyUI's `/object_info` before it reports ready: an image whose ComfyUI is too old
+   for these native nodes fails the boot loudly with the missing class names (then a newer `VAST_IMAGE` is needed).
+
+What the web app enforces: the body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start
+image is checked like an edit reference (magic bytes, size, pixels, side, one frame) and uploaded under a name the
+server chooses; the workflow is checked against the section at startup (every mapped input exists, the output node
+is `SaveVideo`, the start image input is free, the graph loads every listed model file). The result is read from
+`GET /api/video/{id}/{index}` (owner or admin, the instance that made it only), at most `VIDEO_MAX_BYTES`, and served
+only when its first bytes are an mp4 (`ftyp` box of a video brand) or WebM (EBML DocType `webm`): the type comes from
+those bytes, never from ComfyUI, with `nosniff`, `no-store` and a fixed file name. The page fetches it once and plays
+it from a `blob:` URL (the CSP allows `media-src 'self' blob:`), so phones need no range requests. A video job is
+never served by `/api/image`.
+
+Not in phase 1, on purpose: **saving a video to the gallery.** The gallery's types, size limit and quotas are image
+ones (`POST /api/gallery` answers `video_not_saveable` for a video job, the page shows no Save button and auto-save
+skips videos); use Download. Also left out: a negative prompt or guidance for video, more than one start image, an
+end frame, sound.
+
+Waiting: ComfyUI runs one job at a time. While a clip renders (many minutes), image jobs of other people wait in
+ComfyUI's queue, and their own `GENERATE_TIMEOUT_S` clock (600 s) runs from their submit: a long video can make a
+queued image job time out on the page although ComfyUI still runs it later. The page warns that a video takes
+several minutes and keeps the form busy until it is done (like every job). Idle shutdown does not hit a running
+video (a busy queue resets the idle timer); the failsafe and the hard cap still do.
+
+UNVERIFIED (nothing here has run against ComfyUI): the workflow graph and its node and input names (written from
+the native nodes as documented, not exported from a running ComfyUI), whether `SaveVideo` with format mp4 / codec
+h264 writes a browser-playable file and lists it under `images` in its history output, VRAM at 1280x704 x 121
+frames on a 24 GB card, how long a clip takes on an A5000/3090/4090, the quality of the smaller sizes and of the
+shipped negative prompt, playback on iPhone and Android, the real file sizes, and the longer boot.
 
 ## Live progress and preview
 
@@ -854,6 +915,9 @@ wrote it had no Docker daemon or registry access). Also unverified:
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- Video ("Video"): off and unpinned; never run. The workflow, the node classes, the mp4 output, VRAM, time per clip,
+  phone playback, file sizes, disk and boot time are all unchecked.
 
 - The custom instance image ("Custom instance image"): never built, pushed, pulled by Vast or booted.
 

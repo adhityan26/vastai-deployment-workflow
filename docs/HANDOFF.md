@@ -79,6 +79,31 @@ while open, again when the state turns none or ready; never while closed. `#usag
 "Usage history" and "Menu". Checked in jsdom and in headless Chromium at 1280 and 375 px against a fake state; never on
 a real phone, with a screen reader, or against a real instance.
 
+## Video (2026-10-21, branch `feat/video`, pushed, NOT merged or deployed)
+
+Text to video and image to video (exactly one optional start image) with one model through native ComfyUI nodes,
+on the same instance and profile as images. Runbook: `deploy/web/README.md` "Video". Built: the profile's `video:`
+section and `instance/workflows/video-ti2v.json`; both profile loaders validate the section (also while it is off);
+`POST /api/video`, `GET /api/video/{id}/{index}` (mp4/WebM by magic bytes, `VIDEO_MAX_BYTES`), `video` in
+`/api/state`, the `video` menu mode and `film` icon; the page's Video entry (prompt, start image by picker, paste or
+"Make a video", size, length, seed; `<video controls playsinline>` from a blob URL, Download, a long-wait note);
+config keys `VIDEO_TIMEOUT_S`, `VIDEO_MAX_BYTES`, `VIDEO_VIEW_TIMEOUT_S`. Saving videos to the gallery is out of
+scope for phase 1 (`video_not_saveable`); the image gallery is unchanged.
+
+**It ships OFF (`video.enabled: false`) because the three model files are not pinned:** the cloud session could not
+reach Hugging Face, so no revision, size or sha256 was written. The owner runs the three `scripts/pin_model.py`
+commands from the comment under `models:` in `instance/profiles/image.yaml` (licence check first), pastes the lines,
+sets `enabled: true` and `VAST_DISK_GB` >= 80. A missing pin then stops the web app and the boot with a clear error.
+
+UNVERIFIED, nothing ran against ComfyUI: the workflow graph and node/input names (the video latent node, `CreateVideo`,
+`SaveVideo` and their inputs were written from memory of the native nodes, not exported from a running ComfyUI); whether the instance image's ComfyUI is new enough to have these nodes (boot checks them via
+`/object_info` once video is on and fails loudly if not); that `SaveVideo` (mp4, h264) lists its file under `images`
+in the history and the file plays in browsers; whether the repo paths in the pin commands are right; model sizes
+(about 18 GB assumed), VRAM at 1280x704 x 121 frames on 24 GB, time per clip (assumed 5-20 min), phone playback
+(iOS/Android), result file sizes, disk use on the instance and the longer boot (more download, slow-download guard).
+Known limit: image jobs queued behind a running video keep their own 600 s timeout and may fail on the page while
+ComfyUI still runs them later.
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)
@@ -122,7 +147,7 @@ Do this AFTER Task A (both touch `apps/web/public/ui.ts`).
 - Deferred minors listed in the review notes of the plans under `docs/superpowers/plans/`.
 
 ### Later
-Discord bot (reuse the gallery `save` idea), video/3D, `docs/superpowers/plans/2026-10-17-web-interface-followups.md`,
+Discord bot (reuse the gallery `save` idea), 3D, video phase 2 (gallery save, after the live test of "Video"), `docs/superpowers/plans/2026-10-17-web-interface-followups.md`,
 Camera angle (AnyAngle LoRA + extra 3D models; licences unchecked, see the styles design doc).
 
 ## What a cloud session can and cannot do

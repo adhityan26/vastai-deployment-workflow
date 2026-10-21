@@ -95,12 +95,12 @@ edit:
 guidance: {min: 1.0, max: 6.0, step: 0.5, default: 1.0}
 
 # The tool menu of the page (deploy/web/README.md "Menu"): ordered categories, and the built-in tools (plain
-# generate, plain edit, upscale), at most one per mode. Every enabled style below is its own entry too; a style may
+# generate, plain edit, upscale, video), at most one per mode. Every enabled style below is its own entry too; a style may
 # set `category` (one of these ids), `description` (one line, at most 120 characters), `icon` (one of the page's
-# built-in icons: image, wand, user, users, swap, shirt, restore, sparkles, expand, camera, brush) and `order`
+# built-in icons: image, wand, user, users, swap, shirt, restore, sparkles, expand, camera, brush, film) and `order`
 # (lower first inside its category; entries without one come last, in profile order). A style without a category
-# or icon takes those of its mode's tool. An edit or upscale entry shows only while that mode is on (the API marks
-# it unavailable otherwise).
+# or icon takes those of its mode's tool. An edit, upscale or video entry shows only while that mode is on (the API
+# marks it unavailable otherwise).
 menu:
   categories:
     - {id: create, title: Create}
