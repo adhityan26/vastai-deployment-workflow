@@ -430,6 +430,11 @@ Limits to keep in mind:
 - Reference images stay in ComfyUI's `input/` directory on the instance until the instance is
   destroyed; the web service does not delete them after the job.
 
+**Paste an image.** In any tool that shows the image picker (Edit, the presets with reference slots, Upscale) Ctrl/Cmd+V attaches an image from
+the clipboard, for example a screenshot, under the same limits as the file picker (count, type, size; the server checks again). Only a clipboard that
+really holds an image is taken over: a text paste, a paste in a tool without images, or a paste while a dialog or drawer is open is left alone. Pasted
+images are named `pasted-1.png`, `pasted-2.png`... NOT verified in real browsers (only jsdom): some browsers expose a copied file or image differently.
+
 ## Menu
 
 The page lists every tool in a menu: a fixed sidebar of about 250 px from 900 px wide, below that an off-canvas

@@ -1961,3 +1961,119 @@ describe("start dialog: advanced server choice", () => {
     expect(startPosts()).toEqual([{ confirm: true, gpu: "RTX A5000", region: "europe" }]);
   });
 });
+
+describe("paste images from the clipboard", () => {
+  const editInfo = { max_references: 2, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }] };
+  const up = { scales: ["2x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png"] };
+  const img = (content = "PNGDATA", type = "image/png") => new File([content], "image.png", { type });
+  const tagsNow = () => [...document.querySelectorAll("#ref-list .ref-tag")].map((n) => n.textContent);
+  const namesNow = () => [...document.querySelectorAll("#ref-list .ref-name")].map((n) => n.textContent);
+
+  /** Fire a paste at `target` carrying `files`; returns the event so a test can read defaultPrevented. */
+  function paste(files: File[], target: EventTarget = document.body): Event {
+    const e = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(e, "clipboardData", { value: { files }, configurable: true });
+    target.dispatchEvent(e);
+    return e;
+  }
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("attaches a pasted image as the next reference in Edit, with its own name, and takes over the paste", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    const e = paste([img()]);
+    expect(e.defaultPrevented).toBe(true);
+    expect(tagsNow()).toEqual(["<image1>"]);
+    expect(namesNow()).toEqual(["pasted-1.png"]);
+    paste([img("SECOND")]);
+    expect(namesNow()).toEqual(["pasted-1.png", "pasted-2.png"]);
+  });
+
+  it("works while the focus is in the prompt box when the clipboard holds an image", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    const e = paste([img()], q<HTMLTextAreaElement>("#prompt")!);
+    expect(e.defaultPrevented).toBe(true);
+    expect(tagsNow()).toEqual(["<image1>"]);
+  });
+
+  it("leaves a text-only paste alone, also in Edit", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    const e = paste([]);
+    expect(e.defaultPrevented).toBe(false);
+    expect(tagsNow()).toEqual([]);
+  });
+
+  it("ignores files that are not images, and takes only the images of a mixed paste", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    const none = paste([new File(["x"], "notes.txt", { type: "text/plain" })]);
+    expect(none.defaultPrevented).toBe(false);
+    expect(tagsNow()).toEqual([]);
+    paste([new File(["x"], "notes.txt", { type: "text/plain" }), img()]);
+    expect(tagsNow()).toEqual(["<image1>"]);
+  });
+
+  it("does nothing in a tool that takes no images", async () => {
+    await mount({ edit: editInfo });
+    const e = paste([img()]); // Generate
+    expect(e.defaultPrevented).toBe(false);
+    expect(tagsNow()).toEqual([]);
+    chooseTool("edit");
+    expect(tagsNow()).toEqual([]); // nothing was kept for later either
+  });
+
+  it("applies the same limits as the file picker: count, type and size, with the reason shown", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    paste([img()]);
+    paste([img()]);
+    paste([img()]);
+    expect(tagsNow()).toHaveLength(2);
+    expect(q("#ref-error")!.textContent).toBe("At most 2 images can be attached.");
+    removeFirstRef();
+    paste([img("x", "image/gif")]);
+    expect(q("#ref-error")!.textContent).toContain("only PNG, JPEG");
+    paste([img("x".repeat(1001))]);
+    expect(q("#ref-error")!.textContent).toContain("larger than");
+  });
+
+  it("in Upscale a second paste is refused because the tool takes one image", async () => {
+    await mount({ upscale: up });
+    chooseTool("upscale");
+    paste([img()]);
+    expect(tagsNow()).toEqual(["<image1>"]);
+    paste([img("two")]);
+    expect(tagsNow()).toEqual(["<image1>"]);
+    expect(q("#ref-error")!.textContent).toBe("At most 1 images can be attached.");
+  });
+
+  it("is ignored while a dialog or drawer is open", async () => {
+    await mount({ edit: editInfo, role: "admin" });
+    chooseTool("edit");
+    q<HTMLButtonElement>("#status-pill")?.click();
+    const e = paste([img()]);
+    expect(e.defaultPrevented).toBe(false);
+    expect(tagsNow()).toEqual([]);
+  });
+
+  it("is ignored while a confirmation dialog is open", async () => {
+    await mount({ edit: editInfo, role: "admin", state: "ready" });
+    chooseTool("edit");
+    q<HTMLButtonElement>("#btn-destroy")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    const e = paste([img()]);
+    expect(e.defaultPrevented).toBe(false);
+    expect(tagsNow()).toEqual([]);
+  });
+
+  function removeFirstRef(): void {
+    q<HTMLButtonElement>("#ref-list li button")!.click();
+  }
+});

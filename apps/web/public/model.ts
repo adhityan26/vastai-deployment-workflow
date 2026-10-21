@@ -882,7 +882,7 @@ export function formatMegabytes(bytes: number): string {
 const typeNames = (edit: EditInfo): string => edit.types.map((t) => t.toUpperCase()).join(", ");
 
 export function referenceHint(edit: EditInfo): string {
-  return `Up to ${edit.max_references} images (${typeNames(edit)}), ${formatMegabytes(edit.max_bytes)} each. Refer to them as <image1>, <image2> in the prompt.`;
+  return `Up to ${edit.max_references} images (${typeNames(edit)}), ${formatMegabytes(edit.max_bytes)} each. Refer to them as <image1>, <image2> in the prompt. You can also paste an image (Ctrl/Cmd+V).`;
 }
 
 export interface PickedFile { name: string; type: string; size: number }
@@ -1185,7 +1185,7 @@ export function upscaleAsEdit(u: UpscaleInfo): EditInfo {
 }
 
 export function upscaleHint(u: UpscaleInfo): string {
-  return `One image (${u.types.map((t) => t.toUpperCase()).join(", ")}), ${formatMegabytes(u.max_bytes)} at most. The result size is limited by the server.`;
+  return `One image (${u.types.map((t) => t.toUpperCase()).join(", ")}), ${formatMegabytes(u.max_bytes)} at most. The result size is limited by the server. You can also paste an image (Ctrl/Cmd+V).`;
 }
 
 export function upscaleLabel(scale: string): string {
