@@ -137,6 +137,8 @@ import {
   stateInfo,
   panelActions,
   layoutMode,
+  PANEL_STORAGE_KEY,
+  parsePanelPref,
   widgetVisible,
   type LayoutMode,
   countdown,
@@ -1586,7 +1588,25 @@ export function mountApp(doc: Document, env: Env): App {
     return layoutMode(doc.defaultView?.innerWidth ?? 0);
   }
 
-  /** True while the panel is on screen as a column (wide layout, not collapsed). */
+  // Whether the column is hidden (from 1280 px only; a drawer always starts closed). The stored word is only
+  // compared with "collapsed"; storage can be missing or throw.
+  let collapsed = false;
+  try {
+    collapsed = parsePanelPref(doc.defaultView?.localStorage.getItem(PANEL_STORAGE_KEY) ?? null) === "collapsed";
+  } catch {
+    collapsed = false;
+  }
+  function setCollapsed(next: boolean): void {
+    collapsed = next;
+    try {
+      doc.defaultView?.localStorage.setItem(PANEL_STORAGE_KEY, next ? "collapsed" : "open");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+    renderPanelState();
+  }
+
+  /** True at the wide layout: the panel is a column there (shown unless collapsed), never a drawer. */
   function panelIsColumn(): boolean {
     return currentMode() === "wide";
   }
@@ -1620,8 +1640,8 @@ export function mountApp(doc: Document, env: Env): App {
   /** The pill (and the widget): at the wide layout bring the panel's heading into focus, else open the drawer. */
   function openPanelFrom(opener: HTMLElement): void {
     if (panelIsColumn()) {
+      if (collapsed) setCollapsed(false);
       statusTitle.focus();
-      renderPanelState();
       return;
     }
     panelOpener = opener;
@@ -1629,6 +1649,10 @@ export function mountApp(doc: Document, env: Env): App {
   }
   statusPill.addEventListener("click", () => openPanelFrom(statusPill));
   panelClose.addEventListener("click", () => setOverlay(null, true));
+  panelHide.addEventListener("click", () => {
+    setCollapsed(true);
+    (floatBtn.hidden ? statusPill : floatBtn).focus(); // the Hide button is gone with the column
+  });
   panelBackdrop.addEventListener("click", () => setOverlay(null, true));
   statusPanel.addEventListener("keydown", (e) => {
     if (overlay === "panel") trapTab(statusPanel, e);
@@ -1669,14 +1693,15 @@ export function mountApp(doc: Document, env: Env): App {
     const column = panelIsColumn();
     panelHide.hidden = !column;
     panelClose.hidden = column;
-    statusPill.setAttribute("aria-expanded", String(column || overlay === "panel"));
+    screens.app.classList.toggle("panel-collapsed", column && collapsed);
+    statusPill.setAttribute("aria-expanded", String((column && !collapsed) || overlay === "panel"));
     renderWidget();
   }
 
   /** The floating widget: shown while the panel is off screen, an instance has an uptime and nothing covers the page. */
   const floatBtn = $<HTMLButtonElement>("float-status");
   function renderWidget(): void {
-    const show = widgetVisible({ mode: currentMode(), collapsed: false, overlayOpen: overlay !== null || !modal.hidden, uptime: state?.uptime_s ?? null });
+    const show = widgetVisible({ mode: currentMode(), collapsed, overlayOpen: overlay !== null || !modal.hidden, uptime: state?.uptime_s ?? null });
     floatBtn.hidden = !show;
     floatBtn.toggleAttribute("inert", overlay !== null);
     screens.app.classList.toggle("widget-on", show);

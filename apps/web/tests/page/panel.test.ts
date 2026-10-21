@@ -585,3 +585,61 @@ describe("the floating status widget", () => {
     expect(widget().hidden).toBe(false);
   });
 });
+
+describe("hiding the panel column (from 1280 px), remembered", () => {
+  const widget = () => q<HTMLButtonElement>("#float-status");
+  const collapsed = () => q("#app").classList.contains("panel-collapsed");
+
+  it("Hide collapses it, shows the widget and remembers; the pill or the widget bring it back", async () => {
+    setWidth(1280);
+    await mount();
+    expect(collapsed()).toBe(false);
+    expect(widget().hidden).toBe(true);
+    q("#panel-hide").click();
+    expect(collapsed()).toBe(true);
+    expect(window.localStorage.getItem("vast-comfy.panel")).toBe("collapsed");
+    expect(q("#status-pill").getAttribute("aria-expanded")).toBe("false");
+    expect(widget().hidden).toBe(false);
+    expect(document.activeElement).toBe(widget());
+    q("#status-pill").click();
+    expect(collapsed()).toBe(false);
+    expect(window.localStorage.getItem("vast-comfy.panel")).toBe("open");
+    expect(document.activeElement).toBe(q("#status-title"));
+    expect(q("#page").hasAttribute("inert")).toBe(false);
+    q("#panel-hide").click();
+    widget().click();
+    expect(collapsed()).toBe(false);
+    expect(panel().classList.contains("open")).toBe(false); // no drawer at this width
+    expect(document.activeElement).toBe(q("#status-title"));
+  });
+
+  it("starts collapsed when it was left collapsed, but only at the wide layout; drawers always start closed", async () => {
+    window.localStorage.setItem("vast-comfy.panel", "collapsed");
+    setWidth(1000);
+    await mount();
+    expect(collapsed()).toBe(false);
+    expect(panel().classList.contains("open")).toBe(false);
+    resize(1280);
+    expect(collapsed()).toBe(true);
+    expect(widget().hidden).toBe(false);
+    resize(1279);
+    expect(collapsed()).toBe(false);
+  });
+
+  it("any other stored value means open", async () => {
+    window.localStorage.setItem("vast-comfy.panel", "<b>collapsed</b>");
+    setWidth(1440);
+    await mount();
+    expect(collapsed()).toBe(false);
+  });
+
+  it("works without storage (reads and writes throw)", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    setWidth(1280);
+    await mount();
+    expect(collapsed()).toBe(false);
+    q("#panel-hide").click();
+    expect(collapsed()).toBe(true);
+  });
+});
