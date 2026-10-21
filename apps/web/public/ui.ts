@@ -1819,15 +1819,34 @@ export function mountApp(doc: Document, env: Env): App {
     renderReferences();
   }
 
-  refInput.addEventListener("change", () => {
-    const files = Array.from(refInput.files ?? []);
-    refInput.value = ""; // so the same file can be picked again after removing it
+  /** Attach picked or pasted files under the same rules (count, type, size); the server checks everything again. */
+  function attachFiles(files: File[]): void {
     const edit = refLimits(state);
     if (edit === null || files.length === 0) return;
     const result = pickReferences(references.length, files.map((f) => ({ name: f.name, type: f.type, size: f.size })), edit);
     for (const i of result.accepted) references.push({ id: ++refSeq, file: files[i]!, url: previewUrl(files[i]!) });
     showRefErrors(result.errors);
     renderReferences();
+  }
+
+  refInput.addEventListener("change", () => {
+    const files = Array.from(refInput.files ?? []);
+    refInput.value = ""; // so the same file can be picked again after removing it
+    attachFiles(files);
+  });
+
+  // Paste (Ctrl/Cmd+V) an image from the clipboard, for example a screenshot. Only when the clipboard really holds an
+  // image, the tool shows the image picker and nothing is open on top of the page; a text paste is never touched.
+  let pasteSeq = 0;
+  doc.addEventListener("paste", (e) => {
+    if (stopped || !active || !editBox.isConnected || overlay !== null || !modal.hidden || editBox.hidden) return;
+    const images = Array.from((e as ClipboardEvent).clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    const FileCtor = doc.defaultView?.File;
+    if (FileCtor === undefined) return;
+    e.preventDefault();
+    // A pasted screenshot is always called "image.png": give each its own name so the list stays readable.
+    attachFiles(images.map((f) => new FileCtor([f], `pasted-${++pasteSeq}.${(/^image\/([a-z0-9]+)/.exec(f.type)?.[1] ?? "png").replace("jpeg", "jpg")}`, { type: f.type })));
   });
 
   /** The base64 text of a file (FileReader data URL without its prefix). */

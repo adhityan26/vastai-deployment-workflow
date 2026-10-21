@@ -471,7 +471,7 @@ describe("reference helpers", () => {
 
   it("builds the accept list and the hint from the limits", () => {
     expect(acceptTypes(info)).toBe("image/png,image/jpeg");
-    expect(referenceHint(info)).toBe("Up to 3 images (PNG, JPEG), 2.0 MB each. Refer to them as <image1>, <image2> in the prompt.");
+    expect(referenceHint(info)).toBe("Up to 3 images (PNG, JPEG), 2.0 MB each. Refer to them as <image1>, <image2> in the prompt. You can also paste an image (Ctrl/Cmd+V).");
     expect(formatMegabytes(8_388_608)).toBe("8.0 MB");
     expect(formatMegabytes(1_572_864)).toBe("1.5 MB");
   });
@@ -796,7 +796,7 @@ describe("upscale info from the state", () => {
 
   it("takes one image under the server limits", () => {
     expect(upscaleAsEdit(up)).toMatchObject({ max_references: 1, max_bytes: 8_388_608, types: ["png", "jpeg"] });
-    expect(upscaleHint(up)).toBe("One image (PNG, JPEG), 8.0 MB at most. The result size is limited by the server.");
+    expect(upscaleHint(up)).toBe("One image (PNG, JPEG), 8.0 MB at most. The result size is limited by the server. You can also paste an image (Ctrl/Cmd+V).");
     expect(upscaleLabel("2x")).toBe("Upscale: 2x");
   });
 });
