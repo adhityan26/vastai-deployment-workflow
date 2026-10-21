@@ -69,7 +69,7 @@ export interface Progress { phase: string; file: string; bytes_done: number; byt
 export interface Download { files_total: number; files_done: number; bytes_done: number; bytes_total: number; current_file: string }
 export interface Resolution { name: string; value: number }
 /** What the server offers for edit with reference images (null in the state when edit is off). */
-export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[] }
+export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[]; /** Output sizes an edit may ask for; empty when none (then the result follows the first image). */ sizes: Size[] }
 export type Mode = "generate" | "edit";
 /** The page's modes: the two that take styles, and upscale (one image in, a bigger one out). */
 export type PageMode = Mode | "upscale";
@@ -210,7 +210,12 @@ function parseEdit(v: unknown): EditInfo | null {
     if (!isObj(r) || typeof r["name"] !== "string" || r["name"] === "" || !posInt(r["value"])) return null;
     resolutions.push({ name: r["name"], value: r["value"] });
   }
-  return { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels, types: types as string[], resolutions };
+  const sizes: Size[] = Array.isArray(v["sizes"])
+    ? v["sizes"].flatMap((z): Size[] =>
+        isObj(z) && typeof z["name"] === "string" && z["name"] !== "" && posInt(z["width"]) && posInt(z["height"]) ? [{ name: z["name"], width: z["width"], height: z["height"] }] : [],
+      )
+    : [];
+  return { max_references: maxRefs, max_bytes: maxBytes, max_pixels: maxPixels, types: types as string[], resolutions, sizes };
 }
 
 function parseStyleParam(v: unknown): StyleParam | null {
@@ -1181,7 +1186,7 @@ export function switchDefaults(current: FormValues, prefilled: Prefilled, next: 
 
 /** The reference rules for the one image of an upscale, in the shape pickReferences takes. */
 export function upscaleAsEdit(u: UpscaleInfo): EditInfo {
-  return { max_references: 1, max_bytes: u.max_bytes, max_pixels: u.max_pixels, types: u.types, resolutions: [] };
+  return { max_references: 1, max_bytes: u.max_bytes, max_pixels: u.max_pixels, types: u.types, resolutions: [], sizes: [] };
 }
 
 export function upscaleHint(u: UpscaleInfo): string {

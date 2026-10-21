@@ -71,6 +71,10 @@ export interface EditSpec {
   readonly optional: OptionalParams;
   readonly references: ReferenceSpec;
   readonly resolutions: readonly ResolutionSpec[];
+  /** Output sizes an edit may ask for instead of the reference's own; empty when the profile offers none. */
+  readonly sizes: readonly SizeSpec[];
+  /** The sampler input that takes the chosen size's empty latent; null exactly when `sizes` is empty. */
+  readonly sizeLatent: ParamRef | null;
 }
 /** One model file of the profile, in download order (the instance loader owns the other fields). */
 export interface ModelSpec {
@@ -125,6 +129,8 @@ export interface EditInput {
   preset: string;
   /** A resolution name from the edit section. */
   resolution: string;
+  /** A size name from the edit section; absent keeps the reference's own size (the workflow as shipped). */
+  size?: string;
   seed: number;
   /** Names of the already uploaded references, in order: the first one is image_1. */
   imageNames: readonly string[];
@@ -257,19 +263,30 @@ function parseGenerate(raw: unknown): GenerateSpec {
 
   const sizesRaw = gen["sizes"];
   if (!Array.isArray(sizesRaw) || sizesRaw.length === 0) throw new ProfileError("generate sizes must be a non-empty list");
+  const sizes = parseSizeList(sizesRaw);
+  return { workflow, params, optional: parseOptional(paramsRaw, "generate", Object.values(params)), qualityPresets, sizes };
+}
+
+const SIZE_KEYS = new Set(["name", "width", "height"]);
+const SIZE_MULTIPLE = 32;
+
+/** A list of named output sizes (multiples of 32, unique names, no other members). */
+function parseSizeList(list: unknown[]): SizeSpec[] {
   const sizes: SizeSpec[] = [];
-  for (const item of sizesRaw) {
+  for (const item of list) {
     const entry = mapping(item, "size");
+    const unknown = Object.keys(entry).filter((k) => !SIZE_KEYS.has(k));
+    if (unknown.length > 0) throw new ProfileError(`a size has unknown keys: ${unknown.sort().join(", ")}`);
     const name = required(entry["name"], "size name");
     const width = positiveInt(entry["width"], `size ${name} width`);
     const height = positiveInt(entry["height"], `size ${name} height`);
-    if (width % 32 !== 0 || height % 32 !== 0) {
+    if (width % SIZE_MULTIPLE !== 0 || height % SIZE_MULTIPLE !== 0) {
       throw new ProfileError(`size ${name} must be a multiple of 32: ${width}x${height}`);
     }
     if (sizes.some((s) => s.name === name)) throw new ProfileError(`duplicate size name '${name}'`);
     sizes.push({ name, width, height });
   }
-  return { workflow, params, optional: parseOptional(paramsRaw, "generate", Object.values(params)), qualityPresets, sizes };
+  return sizes;
 }
 
 function paramRef(raw: unknown, what: string): ParamRef {
@@ -312,10 +329,31 @@ function parseEdit(raw: unknown): EditSpec {
     if (resolutions.some((r) => r.name === name)) throw new ProfileError(`duplicate resolution name '${name}'`);
     resolutions.push({ name, value });
   }
+  // Optional output sizes: `sizes` and `size_latent` (the sampler input that takes the new empty latent) come together.
+  const sizesRaw = edit["sizes"];
+  const latentRaw = edit["size_latent"];
+  if ((sizesRaw === undefined || sizesRaw === null) !== (latentRaw === undefined || latentRaw === null)) {
+    throw new ProfileError("edit sizes and edit size_latent must be set together");
+  }
+  let sizes: SizeSpec[] = [];
+  let sizeLatent: ParamRef | null = null;
+  if (Array.isArray(sizesRaw)) {
+    if (sizesRaw.length === 0) throw new ProfileError("edit sizes must be a non-empty list when set");
+    sizes = parseSizeList(sizesRaw);
+    sizeLatent = paramRef(latentRaw, "edit size_latent");
+    const taken = new Set(Object.values(params).map((r) => `${r.node}/${r.input}`));
+    if (taken.has(`${sizeLatent.node}/${sizeLatent.input}`)) {
+      throw new ProfileError(`edit size_latent uses node ${sizeLatent.node} input ${sizeLatent.input}, which another param already sets`);
+    }
+  } else if (sizesRaw !== undefined && sizesRaw !== null) {
+    throw new ProfileError("edit sizes must be a list");
+  }
   return {
     workflow,
     params,
     optional: parseOptional(paramsRaw, "edit", Object.values(params)),
+    sizes,
+    sizeLatent,
     references: { nodeClass, imageInput, encoderNode: required(encoder["node"], "edit references encoder node"), inputPrefix },
     resolutions,
   };
@@ -433,6 +471,8 @@ export function buildEditPrompt(profile: Profile, workflowJson: unknown, input: 
   if (!input.imageNames.every((n) => REFERENCE_NAME.test(n))) {
     throw new GenerateInputError("invalid_reference_name", "a reference file name is not a plain file name");
   }
+  const chosenSize = input.size === undefined ? null : edit.sizes.find((z) => z.name === input.size);
+  if (chosenSize === undefined) throw new GenerateInputError("unknown_size", "size is not offered by the profile");
   const copy = structuredClone(workflowJson) as ComfyPrompt;
   const values: Record<EditParamKey, string | number> = {
     prompt: input.prompt,
@@ -458,7 +498,23 @@ export function buildEditPrompt(profile: Profile, workflowJson: unknown, input: 
     copy[id] = { class_type: edit.references.nodeClass, inputs: { [edit.references.imageInput]: name } };
     encoder.inputs[`${edit.references.inputPrefix}${i + 1}`] = [id, 0];
   });
+  if (chosenSize !== null) applyEditSize(copy, edit, chosenSize);
   applyOptional(copy, edit.optional, input);
   if (input.style) applyStyle(copy, input.style);
   return copy;
+}
+
+/** The node id of the empty latent that gives an edit its own size (data-driven, like the style LoRA node). */
+export const EDIT_SIZE_NODE = "edit_size_latent";
+
+/** Feed the sampler an empty latent of the chosen size instead of the encoder's (which follows the reference). */
+function applyEditSize(copy: ComfyPrompt, edit: EditSpec, size: SizeSpec): void {
+  const target = edit.sizeLatent;
+  const node = target === null ? undefined : copy[target.node];
+  if (target === null || !node || typeof node.inputs !== "object" || node.inputs === null || !(target.input in node.inputs)) {
+    throw new GenerateInputError("workflow_mismatch", "workflow lacks the sampler input the edit size feeds");
+  }
+  if (EDIT_SIZE_NODE in copy) throw new GenerateInputError("workflow_mismatch", `workflow already has a node ${EDIT_SIZE_NODE}`);
+  copy[EDIT_SIZE_NODE] = { class_type: "EmptySD3LatentImage", inputs: { width: size.width, height: size.height, batch_size: 1 } };
+  node.inputs[target.input] = [EDIT_SIZE_NODE, 0];
 }

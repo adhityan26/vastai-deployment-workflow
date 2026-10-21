@@ -66,6 +66,15 @@ edit:
     encoder: {node: "6", input_prefix: "images.image_"}
   resolutions:
     - {name: "1024", value: 1024}
+  # Optional output sizes for an edit. Without one the result follows the first reference (the workflow as it ships).
+  # With one the sampler gets an empty latent of that size instead of the encoder's (`size_latent` is the sampler input
+  # that is rewired). UNVERIFIED on this model: compare the same edit with and without a size before relying on it.
+  sizes:
+    - {name: "1:1", width: 1024, height: 1024}
+    - {name: "3:4", width: 896, height: 1152}
+    - {name: "16:9", width: 1344, height: 768}
+    - {name: "9:16", width: 768, height: 1344}
+  size_latent: {node: "7", input: latent_image}
 
 # Guidance (the sampler's cfg) the Advanced section offers for every workflow that maps `cfg`. `default` must equal
 # the cfg the workflows ship with (1.0; the web app refuses to start otherwise): when the user changes nothing the

@@ -756,7 +756,8 @@
               "max_bytes",
               "max_pixels",
               "types",
-              "resolutions"
+              "resolutions",
+              "sizes"
             ],
             "additionalProperties": false,
             "properties": {
@@ -793,6 +794,30 @@
                       "type": "string"
                     },
                     "value": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "sizes": {
+                "type": "array",
+                "description": "Output sizes an edit may ask for (empty when none is offered)",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "width",
+                    "height"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "width": {
+                      "type": "integer"
+                    },
+                    "height": {
                       "type": "integer"
                     }
                   }
@@ -3873,6 +3898,13 @@
                       "null"
                     ],
                     "description": "Optional guidance within guidance.min..max in steps of guidance.step (else invalid_cfg); absent or null keeps the workflow's own cfg. Only for a mode whose advanced.cfg is true (else cfg_unavailable)"
+                  },
+                  "size": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "An output size name from edit.sizes in /api/state. Absent or null: the result follows the first reference image, as before. 400 unknown_size for a name the server does not offer."
                   }
                 }
               }
