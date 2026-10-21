@@ -13,7 +13,8 @@ per offer; overall download progress; Vast credit for admins; Generate, Edit wit
 (Real-ESRGAN x4plus); styles framework with the live presets `faceswap` and `anything2real` ("Anime / cartoon to real", LoRA
 `Qwen2.1_Anything2RealCharacters`, strength 0 = prompt only); Advanced section (negative prompt, guidance) that styles can pre-fill;
 "Use as reference" on results and on saved gallery images; MinIO gallery (Save, auto-save, quotas); usage history with stop reasons;
-live step counter + rough preview over the ComfyUI websocket; "Generated in N s"; boot console (API, stepper, collapsible log);
+live step counter + rough preview over the ComfyUI websocket; "Generated in N s"; boot console (API, stepper, collapsible log;
+on `feat/server-panel` the log is a dialog opened from the server panel);
 stuck-start and slow-boot protection (below); Tailscale OAuth key minting (LIVE and verified: `tailscale auth key minted`).
 
 **Branch `feat/tool-menu` (pushed, NOT merged, NOT deployed): the next task for a cloud session.** See "Task A".
@@ -43,6 +44,17 @@ remembered choice) that replaces the mode tabs and the style sub-menu; below 900
 button. Each entry is its own panel; request bodies are unchanged (golden and page tests). Runbook:
 `deploy/web/README.md` "Menu". Checked in jsdom and in headless Chromium at 1280 and 375 px against a fake state;
 never on a phone or against a real instance. Next: Task B (Start dialog advanced server choice).
+
+## Server panel (2026-10-21, branch `feat/server-panel`, local commits, not pushed or deployed)
+
+The approved design `docs/superpowers/plans/2026-10-21-server-panel-design.md` is implemented: the status and the
+admin controls moved into a right server panel (a 288 px column from 1280 px, a right drawer below), the Vast credit
+and a status pill are in the header, a floating widget shows uptime/cost/idle while the panel is off screen, and the
+boot log is a dialog opened from the panel's boot summary. One overlay at a time (`setOverlay`). Request bodies and
+API contracts are unchanged; every element id stayed (`#console-toggle` and `vast-comfy.console-collapsed` were
+removed by design). Runbook: `deploy/web/README.md` "Menu" (Server panel), "Boot console", "Vast credit". Checked in
+jsdom and in headless Chromium at 1280, 1000 and 375 px (light and dark) against a fake state; never on a real phone,
+with iOS safe areas or the on-screen keyboard, with a screen reader, or against a real instance.
 
 ## Next work, in order
 

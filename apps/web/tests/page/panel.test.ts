@@ -789,3 +789,58 @@ describe("the Start dialog and the credit", () => {
     expect(document.querySelector("#start-credit-warning")).toBeNull();
   });
 });
+
+describe("style.css (what jsdom can check without a layout)", () => {
+  /** The declarations of `selector` inside the block that starts with `at` (or at the top level for ""). */
+  function rule(selector: string, at = ""): string {
+    const css = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+    let scope = css;
+    if (at !== "") {
+      const start = css.indexOf(at);
+      expect(start, at).toBeGreaterThanOrEqual(0);
+      let depth = 0;
+      let i = css.indexOf("{", start);
+      const from = i + 1;
+      for (; i < css.length; i++) {
+        if (css[i] === "{") depth++;
+        else if (css[i] === "}" && --depth === 0) break;
+      }
+      scope = css.slice(from, i);
+    }
+    for (const m of scope.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (m[1]!.split(",").map((x) => x.trim()).includes(selector)) return m[2]!;
+    }
+    throw new Error(`no rule ${selector} in ${at || "top level"}`);
+  }
+
+  it("the drawer is min(22rem, 92vw) wide; the column 288 px from 1280 px, beside a 250 px menu", () => {
+    expect(rule(".status-panel")).toContain("width: min(22rem, 92vw)");
+    expect(rule(".status-panel", "@media (min-width: 1280px)")).toContain("width: 288px");
+    expect(rule(".app", "@media (min-width: 1280px)")).toContain("padding-right: 288px");
+    expect(rule(".app.panel-collapsed .status-panel", "@media (min-width: 1280px)")).toContain("display: none");
+    expect(rule(".top", "@media (min-width: 1280px)")).toContain("left: 250px");
+  });
+
+  it("the widget keeps clear of the screen edges and the home indicator, and is a 44 px target", () => {
+    const w = rule(".float-status");
+    expect(w).toContain("bottom: calc(12px + env(safe-area-inset-bottom))");
+    expect(w).toContain("max-width: calc(100vw - 24px)");
+    expect(w).toContain("min-height: 44px");
+    expect(rule(".float-cells .cell-label", "@media (max-width: 479.98px)")).toContain("display: none");
+  });
+
+  it("small phones: the header drops the name and the credit, Logout is a 44 px icon button", () => {
+    expect(rule(".top .credit", "@media (max-width: 599.98px)")).toContain("display: none");
+    expect(rule(".logout-btn", "@media (max-width: 599.98px)")).toContain("width: 44px");
+    expect(rule(".credit-line", "@media (max-width: 599.98px)")).toContain("display: block");
+    expect(rule(".pill")).toContain("min-height: 44px");
+  });
+
+  it("slides only when motion is welcome; the log dialog fills a phone screen", () => {
+    expect(rule(".status-panel", "@media (prefers-reduced-motion: no-preference) {\n  .status-panel")).toContain("transition");
+    expect(() => rule(".status-panel", "@media (prefers-reduced-motion: reduce)")).toThrow();
+    expect(rule("*", "@media (prefers-reduced-motion: reduce)")).toContain("transition: none !important");
+    expect(rule(".log-dialog")).toContain("height: 100dvh");
+    expect(rule(".log-dialog .console-log")).toContain("flex: 1 1 auto");
+  });
+});

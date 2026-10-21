@@ -364,6 +364,13 @@ values, long hex/base64 strings, URL credentials); the instance hostname shows a
 - The lines survive a restart in `BOOT_LOG_PATH`; compose puts it on the data volume next to
   `REGISTRY_PATH` (`/data/boot-console.json`). A corrupt file is ignored (the console starts empty).
 - After an instance ends its last lines stay visible (with the reason) until the next Start.
+- On the page the console has two parts. The server panel's boot summary (admins only, while an instance exists or
+  the last one ended) shows the step list, a plain sentence for the running step, the ended notice and one
+  "View log" button. That button opens the log itself in a dialog: full screen on phones, a large centred dialog
+  from 900 px, with Pause, Copy, Clear view and Download .txt; Esc, the backdrop and Close close it and the focus
+  returns to "View log" (or to the header's status pill when it was opened from the panel drawer, which it closes).
+  The page keeps polling the console while the dialog is closed, because the summary needs it. The old fold toggle
+  and its storage key `vast-comfy.console-collapsed` are gone.
 - The phases come only from the instance's marker lines `[boot] step <n>/<m>: <id>` and
   `[boot] FAILED: <code>` (the fixed step list is defined once in `apps/core/src/console.ts`;
   the step list in `instance/bootstrap.sh` must equal it, a test checks). The steps, in order:
@@ -429,8 +436,8 @@ The page lists every tool in a menu: a fixed sidebar of about 250 px from 900 px
 drawer opened by the "Menu" button of a sticky top bar (Esc, the backdrop and the close button close it; the focus
 stays inside while it is open and returns to the Menu button). A search box on top filters the entries by title and
 description, ignoring case. Each entry is one tool with its own panel (title, description, the style's labelled
-image slots and hint, notes or prompt, quality/size/resolution, Advanced, the action button); the Status, Results,
-Gallery, History and Boot console cards follow it. Arrow keys, Home and End move through the entries; the chosen
+image slots and hint, notes or prompt, quality/size/resolution, Advanced, the action button); the Results,
+Gallery and History cards follow it. The server status lives in a server panel on the right (below). Arrow keys, Home and End move through the entries; the chosen
 entry is marked (`aria-current`) and remembered in this browser (`localStorage` key `vast-comfy.tool`, an entry id
 only; an id the current menu does not have falls back to the first entry). "Use as reference" and "Upscale" on a
 result or a saved image select the matching entry. Requests are the same as before the menu: an entry only picks
@@ -458,6 +465,30 @@ also for a disabled style), `description` (one line, at most 120 characters), `i
 or icon it takes those of its mode's tool. Inside a category entries sort by `order` (lower first; entries without
 one come last, tools before styles, in profile order). A profile without `menu:` gets one category "Tools" with the
 three plain tools. Edit and upscale entries are left out while that mode is off on the server.
+
+### Server panel, header and status widget
+
+- From 1280 px the page has three columns: the menu (250 px), the tool panel, and the server panel (288 px) with its
+  own scroll; the header runs across the page and the panel. The panel lists, top to bottom: the state line (the
+  only live region), alerts and download progress (a failure reason first), uptime, cost so far and the idle
+  shutdown countdown, the admin's main action (Start without an instance; Extend as a closed section that opens as
+  the first choice when the idle shutdown is near; nothing while stopping), the boot summary (see "Boot console"),
+  and the detail facts. The Danger zone is pinned at the bottom: Destroy (labelled "(retry)" after a failure; its
+  confirmation names the cost so far and Cancel has the focus) and the untracked instances in a closed section.
+  Members see the state, figures and facts only. "Hide" collapses the column; the choice is remembered in this
+  browser (`localStorage` key `vast-comfy.panel`, `open` or `collapsed`, anything else means open) and applies
+  only from 1280 px.
+- Below 1280 px the panel is a right drawer opened from the header's status pill or the floating widget (backdrop,
+  the page inert, Tab kept inside, Esc closes, the focus returns to the opener). It always starts closed. Only one
+  overlay is open at a time: the menu drawer, the panel drawer or the boot log dialog; a confirmation sits above all
+  of them (z-index: header 10, widget 12, backdrop 15, drawers 20, log 25, confirmation 30).
+- The header: title, the status pill ("Ready", "Booting 42%", "Idle 3m", "Stopped", "Failed"; a button, never
+  announced on every tick), the admin's Vast credit (see "Vast credit"), the name and Logout. Below 600 px the name
+  and the credit leave the header (the credit becomes the first line of the panel) and Logout is a 44 px icon button.
+- The floating widget (bottom right, above the home indicator) shows uptime, cost so far and the idle countdown
+  while the panel is not on screen and an instance has an uptime, unless a drawer, the log or a confirmation is
+  open. Members see it too. Its name is fixed ("Server status, open panel") and its numbers are hidden from screen
+  readers; activating it opens the panel and focuses its heading.
 
 To add a tool: add a style under `styles:` (see the next section) with `enabled: true`, and give it `category`,
 `description`, `icon` and `order`; restart the web service. No page change is needed. A new category is a new
@@ -660,7 +691,10 @@ The location of the machine decides how fast a boot is (see "Slow boots"), so th
 
 ## Vast credit (admin)
 
-Admins see the prepaid Vast credit in the status card. The page asks `GET /api/credit` about once a
+Admins see the prepaid Vast credit in the page header (below 600 px: as the first line of the server panel).
+It is tinted and spelled out: "used up" at or below $0, "low" under about two hours at the current price (at least
+under $1 when there is no price), plain otherwise; "unavailable" stays neutral. The Start dialog warns when the
+credit is known and lower than the estimate's maximum cost (Start stays possible). The page asks `GET /api/credit` about once a
 minute; the server reuses one read for `VAST_CREDIT_CACHE_S` (default 60) and shares a read in flight, so any
 number of tabs cost at most one Vast call per interval. The call is `GET users/current` with the main
 API key (the same `VAST_API_KEY`); only the `credit` number is passed on, never the account record
