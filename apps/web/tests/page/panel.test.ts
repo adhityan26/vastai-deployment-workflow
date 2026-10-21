@@ -643,3 +643,118 @@ describe("hiding the panel column (from 1280 px), remembered", () => {
     expect(collapsed()).toBe(true);
   });
 });
+
+describe("the boot log dialog", () => {
+  const dialog = () => q("#console-card");
+  const consoleCalls = () => calls.filter((c) => c.path.startsWith("/api/console")).length;
+
+  it("the panel summary shows the stepper, the boot sentence and one View log button", async () => {
+    await mount({ state: "downloading", agent_unreachable: true });
+    expect(q("#boot-summary").hidden).toBe(false);
+    expect([...document.querySelectorAll("#console-steps li")].map((li) => (li as HTMLElement).dataset["status"])).toEqual(["done", "running", "pending"]);
+    expect(q("#boot-sentence").hidden).toBe(false);
+    expect(q("#boot-sentence").textContent).toBe("Downloading models, this can take several minutes");
+    const open = q<HTMLButtonElement>("#console-open");
+    expect(open.textContent).toBe("View log");
+    expect(open.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(q("#boot-summary").querySelectorAll("button")).toHaveLength(1);
+  });
+
+  it("opens as a modal dialog over everything else, with the focus inside", async () => {
+    setWidth(1280);
+    await mount();
+    expect(dialog().hidden).toBe(true);
+    expect(dialog().getAttribute("role")).toBe("dialog");
+    expect(dialog().getAttribute("aria-modal")).toBe("true");
+    expect(dialog().getAttribute("aria-labelledby")).toBe("console-title");
+    q("#console-open").focus();
+    q("#console-open").click();
+    expect(dialog().hidden).toBe(false);
+    expect(q("#console-backdrop").hidden).toBe(false);
+    for (const id of ["page", "status-panel", "tool-nav"]) expect(q(`#${id}`).hasAttribute("inert"), id).toBe(true);
+    expect(dialog().hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(q("#console-close"));
+    expect(dialog().querySelector("#console-log .cl")!.textContent).toBe("01:00:01 [agent] line 1");
+  });
+
+  it("closes with Escape, the backdrop and the close button; the focus goes back to View log", async () => {
+    setWidth(1280);
+    await mount();
+    for (const close of [() => key(document.activeElement!, "Escape"), () => q("#console-backdrop").click(), () => q("#console-close").click()]) {
+      q("#console-open").focus();
+      q("#console-open").click();
+      expect(dialog().hidden).toBe(false);
+      close();
+      expect(dialog().hidden).toBe(true);
+      expect(q("#console-backdrop").hidden).toBe(true);
+      expect(q("#page").hasAttribute("inert")).toBe(false);
+      expect(panel().hasAttribute("inert")).toBe(false);
+      expect(document.activeElement).toBe(q("#console-open"));
+    }
+  });
+
+  it("opened from the drawer it closes the drawer, and the focus goes back to the pill", async () => {
+    setWidth(375);
+    await mount();
+    q("#status-pill").click();
+    q("#console-open").click();
+    expect(panel().classList.contains("open")).toBe(false);
+    expect(dialog().hidden).toBe(false);
+    expect(q<HTMLButtonElement>("#float-status").hidden).toBe(true);
+    key(document.activeElement!, "Escape");
+    expect(dialog().hidden).toBe(true);
+    expect(document.activeElement).toBe(q("#status-pill"));
+  });
+
+  it("traps Tab inside the dialog", async () => {
+    await mount();
+    q("#console-open").click();
+    const first = q("#console-close");
+    const last = q("#console-download");
+    last.focus();
+    expect(key(last, "Tab").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+    expect(key(first, "Tab", true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("opening and closing does not change the polling", async () => {
+    await mount();
+    const n = consoleCalls();
+    const pending = timers.filter((t) => t.ms === 3_000).length;
+    q("#console-open").click();
+    q("#console-close").click();
+    await flush();
+    expect(consoleCalls()).toBe(n);
+    expect(timers.filter((t) => t.ms === 3_000).length).toBe(pending);
+  });
+
+  it("closes when the console stops being available (403); the focus falls back to the pill", async () => {
+    setWidth(1280);
+    await mount();
+    q("#console-open").click();
+    routes["GET /api/console?after=0"] = { status: 403, body: { error: { code: "forbidden", message: "no" } } };
+    await app!.pollConsole();
+    expect(dialog().hidden).toBe(true);
+    expect(q("#boot-summary").hidden).toBe(true);
+    expect(q("#page").hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(q("#status-pill")); // View log is hidden with the summary
+  });
+
+  it("closes on logout", async () => {
+    await mount({}, { "POST /auth/logout": { body: { ok: true } } });
+    q("#console-open").click();
+    q<HTMLButtonElement>("#btn-logout").click(); // a test shortcut: the page is inert for a real user
+    await flush();
+    expect(q("#login-screen").hidden).toBe(false);
+    expect(dialog().hidden).toBe(true);
+    expect(q("#page").hasAttribute("inert")).toBe(false);
+  });
+
+  it("a member has no boot summary and never asks for the console", async () => {
+    await mount({ role: "member", agent_unreachable: true });
+    expect(q("#boot-summary").hidden).toBe(true);
+    expect(dialog().hidden).toBe(true);
+    expect(calls.some((c) => c.path.startsWith("/api/console"))).toBe(false);
+  });
+});

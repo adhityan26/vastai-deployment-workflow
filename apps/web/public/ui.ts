@@ -1576,6 +1576,11 @@ export function mountApp(doc: Document, env: Env): App {
   type Overlay = "menu" | "panel" | "log";
   let overlay: Overlay | null = null;
   let panelOpener: HTMLElement | null = null; // where the focus goes back when the panel drawer closes
+  let logReturn: HTMLElement | null = null; // where the focus goes back when the log dialog closes
+  const consoleDialog = $("console-card");
+  const consoleBackdrop = $("console-backdrop");
+  const consoleOpenBtn = $<HTMLButtonElement>("console-open");
+  const consoleCloseBtn = $<HTMLButtonElement>("console-close");
   const statusPanel = $("status-panel");
   const statusTitle = $("status-title");
   const statusPill = $<HTMLButtonElement>("status-pill");
@@ -1623,18 +1628,22 @@ export function mountApp(doc: Document, env: Env): App {
     menuOpenBtn.setAttribute("aria-expanded", String(next === "menu"));
     statusPanel.classList.toggle("open", next === "panel");
     panelBackdrop.hidden = next !== "panel";
+    consoleDialog.hidden = next !== "log";
+    consoleBackdrop.hidden = next !== "log";
     pageBox.toggleAttribute("inert", next !== null);
-    nav.toggleAttribute("inert", next === "panel");
+    nav.toggleAttribute("inert", next === "panel" || next === "log");
+    statusPanel.toggleAttribute("inert", next === "log");
     renderPanelState();
     if (next === "menu") menuSearch.focus();
     else if (next === "panel") statusTitle.focus();
-    else if (returnFocus && prev !== null) returnTarget(prev)?.focus();
+    else if (next === "log") consoleCloseBtn.focus();
+    else if (returnFocus && prev !== null) returnTarget(prev).focus();
   }
 
-  function returnTarget(closed: Overlay): HTMLElement | null {
-    if (closed === "menu") return menuOpenBtn;
-    if (closed === "panel") return panelOpener?.isConnected && !panelOpener.hidden ? panelOpener : statusPill;
-    return statusPill;
+  function returnTarget(closed: Overlay): HTMLElement {
+    const wanted = closed === "menu" ? menuOpenBtn : closed === "panel" ? panelOpener : logReturn;
+    // The opener may be gone or hidden meanwhile (the widget, a summary that closed): the pill is always there.
+    return wanted !== null && wanted.isConnected && wanted.closest("[hidden]") === null ? wanted : statusPill;
   }
 
   /** The pill (and the widget): at the wide layout bring the panel's heading into focus, else open the drawer. */
@@ -1656,6 +1665,20 @@ export function mountApp(doc: Document, env: Env): App {
   panelBackdrop.addEventListener("click", () => setOverlay(null, true));
   statusPanel.addEventListener("keydown", (e) => {
     if (overlay === "panel") trapTab(statusPanel, e);
+  });
+
+  // The boot log dialog: opened from the panel's boot summary. From the drawer it replaces the drawer, so the focus
+  // then goes back to the pill.
+  consoleOpenBtn.addEventListener("click", () => {
+    logReturn = panelIsColumn() && !collapsed ? consoleOpenBtn : statusPill;
+    setOverlay("log", false);
+    consoleFollow = true;
+    renderConsoleLines();
+  });
+  consoleCloseBtn.addEventListener("click", () => setOverlay(null, true));
+  consoleBackdrop.addEventListener("click", () => setOverlay(null, true));
+  consoleDialog.addEventListener("keydown", (e) => {
+    if (overlay === "log") trapTab(consoleDialog, e);
   });
 
   /** The controls the Tab key can reach inside a container (jsdom has no layout: hidden attributes decide). */
@@ -2392,6 +2415,7 @@ export function mountApp(doc: Document, env: Env): App {
     // relevant; the log itself is in a dialog. Polling does not depend on the dialog being open.
     const show = consoleCardVisible(state?.role ?? null, p);
     bootSummary.hidden = !show;
+    if (!show && overlay === "log") setOverlay(null, true);
     if (state) renderAgentNotice(state);
     if (!show || p === null) return;
     renderSteps(p);
