@@ -136,6 +136,8 @@ import {
   nextSamples,
   stateInfo,
   panelActions,
+  layoutMode,
+  type LayoutMode,
   countdown,
   creditTone,
   creditToneText,
@@ -350,7 +352,7 @@ export function mountApp(doc: Document, env: Env): App {
   function showAuthScreen(kind: "login" | "noaccess", message: string): void {
     startSubmitting = false; // a Start request in flight must not keep the dialog over the login screen
     closeModal?.(false);
-    if (drawerOpen) setDrawer(false, false);
+    if (overlay !== null) setOverlay(null, false);
     pauseTimers();
     clearMessages();
     state = null;
@@ -480,7 +482,7 @@ export function mountApp(doc: Document, env: Env): App {
   doc.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (!modal.hidden) closeModal?.(false);
-      else if (drawerOpen) setDrawer(false, true);
+      else if (overlay !== null) setOverlay(null, true);
     }
   });
 
@@ -497,6 +499,10 @@ export function mountApp(doc: Document, env: Env): App {
     } finally {
       busy = false;
       await refresh();
+      // The button that opened a confirmation was disabled while it ran: give it the focus back once enabled
+      // (inside a drawer the focus must not fall out to the page).
+      const at = doc.activeElement;
+      if (restoreFocus?.isConnected && (at === null || at === doc.body || modal.contains(at))) restoreFocus.focus();
     }
   }
 
@@ -1400,7 +1406,6 @@ export function mountApp(doc: Document, env: Env): App {
   const menuBackdrop = $("menu-backdrop");
   let menuKey = "";
   let query = "";
-  let drawerOpen = false;
 
   // The stored id is only ever compared with the ids of the current menu (chooseEntry), never shown or parsed.
   function readTool(): string | null {
@@ -1489,8 +1494,8 @@ export function mountApp(doc: Document, env: Env): App {
     showRefErrors([]);
     formError.hidden = true;
     styleKey = "";
-    const fromDrawer = drawerOpen;
-    if (fromDrawer) setDrawer(false, false);
+    const fromDrawer = overlay === "menu";
+    if (fromDrawer) setOverlay(null, false);
     if (state) renderForm(state);
     renderReferences();
     if (focusPanel && fromDrawer) $("gen-title").focus();
@@ -1529,22 +1534,12 @@ export function mountApp(doc: Document, env: Env): App {
     next.focus();
   });
 
-  /** Open or close the drawer (narrow screens). While open, the page behind it is inert. */
-  function setDrawer(open: boolean, returnFocus: boolean): void {
-    drawerOpen = open;
-    nav.classList.toggle("open", open);
-    menuBackdrop.hidden = !open;
-    pageBox.toggleAttribute("inert", open);
-    menuOpenBtn.setAttribute("aria-expanded", String(open));
-    if (open) menuSearch.focus();
-    else if (returnFocus) menuOpenBtn.focus();
-  }
-  menuOpenBtn.addEventListener("click", () => setDrawer(!drawerOpen, true));
-  menuCloseBtn.addEventListener("click", () => setDrawer(false, true));
-  menuBackdrop.addEventListener("click", () => setDrawer(false, true));
+  menuOpenBtn.addEventListener("click", () => setOverlay(overlay === "menu" ? null : "menu", true));
+  menuCloseBtn.addEventListener("click", () => setOverlay(null, true));
+  menuBackdrop.addEventListener("click", () => setOverlay(null, true));
   // Focus trap: Tab and Shift+Tab wrap inside the open drawer.
   nav.addEventListener("keydown", (e) => {
-    if (!drawerOpen || e.key !== "Tab") return;
+    if (overlay !== "menu" || e.key !== "Tab") return;
     const stops = [menuCloseBtn, menuSearch, ...menuButtons()];
     const first = stops[0]!;
     const last = stops[stops.length - 1]!;
@@ -1556,11 +1551,120 @@ export function mountApp(doc: Document, env: Env): App {
       first.focus();
     }
   });
-  // The drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
+  // The menu drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
   const wide = typeof doc.defaultView?.matchMedia === "function" ? doc.defaultView.matchMedia(WIDE_SCREEN_QUERY) : null;
   wide?.addEventListener?.("change", (e) => {
-    if (e.matches && drawerOpen) setDrawer(false, false);
+    if (e.matches && overlay === "menu") setOverlay(null, false);
   });
+
+  // ---- overlays: the menu drawer, the panel drawer, the boot log dialog (one at a time) ----
+
+  type Overlay = "menu" | "panel" | "log";
+  let overlay: Overlay | null = null;
+  let panelOpener: HTMLElement | null = null; // where the focus goes back when the panel drawer closes
+  const statusPanel = $("status-panel");
+  const statusTitle = $("status-title");
+  const statusPill = $<HTMLButtonElement>("status-pill");
+  const panelBackdrop = $("panel-backdrop");
+  const panelClose = $<HTMLButtonElement>("panel-close");
+  const panelHide = $<HTMLButtonElement>("panel-hide");
+
+  /** The layout now; jsdom and old browsers without a width count as narrow. */
+  function currentMode(): LayoutMode {
+    return layoutMode(doc.defaultView?.innerWidth ?? 0);
+  }
+
+  /** True while the panel is on screen as a column (wide layout, not collapsed). */
+  function panelIsColumn(): boolean {
+    return currentMode() === "wide";
+  }
+
+  /**
+   * Open one overlay (closing any other) or close it. While one is open the page behind it is inert; the focus moves
+   * into it and, on close with returnFocus, back to what opened it.
+   */
+  function setOverlay(next: Overlay | null, returnFocus: boolean): void {
+    const prev = overlay;
+    overlay = next;
+    nav.classList.toggle("open", next === "menu");
+    menuBackdrop.hidden = next !== "menu";
+    menuOpenBtn.setAttribute("aria-expanded", String(next === "menu"));
+    statusPanel.classList.toggle("open", next === "panel");
+    panelBackdrop.hidden = next !== "panel";
+    pageBox.toggleAttribute("inert", next !== null);
+    nav.toggleAttribute("inert", next === "panel");
+    renderPanelState();
+    if (next === "menu") menuSearch.focus();
+    else if (next === "panel") statusTitle.focus();
+    else if (returnFocus && prev !== null) returnTarget(prev)?.focus();
+  }
+
+  function returnTarget(closed: Overlay): HTMLElement | null {
+    if (closed === "menu") return menuOpenBtn;
+    if (closed === "panel") return panelOpener?.isConnected && !panelOpener.hidden ? panelOpener : statusPill;
+    return statusPill;
+  }
+
+  /** The pill (and the widget): at the wide layout bring the panel's heading into focus, else open the drawer. */
+  function openPanelFrom(opener: HTMLElement): void {
+    if (panelIsColumn()) {
+      statusTitle.focus();
+      renderPanelState();
+      return;
+    }
+    panelOpener = opener;
+    setOverlay(overlay === "panel" ? null : "panel", true);
+  }
+  statusPill.addEventListener("click", () => openPanelFrom(statusPill));
+  panelClose.addEventListener("click", () => setOverlay(null, true));
+  panelBackdrop.addEventListener("click", () => setOverlay(null, true));
+  statusPanel.addEventListener("keydown", (e) => {
+    if (overlay === "panel") trapTab(statusPanel, e);
+  });
+
+  /** The controls the Tab key can reach inside a container (jsdom has no layout: hidden attributes decide). */
+  function tabStops(container: HTMLElement): HTMLElement[] {
+    const all = Array.from(container.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea, summary, [tabindex]"));
+    return all.filter((el) => {
+      if (el.tabIndex < 0 || (el as HTMLButtonElement).disabled === true || el.closest("[hidden]") !== null) return false;
+      // Inside a closed <details> only its own summary can be reached.
+      for (let d = el.parentElement?.closest("details") ?? null; d !== null; d = d.parentElement?.closest("details") ?? null) {
+        if (!(d as HTMLDetailsElement).open && el.closest("summary")?.parentElement !== d) return false;
+      }
+      return true;
+    });
+  }
+
+  /** Keep Tab and Shift+Tab inside an open overlay. */
+  function trapTab(container: HTMLElement, e: KeyboardEvent): void {
+    if (e.key !== "Tab") return;
+    const stops = tabStops(container);
+    if (stops.length === 0) return;
+    const first = stops[0]!;
+    const last = stops[stops.length - 1]!;
+    const at = doc.activeElement;
+    if (e.shiftKey && (at === first || !container.contains(at))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (at === last || !container.contains(at))) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  /** The layout-dependent parts: which panel buttons are offered and whether the pill says the panel is shown. */
+  function renderPanelState(): void {
+    const column = panelIsColumn();
+    panelHide.hidden = !column;
+    panelClose.hidden = column;
+    statusPill.setAttribute("aria-expanded", String(column || overlay === "panel"));
+  }
+
+  doc.defaultView?.addEventListener("resize", () => {
+    if (overlay === "panel" && panelIsColumn()) setOverlay(null, false);
+    else renderPanelState();
+  });
+  renderPanelState();
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);

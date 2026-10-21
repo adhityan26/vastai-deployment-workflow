@@ -343,3 +343,148 @@ describe("the header", () => {
     expect(q("#login-screen").hidden).toBe(false);
   });
 });
+
+/** z-index of the first rule whose selector list contains `selector` exactly. */
+function zIndex(selector: string): number {
+  for (const m of CSS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selectors = m[1]!.split(",").map((x) => x.trim());
+    const z = /z-index:\s*(\d+)/.exec(m[2]!);
+    if (z && selectors.includes(selector)) return Number(z[1]);
+  }
+  throw new Error(`no z-index for ${selector}`);
+}
+
+describe("the panel as a right drawer (below 1280 px)", () => {
+  const pill = () => q<HTMLButtonElement>("#status-pill");
+  const isOpen = () => panel().classList.contains("open");
+
+  it("starts closed and opens from the pill: backdrop, the page and the menu inert, focus on the panel heading", async () => {
+    window.localStorage.setItem("vast-comfy.panel", "open");
+    await mount();
+    expect(isOpen()).toBe(false);
+    expect(pill().getAttribute("aria-expanded")).toBe("false");
+    pill().click();
+    expect(isOpen()).toBe(true);
+    expect(pill().getAttribute("aria-expanded")).toBe("true");
+    expect(q("#panel-backdrop").hidden).toBe(false);
+    expect(q("#page").hasAttribute("inert")).toBe(true);
+    expect(q("#tool-nav").hasAttribute("inert")).toBe(true);
+    expect(panel().hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(q("#status-title"));
+    // Close is offered in the drawer; Hide belongs to the wide layout.
+    expect(q("#panel-close").hidden).toBe(false);
+    expect(q("#panel-hide").hidden).toBe(true);
+  });
+
+  it("closes with Escape, the backdrop and the close button, and gives the focus back to the pill", async () => {
+    await mount();
+    for (const close of [() => key(document.activeElement!, "Escape"), () => q("#panel-backdrop").click(), () => q("#panel-close").click()]) {
+      pill().focus();
+      pill().click();
+      expect(isOpen()).toBe(true);
+      close();
+      expect(isOpen()).toBe(false);
+      expect(q("#panel-backdrop").hidden).toBe(true);
+      expect(q("#page").hasAttribute("inert")).toBe(false);
+      expect(q("#tool-nav").hasAttribute("inert")).toBe(false);
+      expect(pill().getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(pill());
+    }
+  });
+
+  it("traps Tab and Shift+Tab inside the open drawer, skipping hidden controls and the inside of closed sections", async () => {
+    await mount({ unknown: [{ vast_instance_id: 11, actual_status: "running", start_date: 1, dph: 0.4 }] });
+    pill().click();
+    const first = q("#panel-close");
+    // The untracked list is a closed section: its summary is the last stop, not the Destroy button inside it.
+    const last = q("#unknown-box summary");
+    last.focus();
+    expect(key(last, "Tab").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+    expect(key(first, "Tab", true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+    const mid = q("#console-open");
+    mid.focus();
+    expect(key(mid, "Tab").defaultPrevented).toBe(false);
+    // Hidden controls are no stops either.
+    q("#btn-destroy").hidden = true;
+    q("#unknown-box").hidden = true;
+    const lastNow = q("#console-open");
+    lastNow.focus();
+    expect(key(lastNow, "Tab").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("does not trap Tab while it is closed", async () => {
+    await mount();
+    const last = q("#btn-destroy");
+    last.focus();
+    expect(key(last, "Tab").defaultPrevented).toBe(false);
+  });
+
+  it("only one overlay at a time: opening the panel closes the menu drawer and back", async () => {
+    setWidth(375);
+    await mount();
+    q("#menu-open").click();
+    expect(q("#tool-nav").classList.contains("open")).toBe(true);
+    pill().click();
+    expect(q("#tool-nav").classList.contains("open")).toBe(false);
+    expect(q("#menu-backdrop").hidden).toBe(true);
+    expect(q("#menu-open").getAttribute("aria-expanded")).toBe("false");
+    expect(isOpen()).toBe(true);
+    q("#menu-open").click();
+    expect(isOpen()).toBe(false);
+    expect(q("#panel-backdrop").hidden).toBe(true);
+    expect(q("#tool-nav").classList.contains("open")).toBe(true);
+    expect(q("#page").hasAttribute("inert")).toBe(true);
+    expect(q("#tool-nav").hasAttribute("inert")).toBe(false);
+  });
+
+  it("closes when the screen becomes wide (the panel is then a column)", async () => {
+    await mount();
+    pill().click();
+    resize(1280);
+    expect(isOpen()).toBe(false);
+    expect(q("#page").hasAttribute("inert")).toBe(false);
+    expect(pill().getAttribute("aria-expanded")).toBe("true");
+    expect(q("#panel-hide").hidden).toBe(false);
+    expect(q("#panel-close").hidden).toBe(true);
+  });
+
+  it("a confirmation opened from the drawer sits above it; Escape closes only the confirmation", async () => {
+    await mount();
+    pill().click();
+    q("#btn-destroy").focus();
+    q("#btn-destroy").click();
+    await flush();
+    expect(q("#modal").hidden).toBe(false);
+    key(document.activeElement!, "Escape");
+    await flush();
+    expect(q("#modal").hidden).toBe(true);
+    expect(isOpen()).toBe(true);
+    expect(document.activeElement).toBe(q("#btn-destroy"));
+    expect(zIndex(".modal")).toBeGreaterThan(zIndex(".status-panel"));
+  });
+
+  it("the stacking order: header 10, widget 12, backdrop 15, drawers 20, log dialog 25, confirmation 30", () => {
+    expect(zIndex(".top")).toBe(10);
+    expect(zIndex(".float-status")).toBe(12);
+    expect(zIndex(".backdrop")).toBe(15);
+    expect(zIndex(".status-panel")).toBe(20);
+    expect(zIndex(".log-dialog")).toBe(25);
+    expect(zIndex(".modal")).toBe(30);
+  });
+});
+
+describe("the panel as a column (from 1280 px)", () => {
+  it("the pill does not open a drawer: it brings the panel's heading into focus", async () => {
+    setWidth(1280);
+    await mount();
+    const pill = q<HTMLButtonElement>("#status-pill");
+    expect(pill.getAttribute("aria-expanded")).toBe("true");
+    pill.click();
+    expect(panel().classList.contains("open")).toBe(false);
+    expect(q("#page").hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(q("#status-title"));
+  });
+});
