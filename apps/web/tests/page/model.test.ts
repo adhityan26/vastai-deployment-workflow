@@ -105,6 +105,16 @@ import {
   startFilterProblem,
   startFiltersAreDefault,
 } from "../../public/model.js";
+import {
+  PANEL_STORAGE_KEY,
+  creditTone,
+  creditToneText,
+  layoutMode,
+  parsePanelPref,
+  pillView,
+  startCreditWarning,
+  widgetVisible,
+} from "../../public/model.js";
 import { DEFAULT_ICON, ICONS } from "../../public/icons.js";
 import { MENU_ICONS, loadProfile, menuItems } from "@vast-comfy/core";
 import { fileURLToPath } from "node:url";
@@ -1074,5 +1084,81 @@ describe("advanced server choice (Start dialog)", () => {
       "RTX 3090 - $0.31/h - Quebec, CA - 812 Mbps down - reliability 99%",
     );
     expect(offerLabel({ id: 8, gpu_name: null, dph: 0.2, vram_gb: null, location: null, region: null, down_mbps: null, reliability: null })).toBe("$0.20/h");
+  });
+});
+
+describe("server panel helpers", () => {
+  it("tones the credit: used up, low (about two hours at the current price, at least $1), fine, or unknown", () => {
+    expect(creditTone(null, 0.3)).toBe("neutral");
+    expect(creditTone(0, 0.3)).toBe("bad");
+    expect(creditTone(-0.2, 0.3)).toBe("bad");
+    expect(creditTone(0.99, null)).toBe("warn"); // no price: under $1 is low
+    expect(creditTone(1, null)).toBe("ok");
+    expect(creditTone(1.1, 0.6)).toBe("warn"); // two hours at $0.60 = $1.20
+    expect(creditTone(1.2, 0.6)).toBe("ok");
+    expect(creditTone(0.9, 0.2)).toBe("warn"); // two hours is $0.40, but under $1 stays low
+    expect(creditTone(4.54, 0.31)).toBe("ok");
+    expect(creditTone(5, Number.NaN)).toBe("ok");
+    expect(creditTone(Number.NaN, 0.3)).toBe("neutral");
+    expect(creditToneText("warn")).toBe("low");
+    expect(creditToneText("bad")).toBe("used up");
+    expect(creditToneText("ok")).toBe("");
+    expect(creditToneText("neutral")).toBe("");
+  });
+
+  it("names the layout by width: three columns from 1280, a drawer panel below, a drawer menu below 900", () => {
+    expect(layoutMode(1280)).toBe("wide");
+    expect(layoutMode(1920)).toBe("wide");
+    expect(layoutMode(1279.5)).toBe("medium");
+    expect(layoutMode(900)).toBe("medium");
+    expect(layoutMode(899)).toBe("narrow");
+    expect(layoutMode(375)).toBe("narrow");
+    expect(layoutMode(Number.NaN)).toBe("narrow");
+  });
+
+  it("reads the remembered panel choice: only the exact word collapsed collapses it", () => {
+    expect(PANEL_STORAGE_KEY).toBe("vast-comfy.panel");
+    expect(parsePanelPref("collapsed")).toBe("collapsed");
+    expect(parsePanelPref("open")).toBe("open");
+    for (const other of [null, "", "Collapsed", " collapsed", "1", "true", "<b>collapsed</b>", "{}"]) expect(parsePanelPref(other), String(other)).toBe("open");
+  });
+
+  it("gives the header pill a short label and a tone", () => {
+    expect(pillView(null, null, null)).toEqual({ label: "Loading", tone: "idle" });
+    expect(pillView("none", null, null)).toEqual({ label: "Stopped", tone: "idle" });
+    expect(pillView("creating", null, null)).toEqual({ label: "Booting", tone: "busy" });
+    expect(pillView("booting", null, null)).toEqual({ label: "Booting", tone: "busy" });
+    expect(pillView("downloading", 42, null)).toEqual({ label: "Booting 42%", tone: "busy" });
+    expect(pillView("ready", null, 1500)).toEqual({ label: "Ready", tone: "ok" });
+    expect(pillView("idle-warning", null, 161)).toEqual({ label: "Idle 3m", tone: "warn" });
+    expect(pillView("idle-warning", null, 30)).toEqual({ label: "Idle 1m", tone: "warn" });
+    expect(pillView("idle-warning", null, 0)).toEqual({ label: "Idle 0m", tone: "warn" });
+    expect(pillView("idle-warning", null, null)).toEqual({ label: "Idle soon", tone: "warn" });
+    expect(pillView("stopping", null, null)).toEqual({ label: "Stopping", tone: "warn" });
+    expect(pillView("failed", null, null)).toEqual({ label: "Failed", tone: "bad" });
+    expect(pillView("destroy_failed", null, null)).toEqual({ label: "Destroy failed", tone: "bad" });
+    expect(pillView("weird", null, null)).toEqual({ label: "Unknown", tone: "warn" });
+  });
+
+  it("shows the floating widget only while the panel is off screen, an instance has an uptime and nothing covers the page", () => {
+    const v = (over: Partial<Parameters<typeof widgetVisible>[0]> = {}) => widgetVisible({ mode: "medium", collapsed: false, overlayOpen: false, uptime: 60, ...over });
+    expect(v()).toBe(true); // drawer closed below 1280
+    expect(v({ mode: "narrow" })).toBe(true);
+    expect(v({ mode: "wide" })).toBe(false); // the panel is on screen
+    expect(v({ mode: "wide", collapsed: true })).toBe(true);
+    expect(v({ mode: "medium", collapsed: true })).toBe(true);
+    expect(v({ uptime: null })).toBe(false);
+    expect(v({ uptime: 0 })).toBe(true);
+    expect(v({ overlayOpen: true })).toBe(false);
+    expect(v({ mode: "wide", collapsed: true, overlayOpen: true })).toBe(false);
+  });
+
+  it("warns in the Start dialog when the known credit is below the most it can cost", () => {
+    expect(startCreditWarning(null, 1)).toBeNull();
+    expect(startCreditWarning(5, 1.08)).toBeNull();
+    expect(startCreditWarning(1.08, 1.08)).toBeNull();
+    expect(startCreditWarning(1.07, 1.08)).toBe("Your Vast credit ($1.07) is less than this estimate ($1.08). The instance may stop when the credit runs out.");
+    expect(startCreditWarning(-0.2, 1)).toContain("(-$0.20)");
+    expect(startCreditWarning(Number.NaN, 1)).toBeNull();
   });
 });
