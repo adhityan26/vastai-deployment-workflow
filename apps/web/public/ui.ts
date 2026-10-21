@@ -137,6 +137,7 @@ import {
   stateInfo,
   panelActions,
   layoutMode,
+  startCreditWarning,
   PANEL_STORAGE_KEY,
   parsePanelPref,
   widgetVisible,
@@ -666,6 +667,12 @@ export function mountApp(doc: Document, env: Env): App {
           ...(where === null ? [] : [make("p", `Server: ${where}.`)]),
           make("p", `Estimated cost if it runs for the full failsafe time (${estimate.horizon_hours} hours): up to ${formatCost(estimate.max_cost)}.`),
         );
+        const low = startCreditWarning(creditValue, estimate.max_cost);
+        if (low !== null) {
+          const warn = make("p", low, "alert warn");
+          warn.id = "start-credit-warning";
+          estBox.append(warn);
+        }
       };
 
       const loadEstimate = async (): Promise<void> => {

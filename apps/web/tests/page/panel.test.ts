@@ -758,3 +758,34 @@ describe("the boot log dialog", () => {
     expect(calls.some((c) => c.path.startsWith("/api/console"))).toBe(false);
   });
 });
+
+describe("the Start dialog and the credit", () => {
+  const start = (credit: Reply) => mount({ state: "none", uptime_s: null, cost_so_far: null }, {
+    "GET /api/credit": credit,
+    "GET /api/gpus": { body: { gpus: [{ name: "RTX 3090", dph: 0.36, vram_gb: 24, available: true }] } },
+    "GET /api/estimate?gpu=RTX%203090": { body: { gpu_name: "RTX 3090", dph: 0.36, horizon_hours: 3, max_cost: 1.08 } },
+  });
+  const openStart = async () => { q("#btn-start").click(); await flush(); };
+
+  it("warns when the known credit is below the estimate's most", async () => {
+    await start({ body: { credit: 1, as_of: 1 } });
+    await openStart();
+    const warn = q("#start-credit-warning");
+    expect(q("#modal-body").contains(warn)).toBe(true);
+    expect(warn.textContent).toBe("Your Vast credit ($1.00) is less than this estimate ($1.08). The instance may stop when the credit runs out.");
+    expect(q<HTMLButtonElement>("#modal-ok").disabled).toBe(false); // a warning, not a block
+  });
+
+  it("says nothing when the credit covers it or is unknown", async () => {
+    await start({ body: { credit: 5, as_of: 1 } });
+    await openStart();
+    expect(document.querySelector("#start-credit-warning")).toBeNull();
+    q("#modal-cancel").click();
+    app!.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await start({ status: 502, body: { error: { code: "vast_unavailable", message: "no" } } });
+    await openStart();
+    expect(q("#modal-body").textContent).toContain("up to $1.08");
+    expect(document.querySelector("#start-credit-warning")).toBeNull();
+  });
+});
