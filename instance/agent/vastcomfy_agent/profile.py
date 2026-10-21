@@ -99,7 +99,9 @@ class Profile:
     models: tuple[ModelSpec, ...]
     workflows: tuple[str, ...]
     generate: GenerateSpec | None = None
+    # Declared classes, plus the video section's when video is enabled (boot checks them all).
     provides_node_classes: tuple[str, ...] = ()
+    video_enabled: bool = False
 
 
 def _relative(value: str, what: str) -> str:
@@ -181,19 +183,64 @@ def _parse_generate(raw: object) -> GenerateSpec:
     return GenerateSpec(workflow, GenerateParams(**refs), tuple(presets), tuple(sizes))
 
 
-def _parse_node_classes(raw: object) -> tuple[str, ...]:
+def _parse_node_classes(raw: object, what: str = "provides_node_classes") -> tuple[str, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
-        raise ProfileError("provides_node_classes must be a list")
+        raise ProfileError(f"{what} must be a list")
     names: list[str] = []
     for item in raw:
         if not isinstance(item, str) or not NODE_CLASS_RE.fullmatch(item):
-            raise ProfileError(f"provides_node_classes has an invalid node class name: {item!r}")
+            raise ProfileError(f"{what} has an invalid node class name: {item!r}")
         if item in names:
-            raise ProfileError(f"provides_node_classes lists {item!r} twice")
+            raise ProfileError(f"{what} lists {item!r} twice")
         names.append(item)
     return tuple(names)
+
+
+_VIDEO_MODELS_MAX = 8
+
+
+def _dest_folder(dest: str) -> str:
+    return dest.rstrip("/")
+
+
+def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
+    """(enabled, node classes boot must find). The web app owns the rest of `video:` (apps/core/src/video.ts);
+    this checks what decides downloads and the boot check, also while video is off, so a broken section fails
+    at boot and never mid-job. Enabled video needs each of its model files pinned in `models:` with its dest."""
+    if raw is None:
+        return False, ()
+    video = _mapping(raw, "video")
+    enabled = video.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ProfileError("video enabled must be true or false")
+    workflow = video.get("workflow")
+    if not isinstance(workflow, str) or not NAME_RE.fullmatch(workflow):
+        raise ProfileError(f"video workflow is not a valid workflow name: {workflow!r}")
+    if workflow not in workflows:
+        raise ProfileError(f"video workflow {workflow} is not listed in workflows")
+    files = video.get("models")
+    if not isinstance(files, list) or not files or len(files) > _VIDEO_MODELS_MAX:
+        raise ProfileError(f"video models must be a non-empty list of at most {_VIDEO_MODELS_MAX} entries")
+    wanted: list[tuple[str, str]] = []
+    for item in files:
+        item = _mapping(item, "video model")
+        name = _relative(_required(item.get("file"), "video model file"), "video model file")
+        if "/" in name:
+            raise ProfileError(f"video model file must be a plain file name: {name!r}")
+        dest = _relative(_required(item.get("dest"), "video model dest"), "video model dest")
+        wanted.append((name, dest))
+    classes = _parse_node_classes(video.get("node_classes"), "video node_classes")
+    if not enabled:
+        return False, ()
+    for name, dest in wanted:
+        entry = next((m for m in models if PurePosixPath(m.file).name == name), None)
+        if entry is None:
+            raise ProfileError(f"video model {name} is not listed in models (pin it with scripts/pin_model.py)")
+        if _dest_folder(entry.dest) != _dest_folder(dest):
+            raise ProfileError(f"video model {name} must have dest {_dest_folder(dest)}/")
+    return True, classes
 
 
 _STYLE_KINDS = ("lora", "preset")
@@ -254,15 +301,19 @@ def load_profile(path: Path) -> Profile:
             NodeSpec(_required(n["repo"], "node repo"), _required(n["commit"], "node commit")) for n in raw["nodes"]
         )
         _check_styles(raw.get("styles"))
+        workflows = tuple(_relative(w, "workflow") for w in raw.get("workflows", []))
+        declared = _parse_node_classes(raw.get("provides_node_classes"))
+        video_enabled, video_classes = _parse_video(raw.get("video"), models, workflows)
         return Profile(
             name=_required(raw["name"], "name"),
             requires_vram_gb=int(raw["requires"]["vram_gb"]),
             requires_disk_gb=int(raw["requires"]["disk_gb"]),
             nodes=nodes,
             models=tuple(models),
-            workflows=tuple(_relative(w, "workflow") for w in raw.get("workflows", [])),
+            workflows=workflows,
             generate=_parse_generate(raw["generate"]) if raw.get("generate") is not None else None,
-            provides_node_classes=_parse_node_classes(raw.get("provides_node_classes")),
+            provides_node_classes=declared + tuple(c for c in video_classes if c not in declared),
+            video_enabled=video_enabled,
         )
     except ProfileError as exc:
         raise ProfileError(f"{path}: {exc}") from None

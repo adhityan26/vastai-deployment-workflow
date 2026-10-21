@@ -17,6 +17,7 @@ const profile: Profile = {
   menu: DEFAULT_MENU,
   guidance: null,
   upscale: null,
+  video: null,
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",

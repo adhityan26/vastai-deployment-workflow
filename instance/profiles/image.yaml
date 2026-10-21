@@ -2,7 +2,8 @@
 # Source: mirror 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, byte-identical to the author's repo
 # abenzerps/Qwen-Image-2.1-Uncensored-GGUF (renamed ...-Uncensored-Quantized); SHA256 of all three files match.
 name: image
-requires: {vram_gb: 24, disk_gb: 40}
+# disk_gb counts the video model files (about 18 GB) too: with video enabled set VAST_DISK_GB to at least this.
+requires: {vram_gb: 24, disk_gb: 80}
 nodes:
   # leejet fork: native Qwen-Image 2.1 GGUF support (city96/ComfyUI-GGUF fails with "Unknown model architecture").
   - {repo: leejet/ComfyUI-GGUF, commit: 373048b8403a7820620065210a691263d4da0a61}
@@ -20,7 +21,16 @@ models:
   # pickle). License BSD-3-Clause (repo card; upstream xinntao/Real-ESRGAN is BSD-3-Clause), checked 2026-10-18.
   # HF LFS sha256 37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb.
   - {file: "RealESRGAN_x4plus.safetensors", repo: "Comfy-Org/Real-ESRGAN_repackaged", revision: "5fd49b7b278836f48af63ecd314d0f98ab336105", dest: "models/upscale_models/", size_bytes: 66857836}
-workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json]
+  # Video (video: below) needs three more files, about 18 GB. They are NOT listed yet because a cloud session cannot
+  # reach Hugging Face to read their commit and size, and an entry is never written from memory. Before setting
+  # `video.enabled: true` the owner runs, on the laptop (licence check first: the model card of each repo):
+  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors models/diffusion_models/
+  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/vae/wan2.2_vae.safetensors models/vae/
+  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.1_ComfyUI_repackaged split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors models/text_encoders/
+  # and pastes the three printed lines here. (If a file is not in that repo, pin_model.py says so: look for it in the
+  # other repackaged repo instead.) With video enabled and any of the three missing here, both the web app and the
+  # instance refuse the profile at startup with "video model ... is not listed in models".
+workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
   workflow: qwen-image-t2i.json
@@ -256,3 +266,40 @@ upscale:
   scales:
     - {name: "2x", value: 0.5, factor: 2}
     - {name: "4x", value: 1.0, factor: 4}
+
+# Video mode (deploy/web/README.md "Video"): text to video, or image to video when the user attaches exactly one start
+# image, with ONE model through native ComfyUI nodes only (workflows/video-ti2v.json; no custom node). OFF until the
+# owner has pinned the three model files (see the comment under `models:`) and set `enabled: true`. Everything here
+# is validated even while it is off; with `enabled: true` each file of `models` below must be listed in the
+# profile's `models:` with this dest, and the instance's boot then also requires `node_classes` from ComfyUI's
+# /object_info before it reports ready (an image whose ComfyUI is too old for these nodes fails the boot loudly).
+# The web app copies the workflow, sets the mapped inputs and, with a start image, adds one LoadImage node (id
+# `video_start`) wired to `start_image`. UNVERIFIED (never run on a real instance): the graph and its node and input
+# names, the h264 mp4 output of SaveVideo, VRAM use at these sizes on a 24 GB card, the time a clip takes, and that
+# phones play the result. Sizes are multiples of 32; frames are 4n+1 (the latent packs 4 frames per step).
+video:
+  enabled: false
+  workflow: video-ti2v.json
+  models:
+    - {file: wan2.2_ti2v_5B_fp16.safetensors, dest: models/diffusion_models/}
+    - {file: umt5_xxl_fp8_e4m3fn_scaled.safetensors, dest: models/text_encoders/}
+    - {file: wan2.2_vae.safetensors, dest: models/vae/}
+  node_classes: [UNETLoader, CLIPLoader, VAELoader, ModelSamplingSD3, CLIPTextEncode, Wan22ImageToVideoLatent, KSampler, VAEDecode, CreateVideo, SaveVideo, LoadImage]
+  params:
+    prompt: {node: "5", input: text}
+    seed: {node: "8", input: seed}
+    width: {node: "7", input: width}
+    height: {node: "7", input: height}
+    length: {node: "7", input: length}
+    fps: {node: "10", input: fps}
+  start_image: {node: "7", input: start_image}
+  output_node: "11"
+  fps: 24
+  sizes:
+    - {name: "Landscape", width: 1280, height: 704}
+    - {name: "Portrait", width: 704, height: 1280}
+    - {name: "Landscape, faster", width: 832, height: 480}
+    - {name: "Portrait, faster", width: 480, height: 832}
+  durations:
+    - {name: "About 3 s", frames: 73}
+    - {name: "About 5 s", frames: 121}

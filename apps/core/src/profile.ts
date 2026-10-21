@@ -5,6 +5,7 @@ import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./s
 import { parseGuidance, type GuidanceSpec, type TuningSupport } from "./guidance.js";
 import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 import { checkStyleMenus, parseMenu, type MenuSpec } from "./menu.js";
+import { parseVideo, type VideoSpec } from "./video.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
@@ -104,6 +105,8 @@ export interface Profile {
   readonly guidance: GuidanceSpec | null;
   /** The upscale mode when the profile enables it; null otherwise. */
   readonly upscale: UpscaleSpec | null;
+  /** The video mode when the profile enables it; null otherwise. */
+  readonly video: VideoSpec | null;
   /** The tool menu's categories and built-in tools (styles add their own entries: see menuItems). */
   readonly menu: MenuSpec;
   readonly models: readonly ModelSpec[];
@@ -271,7 +274,7 @@ const SIZE_KEYS = new Set(["name", "width", "height"]);
 const SIZE_MULTIPLE = 32;
 
 /** A list of named output sizes (multiples of 32, unique names, no other members). */
-function parseSizeList(list: unknown[]): SizeSpec[] {
+export function parseSizeList(list: unknown[]): SizeSpec[] {
   const sizes: SizeSpec[] = [];
   for (const item of list) {
     const entry = mapping(item, "size");
@@ -393,6 +396,7 @@ export function loadProfile(path: string): Profile {
       guidance,
       styles,
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
+      video: parseVideo(raw["video"], modelEntries(raw["models"])),
       menu,
       models,
     };
