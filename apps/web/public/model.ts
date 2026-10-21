@@ -51,7 +51,6 @@ const BYTES_PER_KB = 1e3;
 const MAX_GPU_NAME = 64; // the API refuses longer names
 // Where the last GPU choice is remembered in the browser (only a model name, no secret).
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
-export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
 export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // The menu entry the user chose last (an entry id only; checked against the current menu before use).
 export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
@@ -1757,4 +1756,31 @@ export function widgetVisible(v: { mode: LayoutMode; collapsed: boolean; overlay
 export function startCreditWarning(credit: number | null, maxCost: number): string | null {
   if (credit === null || !Number.isFinite(credit) || !Number.isFinite(maxCost) || credit >= maxCost) return null;
   return `Your Vast credit (${formatCredit(credit)}) is less than this estimate (${formatCost(maxCost)}). The instance may stop when the credit runs out.`;
+}
+
+export interface PanelActions {
+  start: boolean;
+  extend: boolean;
+  /** Near the idle shutdown Extend is the first choice (open, primary). */
+  extendPrimary: boolean;
+  destroy: boolean;
+  destroyLabel: string;
+  /** A plain next step when no action fits (after a failure). */
+  hint: string;
+}
+
+const RETRY_STATES = new Set(["failed", "destroy_failed"]);
+
+/** Which admin actions the panel shows in a state (whether they are enabled is `controls`). */
+export function panelActions(state: string | null): PanelActions {
+  const s = state ?? "";
+  const retry = RETRY_STATES.has(s);
+  return {
+    start: s === "none",
+    extend: EXTEND_STATES.has(s),
+    extendPrimary: s === "idle-warning",
+    destroy: state !== null && s !== "none" && s !== "stopping",
+    destroyLabel: retry ? "Destroy instance (retry)" : "Destroy instance…",
+    hint: retry ? "Destroy it in the danger zone below, then start again." : "",
+  };
 }

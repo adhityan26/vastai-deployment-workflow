@@ -41,7 +41,6 @@ import {
   editLabel,
   pickReferences,
   referenceHint,
-  CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
   DEFAULT_START_FILTERS,
   REGION_CHOICES,
@@ -136,6 +135,7 @@ import {
   sizeLabel,
   nextSamples,
   stateInfo,
+  panelActions,
   windowSpeed,
   type ApiState,
   type Estimate,
@@ -869,7 +869,7 @@ export function mountApp(doc: Document, env: Env): App {
     return act(async () => {
       const ok = await confirmDialog(
         "Destroy the instance?",
-        ["This stops billing and deletes the instance. Running jobs are lost."],
+        ["This stops billing and deletes the instance. Running jobs are lost.", ...costSoFarLine()],
         "Destroy",
         true,
       );
@@ -923,21 +923,31 @@ export function mountApp(doc: Document, env: Env): App {
   // ---- admin panel ----
 
   const adminPanel = $("admin-panel");
+  const dangerZone = $("danger-zone");
+  const dangerTitle = $("danger-title");
+  let extendWasPrimary = false;
+
+  /** "Cost so far: $0.37." for the destroy confirmation, when an instance has a cost. */
+  function costSoFarLine(): string[] {
+    if (state === null || state.cost_so_far === null) return [];
+    return [`Cost so far: ${clockView(state, Math.max(0, env.now() - fetchedAt)).cost}.`];
+  }
+
+  // The main action (Start or Extend) sits in the panel's admin section; Destroy and the untracked instances sit in
+  // the danger zone at the bottom of the panel, never next to Extend.
   function buildAdmin(): void {
     adminBuilt = true;
-    const title = make("h2", "Controls");
-    title.id = "admin-title";
-    const start = make("button", "Start instance", "primary");
+    const start = make("button", "Start instance…", "primary");
     start.id = "btn-start";
     start.type = "button";
     start.addEventListener("click", () => void onStart());
-    const destroy = make("button", "Destroy instance", "danger");
-    destroy.id = "btn-destroy";
-    destroy.type = "button";
-    destroy.addEventListener("click", () => void onDestroy());
-    const row = make("div", undefined, "row");
-    row.append(start, destroy);
+    const hint = make("p", "", "muted");
+    hint.id = "action-hint";
+    hint.hidden = true;
 
+    const extendBox = make("details", undefined, "extend-box");
+    extendBox.id = "extend-box";
+    const summary = make("summary", "Extend…");
     const extend = make("div", undefined, "extend");
     const kindLabel = make("label", "Extend");
     kindLabel.htmlFor = "extend-kind";
@@ -965,11 +975,47 @@ export function mountApp(doc: Document, env: Env): App {
     const right = make("div");
     right.append(minLabel, minutes);
     extend.append(left, right, go);
+    extendBox.append(summary, extend);
+    adminPanel.replaceChildren(start, extendBox, hint);
 
+    const destroy = make("button", "Destroy instance…", "danger");
+    destroy.id = "btn-destroy";
+    destroy.type = "button";
+    destroy.addEventListener("click", () => void onDestroy());
+    const unknownBox = make("details", undefined, "unknown-box");
+    unknownBox.id = "unknown-box";
+    unknownBox.hidden = true;
+    const unknownSummary = make("summary", "Untracked instances on Vast");
+    unknownSummary.id = "unknown-summary";
     const unknown = make("div", undefined, "unknown");
     unknown.id = "unknown";
     unknown.hidden = true;
-    adminPanel.replaceChildren(title, row, extend, unknown);
+    unknownBox.append(unknownSummary, unknown);
+    dangerZone.replaceChildren(dangerTitle, destroy, unknownBox);
+    extendWasPrimary = false;
+  }
+
+  /** Show the admin actions that fit the state; whether they are enabled stays with `controls`. */
+  function renderActions(c: ReturnType<typeof controls>): void {
+    const a = panelActions(state?.state ?? null);
+    const start = $<HTMLButtonElement>("btn-start");
+    start.hidden = !a.start;
+    start.disabled = !c.canStart;
+    const extendBox = $<HTMLDetailsElement>("extend-box");
+    extendBox.hidden = !a.extend;
+    // Near the idle shutdown Extend opens as the first choice, once: the admin may close it again.
+    if (a.extendPrimary && !extendWasPrimary) extendBox.open = true;
+    extendWasPrimary = a.extendPrimary;
+    const go = $<HTMLButtonElement>("btn-extend");
+    go.disabled = !c.canExtend;
+    go.classList.toggle("primary", a.extendPrimary);
+    setText("action-hint", a.hint);
+    const destroy = $<HTMLButtonElement>("btn-destroy");
+    destroy.hidden = !a.destroy;
+    destroy.disabled = !c.canDestroy;
+    if (destroy.textContent !== a.destroyLabel) destroy.textContent = a.destroyLabel;
+    renderUnknown(state?.unknown ?? []);
+    dangerZone.hidden = !a.destroy && (state?.unknown ?? []).length === 0;
   }
 
   function renderUnknown(list: ApiState["unknown"]): void {
@@ -978,6 +1024,8 @@ export function mountApp(doc: Document, env: Env): App {
     unknownKey = key;
     const box = $("unknown");
     box.hidden = list.length === 0;
+    $("unknown-box").hidden = list.length === 0;
+    $("unknown-summary").textContent = `Untracked instances on Vast (${list.length})`;
     if (list.length === 0) {
       box.replaceChildren();
       return;
@@ -1024,8 +1072,15 @@ export function mountApp(doc: Document, env: Env): App {
     const pct = s.download ? downloadPercent(s.download) : progressPercent(s.progress);
     const info = stateInfo(s.state, pct);
     const line = $("state-line");
-    line.textContent = info.label;
+    // The only live region of the panel: set it only when the words change, so nothing is announced twice.
+    if (line.textContent !== info.label) line.textContent = info.label;
     line.dataset["tone"] = info.tone;
+    const noInstance = s.state === "none" && s.uptime_s === null;
+    $("none-note").hidden = !noInstance;
+    $("key-figures").hidden = noInstance;
+    $("facts").hidden = noInstance;
+    $("key-idle").hidden = s.remaining.idle_s === null;
+    $("key-idle").dataset["tone"] = s.state === "idle-warning" ? "warn" : "";
     const downloading = s.state === "downloading" && (s.progress !== null || s.download !== null);
     $("progress-box").hidden = !downloading;
     if (downloading) {
@@ -2066,7 +2121,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   // ---- boot console (admin only) ----
 
-  const consoleCard = $("console-card");
+  const bootSummary = $("boot-summary");
   const consoleLog = $("console-log");
   const consoleSteps = $("console-steps");
   const consolePauseBtn = $<HTMLButtonElement>("console-pause");
@@ -2077,34 +2132,6 @@ export function mountApp(doc: Document, env: Env): App {
   consoleDownload.href = "#";
   consoleDownload.setAttribute("download", "boot-console.txt");
   $("console-actions").append(consoleDownload);
-
-  // The log part can be folded away; the stepper and the ended notice stay visible. The choice is
-  // only a per-viewer convenience, so storage failures are ignored.
-  const consoleBody = $("console-body");
-  const consoleToggle = $<HTMLButtonElement>("console-toggle");
-  function setConsoleCollapsed(collapsed: boolean, remember: boolean): void {
-    consoleBody.hidden = collapsed;
-    consoleToggle.setAttribute("aria-expanded", String(!collapsed));
-    consoleToggle.textContent = collapsed ? "Show log" : "Hide log";
-    if (!remember) return;
-    try {
-      doc.defaultView?.localStorage.setItem(CONSOLE_COLLAPSED_KEY, collapsed ? "1" : "0");
-    } catch {
-      // Storage unavailable: the choice is just not remembered.
-    }
-  }
-  try {
-    setConsoleCollapsed(doc.defaultView?.localStorage.getItem(CONSOLE_COLLAPSED_KEY) === "1", false);
-  } catch {
-    // Storage unavailable: start expanded.
-  }
-  consoleToggle.addEventListener("click", () => {
-    setConsoleCollapsed(!consoleBody.hidden, true);
-    if (!consoleBody.hidden) {
-      consoleFollow = true;
-      renderConsoleLines();
-    }
-  });
 
   function resetConsole(): void {
     consoleEpoch++;
@@ -2124,7 +2151,7 @@ export function mountApp(doc: Document, env: Env): App {
     consoleLog.replaceChildren();
     consoleSteps.replaceChildren();
     consolePauseBtn.setAttribute("aria-pressed", "false");
-    consoleCard.hidden = true;
+    bootSummary.hidden = true;
   }
 
   function setConsoleStatus(text: string): void {
@@ -2172,8 +2199,10 @@ export function mountApp(doc: Document, env: Env): App {
 
   function renderConsole(): void {
     const p = consolePayload;
+    // The boot summary in the panel (stepper, sentence, ended notice, "View log") shows while the console is
+    // relevant; the log itself is in a dialog. Polling does not depend on the dialog being open.
     const show = consoleCardVisible(state?.role ?? null, p);
-    consoleCard.hidden = !show;
+    bootSummary.hidden = !show;
     if (state) renderAgentNotice(state);
     if (!show || p === null) return;
     renderSteps(p);
@@ -2402,15 +2431,14 @@ export function mountApp(doc: Document, env: Env): App {
       if (creditDue(creditAskedAt, env.now(), creditRunning)) void refreshCredit();
       if (!adminBuilt) buildAdmin();
       adminPanel.hidden = false;
-      $<HTMLButtonElement>("btn-start").disabled = !c.canStart;
-      $<HTMLButtonElement>("btn-destroy").disabled = !c.canDestroy;
-      $<HTMLButtonElement>("btn-extend").disabled = !c.canExtend;
-      renderUnknown(state?.unknown ?? []);
+      renderActions(c);
       renderUsage(state, true);
     } else {
       renderUsage(state, false);
       adminPanel.replaceChildren();
       adminPanel.hidden = true;
+      dangerZone.replaceChildren(dangerTitle);
+      dangerZone.hidden = true;
       adminBuilt = false;
       unknownKey = "";
       creditAskedAt = Number.NEGATIVE_INFINITY;

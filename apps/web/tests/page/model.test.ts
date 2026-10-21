@@ -110,6 +110,7 @@ import {
   creditTone,
   creditToneText,
   layoutMode,
+  panelActions,
   parsePanelPref,
   pillView,
   startCreditWarning,
@@ -1160,5 +1161,20 @@ describe("server panel helpers", () => {
     expect(startCreditWarning(1.07, 1.08)).toBe("Your Vast credit ($1.07) is less than this estimate ($1.08). The instance may stop when the credit runs out.");
     expect(startCreditWarning(-0.2, 1)).toContain("(-$0.20)");
     expect(startCreditWarning(Number.NaN, 1)).toBeNull();
+  });
+});
+
+describe("the panel's actions per state (admin)", () => {
+  it("offers Start without an instance, Extend while it runs (first choice near the idle shutdown), Destroy whenever one exists", () => {
+    expect(panelActions(null)).toEqual({ start: false, extend: false, extendPrimary: false, destroy: false, destroyLabel: "Destroy instance…", hint: "" });
+    expect(panelActions("none")).toMatchObject({ start: true, extend: false, destroy: false });
+    for (const s of ["creating"]) expect(panelActions(s)).toMatchObject({ start: false, extend: false, destroy: true });
+    for (const s of ["booting", "downloading", "ready"]) expect(panelActions(s)).toMatchObject({ start: false, extend: true, extendPrimary: false, destroy: true });
+    expect(panelActions("idle-warning")).toMatchObject({ extend: true, extendPrimary: true, destroy: true });
+    expect(panelActions("stopping")).toMatchObject({ start: false, extend: false, destroy: false });
+    for (const s of ["failed", "destroy_failed"]) {
+      expect(panelActions(s)).toMatchObject({ start: false, extend: false, destroy: true, destroyLabel: "Destroy instance (retry)" });
+      expect(panelActions(s).hint).toBe("Destroy it in the danger zone below, then start again.");
+    }
   });
 });

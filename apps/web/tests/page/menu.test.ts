@@ -139,14 +139,13 @@ describe("the page layout", () => {
     expect(q("#app #tool-nav")).not.toBeNull();
     expect(q("#tool-nav #menu-search")).not.toBeNull();
     expect(q("#page header #menu-open")!.textContent).toBe("Menu");
+    // The status and the boot console moved out of the main column: the server panel and the log dialog.
     const order = [...document.querySelectorAll("#main > section")].map((s) => s.id || s.getAttribute("aria-labelledby"));
-    const at = (id: string) => order.indexOf(id);
-    expect(at("tool-card")).toBe(0);
-    expect(at("tool-card")).toBeLessThan(at("status-title"));
-    expect(at("status-title")).toBeLessThan(at("hist-title"));
-    expect(at("hist-title")).toBeLessThan(at("gallery-card"));
-    expect(at("gallery-card")).toBeLessThan(at("usage-card"));
-    expect(at("usage-card")).toBeLessThan(at("console-card"));
+    expect(order).toEqual(["tool-card", "hist-title", "gallery-card", "usage-card"]);
+    expect(q("#main #status-title")).toBeNull();
+    expect(q("#main #console-card")).toBeNull();
+    expect(q("#app > #status-panel #status-title")).not.toBeNull();
+    expect(q("#app > #console-card")).not.toBeNull();
   });
 });
 

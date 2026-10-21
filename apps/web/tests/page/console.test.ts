@@ -95,17 +95,17 @@ afterEach(() => {
   setHidden(false);
 });
 
-describe("boot console card", () => {
+describe("boot console: the summary in the server panel", () => {
   it("a member never sees the card and never calls the console endpoint", async () => {
     await mount({ state: { role: "member" } });
-    expect(q("#console-card").hidden).toBe(true);
+    expect(q("#boot-summary").hidden).toBe(true);
     await app!.pollConsole();
     expect(consolePaths()).toEqual([]);
   });
 
   it("an admin sees the stepper with a mark and a text label for every status", async () => {
     await mount();
-    expect(q("#console-card").hidden).toBe(false);
+    expect(q("#boot-summary").hidden).toBe(false);
     const items = [...document.querySelectorAll("#console-steps li")];
     expect(items.map((li) => (li as HTMLElement).dataset["status"])).toEqual(["done", "running", "pending", "failed"]);
     expect(items.map((li) => li.querySelector(".mark")!.textContent)).toEqual(["✓", "◐", "○", "✗"]);
@@ -116,7 +116,7 @@ describe("boot console card", () => {
 
   it("the card stays hidden when there is no instance and nothing ended", async () => {
     await mount({ state: { state: "none" }, console: [{ body: consoleBody({ instance: { state: "none", ended: false, ended_reason: null }, phases: [], lines: [], last_seq: 0 }) }] });
-    expect(q("#console-card").hidden).toBe(true);
+    expect(q("#boot-summary").hidden).toBe(true);
   });
 
   it("renders lines with time and source tag, in order", async () => {
@@ -150,7 +150,7 @@ describe("boot console card", () => {
 
   it("stops polling for good on 403 and hides the card", async () => {
     await mount({ console: [{ status: 403, body: { error: { code: "forbidden", message: "no" } } }] });
-    expect(q("#console-card").hidden).toBe(true);
+    expect(q("#boot-summary").hidden).toBe(true);
     expect(timers.some((t) => t.ms === CONSOLE_POLL_MS)).toBe(false);
     await app!.pollConsole();
     await app!.refresh();
@@ -188,7 +188,7 @@ describe("boot console card", () => {
   it("an ended instance shows the reason, keeps its lines and stops polling", async () => {
     const ended = { instance: { state: "none", ended: true, ended_reason: "boot_timeout" } };
     await mount({ state: { state: "none" }, console: [{ body: consoleBody(ended) }] });
-    expect(q("#console-card").hidden).toBe(false);
+    expect(q("#boot-summary").hidden).toBe(false);
     expect(q("#console-ended").hidden).toBe(false);
     expect(q("#console-ended").textContent).toContain("the boot took too long");
     expect(logLines()).toHaveLength(2);
@@ -224,7 +224,7 @@ describe("boot console card", () => {
     release();
     await inflight;
     await flush();
-    expect(q("#console-card").hidden).toBe(true);
+    expect(q("#boot-summary").hidden).toBe(true);
     expect(logLines()).toEqual([]);
   });
 
@@ -254,39 +254,14 @@ describe("boot console card", () => {
 });
 
 describe("boot console controls", () => {
-  it("the log folds away with the toggle, the stepper stays, and the choice is remembered", async () => {
-    window.localStorage.removeItem("vast-comfy.console-collapsed");
+  it("the log lives in a closed dialog: no fold toggle and nothing remembered", async () => {
     await mount();
-    expect(q("#console-body").hidden).toBe(false);
-    expect(q("#console-toggle").getAttribute("aria-expanded")).toBe("true");
-    q<HTMLButtonElement>("#console-toggle").click();
-    expect(q("#console-body").hidden).toBe(true);
-    expect(q("#console-steps").childElementCount).toBeGreaterThan(0);
-    expect(q("#console-toggle").getAttribute("aria-expanded")).toBe("false");
-    expect(q("#console-toggle").textContent).toBe("Show log");
-    expect(window.localStorage.getItem("vast-comfy.console-collapsed")).toBe("1");
-    q<HTMLButtonElement>("#console-toggle").click();
-    expect(q("#console-body").hidden).toBe(false);
-    expect(q("#console-toggle").textContent).toBe("Hide log");
-    expect(window.localStorage.getItem("vast-comfy.console-collapsed")).toBe("0");
-  });
-
-  it("starts folded when it was left folded", async () => {
-    window.localStorage.setItem("vast-comfy.console-collapsed", "1");
-    await mount();
-    expect(q("#console-body").hidden).toBe(true);
-    window.localStorage.removeItem("vast-comfy.console-collapsed");
-  });
-
-  it("the toggle still works when storage refuses writes", async () => {
-    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("blocked");
-    });
-    await mount();
-    q<HTMLButtonElement>("#console-toggle").click();
-    expect(q("#console-body").hidden).toBe(true);
-    spy.mockRestore();
-    window.localStorage.removeItem("vast-comfy.console-collapsed");
+    expect(document.querySelector("#console-toggle")).toBeNull();
+    expect(document.querySelector("#console-body")).toBeNull();
+    expect(q("#console-card").getAttribute("role")).toBe("dialog");
+    expect(q("#console-card").hidden).toBe(true);
+    expect(q("#console-card").contains(q("#console-log"))).toBe(true);
+    expect(window.localStorage.getItem("vast-comfy.console-collapsed")).toBeNull();
   });
 
   it("Pause stops polling and Resume polls again", async () => {
