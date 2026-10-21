@@ -22,6 +22,9 @@ BOOT_LOG_SINK=/proc/1/fd/1
 EXIT_SLOW_NETWORK=14
 # Pause before the one retry of a slow probe (a transient dip), seconds.
 NET_PROBE_RETRY_S=5
+# What the custom instance image (instance/image/Dockerfile) baked; absent on the stock image. Not configurable:
+# the Dockerfile writes exactly this path (a test keeps them equal).
+IMAGE_MARKER=/opt/vastcomfy-image.json  # config-lint: ok (fixed path written by instance/image/Dockerfile)
 
 # Run a command with its output in a file, killed after SECS seconds (no timeout binary; same pattern as
 # failsafe.sh run_with_timeout). Returns 124 when killed.
@@ -226,6 +229,21 @@ net_probe() {
   done
 }
 
+# Custom image: does the image marker vouch for what is configured? `image_marker_check runtime|tailscale args...`
+# prints the reason and returns the helper's code (0 vouches, 3 baked files of another version, anything else
+# not baked here). No marker (the stock image) answers without running anything; a broken helper is just "no".
+image_marker_check() {
+  local reason rc
+  if [ ! -e "$IMAGE_MARKER" ]; then
+    echo "no image marker"
+    return 1
+  fi
+  reason="$(python3 -I "$HERE/agent/vastcomfy_agent/image_marker.py" check "$@" --marker "$IMAGE_MARKER" 2> /dev/null)"
+  rc=$?
+  printf '%s\n' "${reason:-image marker check failed (exit $rc)}"
+  return "$rc"
+}
+
 # Our own venv (the image venv /venv/main belongs to ComfyUI). Editable install: the agent reads
 # contracts/config-schema.yaml from this repository checkout.
 install_agent() {
@@ -237,16 +255,55 @@ install_pinned_vastai() {
   "$PY" -m pip install -q "vastai==${VASTAI_VERSION:-1.8.3}"  # config-lint: ok (needed before the schema can be read; schema default of VASTAI_VERSION)
 }
 
+# The custom image baked the venv with the agent's dependencies (and its build requirements) and the pinned CLI;
+# only the agent package from this checkout is missing. Linked without the network: no index, no dependencies,
+# no isolated build environment.
+baked_runtime() {  # prints the reason; 0 when the baked venv can be used as it is
+  local reason version="${VASTAI_VERSION:-1.8.3}"  # config-lint: ok (before the schema can be read; schema default of VASTAI_VERSION)
+  reason="$(image_marker_check runtime --vastai-version "$version" --venv-dir "$VENV_DIR" \
+    --pyproject "$HERE/agent/pyproject.toml")" || { printf '%s\n' "$reason"; return 1; }
+  if [ ! -x "$PY" ] || [ ! -x "$VENV_DIR/bin/vastai" ]; then
+    echo "baked venv python or vastai missing or not executable"
+    return 1
+  fi
+  printf '%s\n' "$reason"
+}
+
 install_runtime() {
+  local why
+  if why="$(baked_runtime)"; then
+    if "$PY" -m pip install -q --no-index --no-deps --no-build-isolation -e "$HERE/agent"; then
+      echo "bootstrap: install_tools: baked image runtime used ($why); agent linked offline" >&2
+      return 0
+    fi
+    why="offline agent link into the baked venv failed"
+  fi
+  echo "bootstrap: install_tools: installing at boot ($why)" >&2
   install_agent || emergency_destroy agent_install_failed
   install_pinned_vastai || { echo "bootstrap: installing the pinned vastai failed; falling back to the stock CLI" >&2; VASTAI_FALLBACK=1; }
 }
 
-# S2: the image has no Tailscale. Download the pinned static tarball (about 2 s) into TAILSCALE_DIR; the two
-# binaries sit at its top level. Reuses an existing install of the same binaries (restart of the container).
+# S2: the stock image has no Tailscale. Download the pinned static tarball (about 2 s) into TAILSCALE_DIR; the
+# two binaries sit at its top level. The custom image baked it: used as it is when its marker names the configured
+# version and place and both binaries are executable. Otherwise an existing install is reused (a container
+# restart), except baked binaries the marker names as another version, which are replaced by the download.
 install_tailscale() {
-  local arch tmp url
-  [ -x "$TAILSCALED_BIN" ] && [ -x "$TAILSCALE_BIN" ] && return 0
+  local arch tmp url why rc
+  why="$(image_marker_check tailscale --tailscale-version "$TAILSCALE_VERSION" --tailscale-dir "$TAILSCALE_DIR")"
+  rc=$?
+  if [ -x "$TAILSCALED_BIN" ] && [ -x "$TAILSCALE_BIN" ]; then
+    if [ "$rc" -eq 0 ]; then
+      echo "bootstrap: tailscale: baked image Tailscale used ($why)" >&2
+      return 0
+    fi
+    if [ "$rc" -ne 3 ]; then
+      echo "bootstrap: tailscale: existing install reused ($why)" >&2
+      return 0
+    fi
+  elif [ "$rc" -eq 0 ]; then
+    why="baked binaries missing or not executable"
+  fi
+  echo "bootstrap: tailscale: downloading at boot ($why)" >&2
   case "$(uname -m)" in
     x86_64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;

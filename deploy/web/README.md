@@ -754,11 +754,91 @@ checks that it is a PNG/JPEG/WebP and stores it. Plan: `docs/superpowers/plans/2
   needs a matching `memory` in `docker-compose.yml` (and its assertion in `apps/web/tests/deploy.test.ts`).
 - **No thumbnails yet:** the gallery loads the stored images themselves, lazily and a page at a time.
 
+## Custom instance image
+
+The instance boots from `VAST_IMAGE`. By default that is the stock `vastai/comfy:v0.41.0-cuda-12.9-py312`, and
+every boot builds the agent venv (`pip install` of the agent dependencies and the pinned `vastai`) and downloads
+Tailscale (step `install_tools` and step `tailscale`). An optional custom image has these already in it. You build
+and push it yourself to the GitHub Container Registry, as a public image with no secrets in it. No CI workflow
+builds it.
+
+**What is baked** (`instance/image/Dockerfile`, all of it outside `/workspace`):
+- the agent venv at the `VENV_DIR` default, with the agent's third-party dependencies, its build requirements
+  (from `instance/agent/pyproject.toml`) and `vastai==VASTAI_VERSION`. The agent package itself is NOT baked:
+  its code still comes from the repository checkout at `REPO_COMMIT` at every boot;
+- the Tailscale static tarball at the `TAILSCALE_VERSION` default, extracted into the `TAILSCALE_DIR` default
+  (checked against the `.sha256` file published next to it);
+- a marker `/opt/vastcomfy-image.json` that records the base image, the vastai and Tailscale versions, both
+  directories and a hash of the agent dependency set.
+
+**What is not baked:** the repository, ComfyUI custom nodes (phase 2, below), model files, any apt package
+(bootstrap needs nothing the stock image lacks). The entrypoint, user and working directory are the base
+image's. The base is exactly the schema default `VAST_IMAGE`. A Vast host that already has the stock image
+cached pulls only the three small layers on top. A host without it pulls the whole stock image plus these
+layers, which is no slower than today.
+
+**How the boot decides** (`bootstrap.sh`, `install_runtime` and `install_tailscale`): each prints one line
+to the bootstrap output (not yet mirrored to the boot console; HANDOFF Task C):
+- `bootstrap: install_tools: baked image runtime used (...)`: the marker names the configured `VASTAI_VERSION`,
+  the configured `VENV_DIR` and the same agent dependency set as the checked-out `pyproject.toml`, and the venv
+  python and `vastai` are executable. Only the agent is then linked into the venv, offline
+  (`pip install --no-index --no-deps --no-build-isolation -e`). If that link fails, the boot falls back to the
+  full install.
+- `bootstrap: install_tools: installing at boot (<reason>)`: everything else. Examples: the stock image (no
+  marker), an unreadable marker, another vastai version, changed agent dependencies (a newer `REPO_COMMIT`), or
+  a missing or non-executable binary. This is exactly today's install.
+- `bootstrap: tailscale: baked image Tailscale used (...)`: the marker names the configured `TAILSCALE_VERSION`
+  and `TAILSCALE_DIR`, and both binaries are executable.
+- `bootstrap: tailscale: downloading at boot (<reason>)` or `existing install reused (<reason>)`: today's rule
+  (reuse binaries already there, else download). One exception: binaries the marker names as ANOTHER version
+  are downloaded over.
+
+The marker never fails a boot. Without it, the stock image boots exactly as before.
+
+**Tag rule:** `ghcr.io/<owner>/vast-comfy:<base tag>-vastai<VASTAI_VERSION>-ts<TAILSCALE_VERSION>-deps<hash>`,
+where `<hash>` is the first 12 hex digits of the sha256 of the sorted agent dependency set. Every pin is read
+from the schema defaults and `pyproject.toml`, so a changed pin gives a new tag. Rebuild after changing
+`VAST_IMAGE`, `VASTAI_VERSION`, `TAILSCALE_VERSION` or the agent dependencies. Until you rebuild, the old image
+still works: the boot sees the difference and installs at boot.
+
+**Build, push, switch** (from the laptop, against the LOCAL Docker daemon: run `unset DOCKER_HOST` first, so
+the build does not go to the homelab):
+
+    docker login ghcr.io -u <github-user>          # token with write:packages, typed at the prompt
+    scripts/build-image.sh --owner <github-user>   # builds linux/amd64, does not push
+    scripts/build-image.sh --owner <github-user> --push
+
+The script pushes only with `--push`. It refuses to run without `--owner`. It reads and prints no secret. At
+the end it prints the exact line for `.env`, for example `VAST_IMAGE=ghcr.io/<owner>/vast-comfy:<tag>`. After
+the FIRST push, make the package public on GitHub (Packages, `vast-comfy`, Package settings, Change
+visibility, Public). Vast is given no registry credentials. Then put the printed line in `.env` and recreate
+the web service (`docker compose up -d`, see "Deploying"). The next Start uses the custom image. Compare the
+boot console timings with a stock boot.
+
+**Roll back:** remove the `VAST_IMAGE` line from `.env` (or set it back to the stock tag) and recreate the
+web service. The next Start uses the stock image. Nothing in the schema changed: merging this code changes
+nothing in production until you set `VAST_IMAGE`.
+
+**Phase 2 (not done):** bake the ComfyUI-GGUF node and its requirements. This first needs a check of where
+ComfyUI lives inside the image and whether `/workspace` is overlaid at runtime. Model files stay out of the
+image.
+
+**UNVERIFIED (nothing was built, pushed or booted):** the Dockerfile has never been built (the session that
+wrote it had no Docker daemon or registry access). Also unverified:
+- the real boot-time saving;
+- that the base image's `python3 -m venv` and `curl` are the ones bootstrap uses;
+- the `.sha256` file name next to the Tailscale tarball;
+- whether the base image's `/workspace` overlay matters for phase 2;
+- whether Vast pulls a public GHCR image without credentials;
+- whether Vast treats a non-`vastai/` image any differently (the template, the portal, the entrypoint).
+
 ## Already verified
 
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- The custom instance image ("Custom instance image"): never built, pushed, pulled by Vast or booted.
 
 - Slow boots ("Slow boots"): the thresholds were chosen from two measured boots, not tuned on many; the
   probe's early destroy through the stock CLI before `install_tools` (the same path `onstart.sh` relies

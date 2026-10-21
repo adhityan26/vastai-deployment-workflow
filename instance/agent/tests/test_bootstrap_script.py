@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -227,16 +228,22 @@ def fake_vastai(bindir, log, output):
     return write_exec(bindir / "vastai", f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nprintf "{output}"\nexit 0\n')
 
 
-def fake_python3(bindir, log, *, venv_rc=0, agent_rc=0, vastai_rc=0):
-    """python3 -m venv DIR creates DIR/bin/python; that python records pip calls and fails as asked."""
-    venv_python = (
+def fake_venv_python(log, *, agent_rc=0, vastai_rc=0, offline_rc=0):
+    return (
         '#!/bin/sh\n'
         f'printf "venv-python %s\\n" "$*" >> "{log}"\n'
-        f'case "$*" in *" -e "*) exit {agent_rc};; *vastai==*) exit {vastai_rc};; esac\n'
+        f'case "$*" in *--no-index*) exit {offline_rc};; *" -e "*) exit {agent_rc};; *vastai==*) exit {vastai_rc};; esac\n'
         'exit 0\n'
     )
+
+
+def fake_python3(bindir, log, *, venv_rc=0, agent_rc=0, vastai_rc=0):
+    """python3 -m venv DIR creates DIR/bin/python; that python records pip calls and fails as asked.
+    `python3 -I script` (the image marker helper) runs the real interpreter."""
+    venv_python = fake_venv_python(log, agent_rc=agent_rc, vastai_rc=vastai_rc)
     script = (
         '#!/bin/sh\n'
+        f'[ "$1" = "-I" ] && exec "{sys.executable}" "$@"\n'
         f'printf "python3 %s\\n" "$*" >> "{log}"\n'
         f'[ "$1 $2" = "-m venv" ] || exit 1\n'
         f'[ {venv_rc} -eq 0 ] || exit {venv_rc}\n'
@@ -247,7 +254,9 @@ def fake_python3(bindir, log, *, venv_rc=0, agent_rc=0, vastai_rc=0):
     return write_exec(bindir / "python3", script)
 
 
-def source_and_run(tmp_path, snippet, extra_env=None):
+def source_and_run(tmp_path, snippet, extra_env=None, marker=None):
+    """Sources bootstrap.sh and runs the snippet; IMAGE_MARKER points at `marker` (default: a missing file,
+    the stock image)."""
     bindir = tmp_path / "bin"
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "VENV_DIR": str(tmp_path / "venv"),
@@ -255,8 +264,9 @@ def source_and_run(tmp_path, snippet, extra_env=None):
         "STOCK_VASTAI_BIN": str(tmp_path / "no-stock-vastai"),
     }
     env.update(extra_env or {})
-    return subprocess.run([BASH, "-c", f'. "$1"; {snippet}', "_", str(SCRIPT)], env=env, capture_output=True,
-                          text=True, timeout=30, cwd=tmp_path)
+    marker = marker or tmp_path / "no-image-marker.json"
+    return subprocess.run([BASH, "-c", f'. "$1"; IMAGE_MARKER="$2"; {snippet}', "_", str(SCRIPT), str(marker)],
+                          env=env, capture_output=True, text=True, timeout=30, cwd=tmp_path)
 
 
 @pytest.fixture
@@ -992,3 +1002,180 @@ def test_emergency_destroy_prints_one_failed_marker(tmp_path, bindir):
     result = source_and_run(tmp_path, f'BOOT_LOG_SINK="{tmp_path}/none"; emergency_destroy "env_export_failed (x)"')
     assert result.returncode == 1
     assert [l for l in result.stdout.splitlines() if l.startswith("[boot]")] == ["[boot] FAILED: env_export_failed"]
+
+
+# --- custom image: skip the installs the image already baked (instance/image/Dockerfile) -----------------------
+
+def image_marker(tmp_path, **overrides):
+    """A marker as the custom image writes it, for a venv at tmp/venv and Tailscale at tmp/ts."""
+    from vastcomfy_agent import image_marker as im
+
+    values = {"schema": 1, "base_image": schema_default("VAST_IMAGE"),
+              "vastai_version": schema_default("VASTAI_VERSION"), "tailscale_version": "9.9.9",
+              "venv_dir": str(tmp_path / "venv"), "tailscale_dir": str(tmp_path / "ts"),
+              "agent_deps_hash": im.deps_hash(im.agent_deps((INSTANCE / "agent" / "pyproject.toml").read_text()))}
+    values.update(overrides)
+    path = tmp_path / "vastcomfy-image.json"
+    path.write_text(json.dumps({k: v for k, v in values.items() if v is not None}))
+    return path
+
+
+def baked_venv(tmp_path, log, **rcs):
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    write_exec(venv / "python", fake_venv_python(log, **rcs))
+    write_exec(venv / "vastai", "#!/bin/sh\n")
+    return venv
+
+
+def path_lines(result, step):
+    return [line for line in result.stderr.splitlines() if line.startswith(f"bootstrap: {step}:")]
+
+
+
+def full_install_calls(tmp_path):
+    venv = tmp_path / "venv"
+    return [f"python3 -m venv {venv}", f"venv-python -m pip install -q -e {INSTANCE}/agent",
+            f"venv-python -m pip install -q vastai=={schema_default('VASTAI_VERSION')}"]
+
+
+def test_a_baked_runtime_only_links_the_agent_offline(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_python3(bindir, log)
+    baked_venv(tmp_path, log)
+    result = source_and_run(tmp_path, 'install_runtime; echo "fallback=$VASTAI_FALLBACK"', marker=image_marker(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "fallback=0"
+    assert log.read_text().splitlines() == [
+        f"venv-python -m pip install -q --no-index --no-deps --no-build-isolation -e {INSTANCE}/agent"]
+    lines_ = path_lines(result, "install_tools")
+    assert len(lines_) == 1 and "baked image" in lines_[0], result.stderr
+
+
+@pytest.mark.parametrize("case", ["missing_marker", "corrupt_marker", "other_vastai", "configured_vastai",
+                                  "deps_changed", "other_venv", "no_python", "python_not_executable",
+                                  "no_vastai", "vastai_not_executable", "offline_install_fails"])
+def test_anything_short_of_a_matching_bake_installs_at_boot_as_before(tmp_path, bindir, case):
+    log = tmp_path / "calls.log"
+    fake_python3(bindir, log)
+    venv = baked_venv(tmp_path, log, offline_rc=1 if case == "offline_install_fails" else 0)
+    marker = image_marker(tmp_path, **{"other_vastai": {"vastai_version": "0.0.1"},
+                                       "deps_changed": {"agent_deps_hash": "0123456789ab"},
+                                       "other_venv": {"venv_dir": "/elsewhere"}}.get(case, {}))
+    env = {}
+    if case == "missing_marker":
+        marker.unlink()
+    elif case == "corrupt_marker":
+        marker.write_text("{not json")
+    elif case == "configured_vastai":
+        env["VASTAI_VERSION"] = "9.9.9"
+    elif case == "no_python":
+        (venv / "python").unlink()
+    elif case == "python_not_executable":
+        (venv / "python").chmod(0o644)
+    elif case == "no_vastai":
+        (venv / "vastai").unlink()
+    elif case == "vastai_not_executable":
+        (venv / "vastai").chmod(0o644)
+    result = source_and_run(tmp_path, 'install_runtime; echo "fallback=$VASTAI_FALLBACK"', env, marker=marker)
+    assert result.returncode == 0, result.stderr
+    calls = [c for c in log.read_text().splitlines() if "--no-index" not in c]
+    expected = full_install_calls(tmp_path)
+    if case == "configured_vastai":
+        expected[-1] = "venv-python -m pip install -q vastai==9.9.9"
+    assert calls == expected
+    lines_ = path_lines(result, "install_tools")
+    assert len(lines_) == 1 and "installing at boot" in lines_[0], result.stderr
+
+
+def test_the_stock_image_never_runs_the_marker_helper(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_python3(bindir, log)
+    result = source_and_run(tmp_path, "install_runtime")
+    assert result.returncode == 0, result.stderr
+    assert log.read_text().splitlines() == full_install_calls(tmp_path)
+    assert path_lines(result, "install_tools") == ["bootstrap: install_tools: installing at boot (no image marker)"]
+
+
+def test_a_broken_marker_helper_never_fails_the_boot(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_python3(bindir, log)
+    baked_venv(tmp_path, log)
+    # python3 -I fails outright (for example a Python without a working standard library)
+    script = (bindir / "python3").read_text().replace(f'exec "{sys.executable}" "$@"', "exit 70")
+    write_exec(bindir / "python3", script)
+    result = source_and_run(tmp_path, "install_runtime; echo alive", marker=image_marker(tmp_path))
+    assert result.stdout.strip().splitlines()[-1] == "alive"
+    assert [c for c in log.read_text().splitlines() if "--no-index" not in c] == full_install_calls(tmp_path)
+
+
+def baked_tailscale(tmp_path, *, missing=None, not_executable=None):
+    ts = tmp_path / "ts"
+    ts.mkdir()
+    for name in ("tailscale", "tailscaled"):
+        if name != missing:
+            write_exec(ts / name, "#!/bin/sh\n").chmod(0o644 if name == not_executable else 0o755)
+    return ts
+
+
+def python3_delegate(bindir):
+    write_exec(bindir / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+
+
+def test_a_baked_tailscale_of_the_configured_version_is_used_without_a_download(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log)
+    python3_delegate(bindir)
+    baked_tailscale(tmp_path)
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path),
+                            marker=image_marker(tmp_path))
+    assert result.stdout.strip() == "done" and not log.exists(), result.stderr
+    lines_ = path_lines(result, "tailscale")
+    assert len(lines_) == 1 and "baked image" in lines_[0] and "9.9.9" in lines_[0]
+
+
+@pytest.mark.parametrize("case", ["other_version", "missing_binary", "binary_not_executable"])
+def test_a_stale_or_incomplete_baked_tailscale_is_downloaded(tmp_path, bindir, case):
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log)
+    python3_delegate(bindir)
+    baked_tailscale(tmp_path, missing="tailscaled" if case == "missing_binary" else None,
+                    not_executable="tailscale" if case == "binary_not_executable" else None)
+    marker = image_marker(tmp_path, **({"tailscale_version": "9.9.8"} if case == "other_version" else {}))
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path), marker=marker)
+    assert result.stdout.strip() == "done", result.stderr
+    assert "https://pkgs.example/stable/tailscale_9.9.9_" in log.read_text()
+    assert (tmp_path / "ts" / "tailscaled").stat().st_mode & 0o111 and (tmp_path / "ts" / "tailscale").stat().st_mode & 0o111
+    lines_ = path_lines(result, "tailscale")
+    assert len(lines_) == 1 and "downloading at boot" in lines_[0], result.stderr
+
+
+@pytest.mark.parametrize("case", ["missing_marker", "corrupt_marker", "other_dir"])
+def test_without_a_vouching_marker_tailscale_behaves_as_before(tmp_path, bindir, case):
+    """Today's rule: reuse binaries that are there (a container restart), else download."""
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log)
+    python3_delegate(bindir)
+    baked_tailscale(tmp_path)
+    marker = image_marker(tmp_path, **({"tailscale_dir": "/elsewhere"} if case == "other_dir" else {}))
+    if case == "missing_marker":
+        marker.unlink()
+    elif case == "corrupt_marker":
+        marker.write_text("[]")
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path), marker=marker)
+    assert result.stdout.strip() == "done" and not log.exists(), result.stderr
+    lines_ = path_lines(result, "tailscale")
+    assert len(lines_) == 1 and "existing install reused" in lines_[0], result.stderr
+
+
+def test_the_stock_image_tailscale_download_prints_its_path(tmp_path, bindir):
+    log = tmp_path / "calls.log"
+    fake_curl(bindir, log)
+    result = source_and_run(tmp_path, "install_tailscale && echo done", tailscale_env(tmp_path))
+    assert result.stdout.strip() == "done"
+    assert path_lines(result, "tailscale") == ["bootstrap: tailscale: downloading at boot (no image marker)"]
+
+
+def test_the_marker_path_is_a_fixed_path_outside_workspace():
+    line = lines()[index_of("IMAGE_MARKER=")].strip()
+    assert line.startswith("IMAGE_MARKER=/opt/") and "/workspace" not in line and "${" not in line

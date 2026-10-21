@@ -56,6 +56,18 @@ removed by design). Runbook: `deploy/web/README.md` "Menu" (Server panel), "Boot
 jsdom and in headless Chromium at 1280, 1000 and 375 px (light and dark) against a fake state; never on a real phone,
 with iOS safe areas or the on-screen keyboard, with a screen reader, or against a real instance.
 
+## Custom instance image (2026-10-21, branch `feat/custom-image`, local commits, not pushed or deployed)
+
+Phase 1 is ready to build. `instance/image/Dockerfile` (base = the `VAST_IMAGE` schema default) bakes the agent
+venv (dependencies plus pinned `vastai`, not the agent) and the pinned Tailscale tarball outside `/workspace`,
+plus a marker `/opt/vastcomfy-image.json`. `bootstrap.sh` skips those installs only when the marker matches the
+configuration and the binaries are executable; otherwise it installs at boot as before. The owner builds and
+pushes with `scripts/build-image.sh --owner <user> [--push]` and switches with the printed `VAST_IMAGE=` line.
+The schema default `VAST_IMAGE` is unchanged. Runbook: `deploy/web/README.md` "Custom instance image".
+NOTHING was built or booted: the Dockerfile, the GHCR pull from Vast and the boot-time saving are unverified.
+**Phase 2:** bake the ComfyUI-GGUF node and its requirements, after a real instance shows where ComfyUI lives
+inside the image and whether `/workspace` is overlaid at runtime. Model files stay out of the image.
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)
