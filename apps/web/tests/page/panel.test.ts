@@ -488,3 +488,100 @@ describe("the panel as a column (from 1280 px)", () => {
     expect(document.activeElement).toBe(q("#status-title"));
   });
 });
+
+describe("the floating status widget", () => {
+  const widget = () => q<HTMLButtonElement>("#float-status");
+  const tick = () => { const t = [...timers].reverse().find((x) => x.ms === 1_000)!; t.fn(); };
+
+  it("is one button outside the page with a fixed name; its ticking numbers are hidden from screen readers and never live", async () => {
+    await mount();
+    const w = widget();
+    expect(w.type).toBe("button");
+    expect(q("#page").contains(w)).toBe(false);
+    expect(w.getAttribute("aria-controls")).toBe("status-panel");
+    expect(w.getAttribute("aria-label")).toBe("Server status, open panel");
+    expect(w.hasAttribute("aria-live")).toBe(false);
+    expect(w.querySelector("[aria-live]")).toBeNull();
+    expect(w.getAttribute("role")).toBeNull();
+    expect(q(".float-cells").getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("shows uptime, cost so far and idle shutdown while the panel is a closed drawer, and ticks", async () => {
+    await mount();
+    expect(widget().hidden).toBe(false);
+    expect(q("#app").classList.contains("widget-on")).toBe(true);
+    expect(q("#float-uptime").textContent).toBe("1h 12m");
+    expect(q("#float-cost").textContent).toBe("$0.37");
+    expect(q("#float-idle").textContent).toBe("24m 10s");
+    expect(q("#float-idle-cell").hidden).toBe(false);
+    expect(widget().dataset["tone"]).toBe("ok");
+    nowMs += 5_000;
+    tick();
+    expect(q("#float-idle").textContent).toBe("24m 05s");
+    expect(widget().getAttribute("aria-label")).toBe("Server status, open panel");
+  });
+
+  it("leaves the idle cell out when there is no idle shutdown, and hides without an uptime", async () => {
+    await mount({ state: "booting", remaining: { idle_s: null, failsafe_s: 9600, hard_cap_s: 20400 } });
+    expect(widget().hidden).toBe(false);
+    expect(q("#float-idle-cell").hidden).toBe(true);
+    routes["GET /api/state"] = { body: apiState({ state: "none", uptime_s: null, cost_so_far: null }) };
+    await app!.refresh();
+    expect(widget().hidden).toBe(true);
+    expect(q("#app").classList.contains("widget-on")).toBe(false);
+  });
+
+  it("members see it too", async () => {
+    await mount({ role: "member" });
+    expect(widget().hidden).toBe(false);
+  });
+
+  it("is hidden while the panel is a column, and while a drawer, the menu or a confirmation is open", async () => {
+    setWidth(375);
+    await mount();
+    expect(widget().hidden).toBe(false);
+    q("#status-pill").click();
+    expect(widget().hidden).toBe(true);
+    expect(widget().hasAttribute("inert")).toBe(true);
+    key(document.activeElement!, "Escape");
+    expect(widget().hidden).toBe(false);
+    expect(widget().hasAttribute("inert")).toBe(false);
+    q("#menu-open").click();
+    expect(widget().hidden).toBe(true);
+    q("#menu-close").click();
+    expect(widget().hidden).toBe(false);
+    q("#btn-destroy").click();
+    await flush();
+    expect(widget().hidden).toBe(true);
+    q("#modal-cancel").click();
+    await flush();
+    expect(widget().hidden).toBe(false);
+    resize(1280);
+    expect(widget().hidden).toBe(true);
+    resize(1000);
+    expect(widget().hidden).toBe(false);
+  });
+
+  it("opens the drawer and moves the focus to the panel heading; closing gives the focus back to it", async () => {
+    await mount();
+    widget().focus();
+    widget().click();
+    expect(panel().classList.contains("open")).toBe(true);
+    expect(document.activeElement).toBe(q("#status-title"));
+    q("#panel-close").click();
+    expect(widget().hidden).toBe(false);
+    expect(document.activeElement).toBe(widget());
+  });
+
+  it("the Start dialog hides it too", async () => {
+    await mount({ state: "none", uptime_s: 30 }, { "GET /api/gpus": { body: { gpus: [] } } });
+    expect(widget().hidden).toBe(false);
+    q("#btn-start").click();
+    await flush();
+    expect(q("#modal").hidden).toBe(false);
+    expect(widget().hidden).toBe(true);
+    q("#modal-cancel").click();
+    await flush();
+    expect(widget().hidden).toBe(false);
+  });
+});

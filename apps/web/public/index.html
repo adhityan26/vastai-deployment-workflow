@@ -241,6 +241,14 @@
     </div>
     <p id="console-status" class="muted" role="status"></p>
   </section>
+  <button id="float-status" type="button" class="float-status" aria-controls="status-panel" aria-label="Server status, open panel" data-tone="idle" hidden>
+    <span class="dot" aria-hidden="true"></span>
+    <span class="float-cells" aria-hidden="true">
+      <span id="float-uptime-cell"><span class="cell-label">Up</span><span id="float-uptime">&mdash;</span></span>
+      <span id="float-cost-cell"><span class="cell-label">Cost</span><span id="float-cost">&mdash;</span></span>
+      <span id="float-idle-cell"><span class="cell-label">Idle in</span><span id="float-idle">&mdash;</span></span>
+    </span>
+  </button>
 </div>
 
 <div id="modal" class="modal" hidden>

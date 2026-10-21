@@ -137,6 +137,7 @@ import {
   stateInfo,
   panelActions,
   layoutMode,
+  widgetVisible,
   type LayoutMode,
   countdown,
   creditTone,
@@ -463,13 +464,19 @@ export function mountApp(doc: Document, env: Env): App {
       modalOk.className = danger ? "danger" : "primary";
       closeModal = (ok) => {
         closeModal = null;
-        modal.hidden = true;
+        setModalOpen(false);
         restoreFocus?.focus();
         resolve(ok);
       };
-      modal.hidden = false;
+      setModalOpen(true);
       modalCancel.focus();
     });
+  }
+
+  /** Show or hide the confirmation layer (the floating widget never shows over it). */
+  function setModalOpen(open: boolean): void {
+    modal.hidden = !open;
+    renderWidget();
   }
   modalOk.addEventListener("click", () => {
     if (okHandler !== null) void okHandler();
@@ -685,7 +692,7 @@ export function mountApp(doc: Document, env: Env): App {
         closeModal = null;
         okHandler = null;
         modalOk.disabled = false;
-        modal.hidden = true;
+        setModalOpen(false);
         restoreFocus?.focus();
         resolve();
       };
@@ -733,7 +740,7 @@ export function mountApp(doc: Document, env: Env): App {
         }
       };
 
-      modal.hidden = false;
+      setModalOpen(true);
       modalCancel.focus();
 
       const gpusPath = (): string => {
@@ -1068,6 +1075,10 @@ export function mountApp(doc: Document, env: Env): App {
     $("f-idle").textContent = c.idle;
     $("f-failsafe").textContent = c.failsafe;
     $("f-hardcap").textContent = c.hardCap;
+    $("float-uptime").textContent = c.uptime;
+    $("float-cost").textContent = c.cost;
+    $("float-idle").textContent = c.idle;
+    $("float-idle-cell").hidden = state.remaining.idle_s === null;
     renderPill(Math.max(0, env.now() - fetchedAt));
   }
 
@@ -1079,6 +1090,7 @@ export function mountApp(doc: Document, env: Env): App {
     const text = $("status-pill-text");
     if (text.textContent !== view.label) text.textContent = view.label;
     $("status-pill").dataset["tone"] = view.tone;
+    $("float-status").dataset["tone"] = view.tone;
   }
 
   // While the boot console says a phase is running, a plain sentence replaces the "agent cannot
@@ -1658,7 +1670,18 @@ export function mountApp(doc: Document, env: Env): App {
     panelHide.hidden = !column;
     panelClose.hidden = column;
     statusPill.setAttribute("aria-expanded", String(column || overlay === "panel"));
+    renderWidget();
   }
+
+  /** The floating widget: shown while the panel is off screen, an instance has an uptime and nothing covers the page. */
+  const floatBtn = $<HTMLButtonElement>("float-status");
+  function renderWidget(): void {
+    const show = widgetVisible({ mode: currentMode(), collapsed: false, overlayOpen: overlay !== null || !modal.hidden, uptime: state?.uptime_s ?? null });
+    floatBtn.hidden = !show;
+    floatBtn.toggleAttribute("inert", overlay !== null);
+    screens.app.classList.toggle("widget-on", show);
+  }
+  floatBtn.addEventListener("click", () => openPanelFrom(floatBtn));
 
   doc.defaultView?.addEventListener("resize", () => {
     if (overlay === "panel" && panelIsColumn()) setOverlay(null, false);
@@ -2569,6 +2592,7 @@ export function mountApp(doc: Document, env: Env): App {
     }
     $("f-credit-box").hidden = !c.showAdmin;
     renderCredit();
+    renderWidget();
     if (c.showAdmin) {
       if (creditDue(creditAskedAt, env.now(), creditRunning)) void refreshCredit();
       if (!adminBuilt) buildAdmin();
