@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Design: server panel, header credit, floating widget</title>
+<style>
+:root{color-scheme:light dark;--bg:#f5f6f8;--surface:#fff;--text:#1a1d23;--muted:#5b6270;--border:#d4d8e0;--accent:#2f5bea;--accent-text:#fff;
+--ok-bg:#e3f5e8;--ok-fg:#14532d;--warn-bg:#fff3d6;--warn-fg:#6b4400;--bad-bg:#fde4e4;--bad-fg:#7f1d1d;--busy-bg:#e4ecfd;--busy-fg:#1e3a8a}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--surface:#1e2127;--text:#eceff4;--muted:#a3abba;--border:#384050;--accent:#6c8cff;--accent-text:#0b1020;
+--ok-bg:#12331f;--ok-fg:#b7f0c8;--warn-bg:#3d2f08;--warn-fg:#ffe2a0;--bad-bg:#4a1717;--bad-fg:#ffc9c9;--busy-bg:#14264f;--busy-fg:#c7d6ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,sans-serif;padding:16px}
+h1{font-size:1.25rem;margin:0 0 4px}h2{font-size:1rem;margin:0 0 6px}p{margin:0 0 8px}.muted{color:var(--muted)}
+.bar{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:10px 0}.bar b{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.seg{display:inline-flex;gap:4px}.seg button,.btn{font:inherit;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;padding:6px 12px;min-height:36px;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}
+.btn.primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn.danger{border-color:var(--bad-fg);color:var(--bad-fg)}.btn:disabled{opacity:.5}
+.stage{display:flex;justify-content:center;overflow:auto;padding:6px 0 18px}
+.frame{position:relative;height:660px;border:2px solid var(--border);border-radius:12px;background:var(--bg);overflow:hidden;flex:none}
+.frame[data-vp=desktop]{width:1280px}.frame[data-vp=tablet]{width:1000px}.frame[data-vp=phone]{width:375px}
+.app{position:absolute;inset:0;display:grid;grid-template-columns:250px minmax(0,1fr) auto;grid-template-rows:56px 1fr}
+[data-vp=phone] .app{grid-template-columns:minmax(0,1fr)}
+.side{grid-row:1/3;border-right:1px solid var(--border);background:var(--surface);padding:12px;overflow:hidden}
+[data-vp=phone] .side{display:none}
+.side .grp{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 4px}
+.side .it{padding:8px 10px;border-radius:8px}.side .it.on{background:var(--busy-bg);color:var(--busy-fg);font-weight:600}
+.hdr{grid-column:2/4;display:flex;align-items:center;gap:10px;padding:0 14px;background:var(--surface);border-bottom:1px solid var(--border);min-width:0}
+[data-vp=phone] .hdr{grid-column:1}.hdr h1{margin:0;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.pill{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--border);border-radius:999px;padding:4px 12px;min-height:36px;background:var(--surface);font:inherit;color:var(--text);cursor:pointer;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}.tone-ok .dot{background:#1f9d55}.tone-busy .dot{background:#2f5bea}.tone-warn .dot{background:#d99a00}.tone-bad .dot{background:#d33}
+.credit{border-radius:999px;padding:4px 12px;background:var(--ok-bg);color:var(--ok-fg);white-space:nowrap}.credit.warn{background:var(--warn-bg);color:var(--warn-fg)}.credit.bad{background:var(--bad-bg);color:var(--bad-fg)}
+.menu{display:none}[data-vp=phone] .menu,[data-vp=tablet] .menu{display:none}[data-vp=phone] .menu{display:inline-flex}
+.who{white-space:nowrap}[data-vp=phone] .who span{display:none}
+.main{grid-column:2;overflow:auto;padding:14px;display:grid;gap:12px;align-content:start;min-width:0;padding-bottom:84px}
+[data-vp=phone] .main{grid-column:1}.main>*{max-width:48rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px}
+.ta{border:1px solid var(--border);border-radius:8px;padding:10px;min-height:58px;color:var(--muted)}
+.imgs{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.imgs i{display:block;aspect-ratio:1;border-radius:8px;background:linear-gradient(135deg,var(--busy-bg),var(--ok-bg))}
+.panel{grid-column:3;grid-row:2;width:288px;background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.panel .scroll{overflow:auto;padding:14px;flex:1;display:grid;gap:12px;align-content:start}.panel .foot{border-top:1px solid var(--border);padding:12px 14px;display:grid;gap:8px;background:var(--surface)}
+.panel .top{display:flex;justify-content:space-between;align-items:center;padding:10px 14px 0}
+.state{font-weight:700;padding:8px 10px;border-radius:8px;background:var(--bg)}.tone-ok.state{background:var(--ok-bg);color:var(--ok-fg)}.tone-busy.state{background:var(--busy-bg);color:var(--busy-fg)}.tone-warn.state{background:var(--warn-bg);color:var(--warn-fg)}.tone-bad.state{background:var(--bad-bg);color:var(--bad-fg)}
+.alert{padding:8px 10px;border-radius:8px;font-size:.9rem}.alert.bad{background:var(--bad-bg);color:var(--bad-fg)}.alert.warn{background:var(--warn-bg);color:var(--warn-fg)}
+.big{display:grid;grid-template-columns:1fr 1fr;gap:8px}.big div{border:1px solid var(--border);border-radius:8px;padding:8px}.big div.wide{grid-column:1/3}.big small{display:block;color:var(--muted);font-size:.75rem}.big b{font-size:1.2rem;font-variant-numeric:tabular-nums}
+.big div.warnbox{border-color:#d99a00;background:var(--warn-bg);color:var(--warn-fg)}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:.88rem}.facts dt{color:var(--muted)}.facts dd{margin:0;text-align:right}
+progress{width:100%}
+.rail{display:none}
+.steps{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}.steps li{font-size:.78rem;padding:3px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted)}.steps li.done{background:var(--ok-bg);color:var(--ok-fg);border-color:transparent}.steps li.cur{background:var(--busy-bg);color:var(--busy-fg);border-color:transparent;font-weight:700}
+.danger-zone{border-top:1px solid var(--bad-fg);padding:12px 14px;display:grid;gap:8px;background:var(--surface)}.danger-zone h3{margin:0;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--bad-fg)}
+.logdlg{position:absolute;inset:0;z-index:25;display:flex;flex-direction:column;background:var(--surface)}
+[data-vp=desktop] .logdlg,[data-vp=tablet] .logdlg{inset:24px 48px;border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.logdlg header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border)}
+.logdlg pre{flex:1;margin:0;padding:12px 14px;overflow:auto;font:.78rem/1.5 ui-monospace,Menlo,monospace;background:var(--bg);white-space:pre-wrap;overflow-wrap:anywhere}
+.logdlg footer{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;border-top:1px solid var(--border)}
+.panel.drawer{position:absolute;z-index:20;top:0;bottom:0;right:0;width:min(22rem,92%);box-shadow:-8px 0 24px rgba(0,0,0,.25)}
+.back{position:absolute;inset:0;z-index:15;background:rgba(0,0,0,.45)}
+.fab{position:absolute;right:12px;bottom:12px;z-index:12;display:flex;gap:10px;align-items:center;min-height:44px;padding:6px 14px;border-radius:999px;border:1px solid var(--border);background:var(--surface);box-shadow:0 4px 16px rgba(0,0,0,.2);font:inherit;color:var(--text);cursor:pointer;font-variant-numeric:tabular-nums;max-width:calc(100% - 24px)}
+.fab.tone-warn{border-color:#d99a00}.fab.tone-bad{border-color:#d33}
+[data-vp=phone] .fab span.l{display:none}
+.note{font-size:.88rem;color:var(--muted);max-width:70rem;margin:0 auto}.legend{max-width:70rem;margin:8px auto;display:grid;gap:6px}
+.legend li{margin-left:18px}
+</style></head><body>
+<h1>Design: server panel (right), credit in the header, floating widget</h1>
+<p class="muted">Prototype statis untuk review. Bukan kode aplikasi: ubah tombol di bawah untuk melihat layar, state, peran, dan perilaku panel. Tidak ada yang tersambung ke server.</p>
+<div class="bar"><b>Screen</b><span class="seg" id="s-vp"></span><b>State</b><span class="seg" id="s-state"></span><b>Role</b><span class="seg" id="s-role"></span></div>
+<div class="bar"><b>Panel</b><button class="btn" id="b-collapse"></button><span class="muted" id="hint"></span></div>
+<div class="stage"><div class="frame" id="frame" data-vp="desktop"><div class="app" id="app"></div></div></div>
+<div class="legend note">
+<b>Cara membaca</b>
+<ul><li><b>Desktop (1280)</b>: sidebar 250 + konten + panel kanan 288 px (sticky, scroll sendiri). Tombol "Hide" menyembunyikan panel dan memunculkan widget mengambang.</li>
+<li><b>Tablet (1000)</b>: tidak muat tiga kolom. Panel menjadi drawer kanan yang dibuka dari pil status di header; saat tertutup, widget mengambang tampil.</li>
+<li><b>Phone (375)</b>: header = Menu, judul, pil, Logout (ikon). Kredit admin menjadi baris pertama drawer.</li>
+<li><b>Panel, urutan atas ke bawah</b>: state, peringatan/progres, tiga angka utama, aksi utama (Start/Extend), ringkasan boot (stepper + kalimat + tombol "View log"), detail, lalu <b>Danger zone</b> sebagai section sendiri di dasar panel (Destroy + instance tak terlacak), selalu terlihat.</li><li><b>Boot log</b>: tidak lagi di kolom tengah. "View log" membuka dialog layar penuh (di HP memenuhi layar) berisi log, Pause, Copy, Clear, Download. Admin saja.</li><li><b>Dialog Start</b> (tidak digambar): menampilkan peringatan kalau kredit lebih kecil dari estimasi biaya maksimum.</li>
+<li><b>Member</b>: melihat state, angka, dan widget; tanpa kredit, aksi, console, dan footer bahaya.</li></ul></div>
+<script>
+const $=(s,r=document)=>r.querySelector(s);
+const S={vp:'desktop',state:'ready',role:'admin',collapsed:false,drawer:false,log:false};
+const STATES={
+ none:{label:'No instance running',pill:'Stopped',tone:'idle',up:null,cost:null,idle:null,price:'—',gpu:'—'},
+ booting:{label:'Downloading models',pill:'Booting 42%',tone:'busy',up:'4m 12s',cost:'$0.02',idle:null,price:'$0.31/hour',gpu:'RTX 3090 · Quebec, CA',progress:42},
+ ready:{label:'Ready',pill:'Ready',tone:'ok',up:'1h 12m',cost:'$0.37',idle:'24m 10s',price:'$0.31/hour',gpu:'RTX 3090 · Quebec, CA'},
+ idle:{label:'Idle shutdown soon',pill:'Idle 3m',tone:'warn',up:'2h 05m',cost:'$0.65',idle:'2m 41s',price:'$0.31/hour',gpu:'RTX 3090 · Quebec, CA'},
+ failed:{label:'Failed',pill:'Failed',tone:'bad',up:'9m 30s',cost:'$0.05',idle:null,price:'$0.31/hour',gpu:'RTX 3090 · Quebec, CA',alert:['bad','Boot failed: the download was too slow (slow_download). Destroy it and start another machine.']}};
+const CREDIT={ready:{t:'$4.54',c:''},idle:{t:'$1.10 low',c:'warn'},none:{t:'$4.54',c:''},booting:{t:'$4.54',c:''},failed:{t:'-$0.20',c:'bad'}};
+function segs(el,opts,key){el.innerHTML='';for(const [v,l] of opts){const b=document.createElement('button');b.textContent=l;b.setAttribute('aria-pressed',S[key]===v);b.onclick=()=>{S[key]=v;if(key==='vp'){S.drawer=false}draw()};el.append(b)}}
+function panelHtml(drawer){
+ const st=STATES[S.state],adm=S.role==='admin';const run=S.state!=='none';
+ const credit=adm&&S.vp==='phone'?`<div class="alert" style="${CREDIT[S.state].c==='warn'?'background:var(--warn-bg);color:var(--warn-fg)':CREDIT[S.state].c==='bad'?'background:var(--bad-bg);color:var(--bad-fg)':'background:var(--ok-bg);color:var(--ok-fg)'}">Vast credit: <b>${CREDIT[S.state].t}</b></div>`:'';
+ const alert=st.alert?`<div class="alert ${st.alert[0]}">${st.alert[1]}</div>`:'';
+ const prog=st.progress?`<div><progress max="100" value="${st.progress}"></progress><div class="muted" style="font-size:.85rem">6.1 / 14.6 GB · file 2 of 3 · 38 MB/s · about 5 min left</div></div>`:'';
+ const key=run?`<div class="big"><div><small>Uptime</small><b>${st.up}</b></div><div><small>Cost so far</small><b>${st.cost}</b></div>${st.idle?`<div class="wide ${S.state==='idle'?'warnbox':''}"><small>Idle shutdown in</small><b>${st.idle}</b></div>`:''}</div>`:'<p class="muted">Nothing is billed while no instance exists.</p>';
+ let actions='';
+ if(adm){actions=S.state==='none'?'<button class="btn primary">Start instance…</button>':
+  S.state==='idle'?'<button class="btn primary">Extend idle +30 min</button>':
+  S.state==='failed'?'<p class="muted" style="font-size:.88rem">Destroy it below, then start again.</p>':
+  `<details ${S.state==='idle'?'open':''}><summary class="btn" style="display:block">Extend…</summary><p class="muted" style="margin:8px 0 0;font-size:.88rem">Idle shutdown or failsafe, minutes: [ 30 ] <button class="btn">Extend</button></p></details>`}
+ const consoleBlock=adm&&run?`<div class="cblock"><ol class="steps"><li class="done">1 Offer</li><li class="done">2 Probe</li><li class="${S.state==='booting'?'cur':'done'}">3 Models</li><li class="${S.state==='booting'?'':'done'}">4 Start</li><li class="${S.state==='booting'?'':'done'}">5 Ready</li></ol><p class="muted" style="margin:8px 0;font-size:.88rem">${S.state==='failed'?'Stopped at step 3: models (download too slow).':S.state==='booting'?'Step 3 of 5: downloading models.':'Booted in 6m 40s.'}</p><button class="btn" data-act="log" style="width:100%" aria-haspopup="dialog">View log</button></div>`:'';
+ const facts=run?`<dl class="facts"><dt>Price</dt><dd>${st.price}</dd><dt>GPU</dt><dd>${st.gpu}</dd><dt>Failsafe in</dt><dd>2h 40m</dd><dt>Hard cap in</dt><dd>5h 40m</dd><dt>Queue</dt><dd>0 running · 0 waiting</dd><dt>VRAM</dt><dd>12.0 / 24.0 GB</dd></dl>`:'';
+ const foot=adm&&run?`<div class="danger-zone"><h3>Danger zone</h3><button class="btn danger">${S.state==='failed'?'Destroy instance (retry)':'Destroy instance…'}</button><details><summary class="muted" style="font-size:.85rem">Untracked instances on Vast (1)</summary><p class="muted" style="font-size:.85rem;margin:6px 0 0">#123456 · running · $0.30/h <button class="btn danger" style="min-height:30px">Destroy</button></p></details></div>`:'';
+ return `<div class="top"><h2>Server</h2><span>${drawer?'<button class="btn" data-act="close" aria-label="Close">✕</button>':'<button class="btn" data-act="collapse">Hide ›</button>'}</span></div>
+ <div class="scroll">${credit}<div class="state tone-${st.tone}">● ${st.label}</div>${alert}${prog}${key}${actions}${consoleBlock}${facts}</div>${foot}`;
+}
+function draw(){
+ const f=$('#frame');f.dataset.vp=S.vp;const st=STATES[S.state],adm=S.role==='admin';
+ const panelVisible=S.vp==='desktop'&&!S.collapsed;
+ const showDrawer=S.vp!=='desktop'&&S.drawer;
+ const fab=!panelVisible&&!showDrawer&&!S.log&&S.state!=='none';
+ const side=`<div class="side"><b>Image generator</b><div class="grp">Create</div><div class="it on">Generate</div><div class="it">Portrait photo</div><div class="it">Anime</div><div class="grp">Edit</div><div class="it">Edit images</div><div class="it">Face swap</div><div class="grp">Enhance</div><div class="it">Upscale</div></div>`;
+ const creditPill=adm&&S.vp!=='phone'?`<span class="credit ${CREDIT[S.state].c}" title="Vast credit">Credit ${CREDIT[S.state].t}</span>`:'';
+ const hdr=`<div class="hdr"><button class="btn menu">☰ Menu</button><h1>Generate</h1><button class="pill tone-${st.tone}" data-act="pill"><span class="dot"></span>${st.pill}</button>${creditPill}<span class="who"><span>Ayu · ${adm?'admin':'member'} </span><button class="btn">${S.vp==='phone'?'⎋':'Logout'}</button></span></div>`;
+ const main=`<div class="main"><div class="card"><h2>Generate</h2><div class="ta">Describe the image…</div><p style="margin:10px 0 0"><button class="btn primary">Generate</button></p></div><div class="card"><h2>Results</h2><div class="imgs"><i></i><i></i></div></div></div>`;
+ const panel=panelVisible?`<aside class="panel" id="panel">${panelHtml(false)}</aside>`:'';
+ const drawer=showDrawer?`<div class="back" data-act="close"></div><aside class="panel drawer" id="panel">${panelHtml(true)}</aside>`:'';
+ const fabHtml=fab?`<button class="fab tone-${st.tone==='idle'?'':st.tone}" data-act="fab" aria-label="Server status, open panel"><span class="dot" style="background:currentColor"></span><span>${st.up||'—'}</span><span>${st.cost||'—'}</span>${st.idle?`<span><span class="l">idle </span>${st.idle.replace(/ \d+s$/,'')}</span>`:''}</button>`:'';
+ const logHtml=S.log&&adm?`<div class="logdlg" role="dialog" aria-modal="true" aria-label="Boot log"><header><b>Boot log</b><button class="btn" data-act="logclose" aria-label="Close">✕</button></header><pre>[boot] step 1/9: offer
+[boot] step 2/9: net_probe  48 MiB in 1.1 s (43.6 MB/s)  ok
+[boot] step 3/9: models  qwen-image-2.1-UC-Q4_K_M.gguf  4 ranges
+[agent] download 1.2 / 4.6 GB  38 MB/s
+[agent] download 3.9 / 4.6 GB  41 MB/s
+[agent] verified size 4604558112
+[boot] step 4/9: comfyui start ...
+</pre><footer><button class="btn">Pause</button><button class="btn">Copy</button><button class="btn">Clear view</button><button class="btn">Download .txt</button><span class="muted" style="align-self:center">follows the end · 300 lines kept</span></footer></div>`:'';
+ $('#app').innerHTML=side+hdr+main+panel+drawer+fabHtml+logHtml;
+ segs($('#s-vp'),[['desktop','Desktop 1280'],['tablet','Tablet 1000'],['phone','Phone 375']],'vp');
+ segs($('#s-state'),[['none','Stopped'],['booting','Booting'],['ready','Ready'],['idle','Idle warning'],['failed','Failed']],'state');
+ segs($('#s-role'),[['admin','Admin'],['member','Member']],'role');
+ const bc=$('#b-collapse');bc.textContent=S.collapsed?'Show panel':'Hide panel';bc.disabled=S.vp!=='desktop';
+ $('#hint').textContent=S.vp==='desktop'?'Hide panel → widget mengambang di kanan bawah.':'Di layar ini panel adalah drawer: klik pil status atau widget untuk membukanya.';
+ for(const el of document.querySelectorAll('[data-act]'))el.onclick=()=>{const a=el.dataset.act;
+  if(a==='collapse'){S.collapsed=true}else if(a==='log'){S.log=true;if(S.vp!=='desktop')S.drawer=false}else if(a==='logclose'){S.log=false}else if(a==='close'){S.drawer=false}else if(a==='pill'||a==='fab'){if(S.vp==='desktop'){S.collapsed=false}else{S.drawer=true}}draw()};
+}
+$('#b-collapse').onclick=()=>{S.collapsed=!S.collapsed;draw()};
+draw();
+</script></body></html>

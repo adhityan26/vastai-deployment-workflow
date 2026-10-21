@@ -20,17 +20,33 @@ export const ICONS: Readonly<Record<string, readonly string[]>> = {
   brush: ["M19 3l2 2-9 9-2-2z", "M10 12c-3 0-4.5 1.8-4.5 4.2S4.3 19.6 3 20c2.8 1.6 8.4 1.3 9-4.6"],
 };
 
+/**
+ * Icons of the page's own controls (not offered to the profile, so not part of the menu set above). Also a closed set:
+ * a name outside it draws nothing.
+ */
+export const UI_ICONS: Readonly<Record<string, readonly string[]>> = {
+  logout: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "M16 17l5-5-5-5", "M21 12H9"],
+};
+
 /** The icon drawn for a name outside the set. */
 export const DEFAULT_ICON = "sparkles";
 
 /** A decorative SVG icon (hidden from assistive technology: the entry's title says what it is). */
 export function iconNode(doc: Document, name: string): SVGSVGElement {
+  return svgNode(doc, Object.hasOwn(ICONS, name) ? ICONS[name]! : ICONS[DEFAULT_ICON]!);
+}
+
+/** A decorative icon of a page control (its button carries the text or label). */
+export function uiIconNode(doc: Document, name: string): SVGSVGElement {
+  return svgNode(doc, Object.hasOwn(UI_ICONS, name) ? UI_ICONS[name]! : []);
+}
+
+function svgNode(doc: Document, paths: readonly string[]): SVGSVGElement {
   const svg = doc.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
   svg.setAttribute("class", "icon");
-  const paths = Object.hasOwn(ICONS, name) ? ICONS[name]! : ICONS[DEFAULT_ICON]!;
   for (const d of paths) {
     const path = doc.createElementNS(SVG_NS, "path");
     path.setAttribute("d", d);

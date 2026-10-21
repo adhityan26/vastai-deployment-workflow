@@ -51,7 +51,6 @@ const BYTES_PER_KB = 1e3;
 const MAX_GPU_NAME = 64; // the API refuses longer names
 // Where the last GPU choice is remembered in the browser (only a model name, no secret).
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
-export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
 export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // The menu entry the user chose last (an entry id only; checked against the current menu before use).
 export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
@@ -1681,4 +1680,107 @@ export function formatBytes(bytes: number): string {
   if (bytes >= MB) return `${(bytes / MB).toFixed(1)} MB`;
   if (bytes >= KB) return `${(bytes / KB).toFixed(1)} KB`;
   return `${Math.max(0, Math.floor(bytes))} B`;
+}
+
+// ---- server panel, header pill, floating widget ----
+
+// The panel beside the page is remembered per browser: "open" or "collapsed" (any other value means open).
+export const PANEL_STORAGE_KEY = "vast-comfy.panel"; // config-lint: ok (browser storage key, not configuration)
+// Layout rule (the same breakpoints as style.css): three columns from 1280 px, the panel is a drawer below that,
+// and below 900 px the menu is a drawer too.
+const PANEL_WIDE_MIN_PX = 1280;
+const MENU_WIDE_MIN_PX = 900;
+/** About two hours at the current price, but never less than this, is "low". */
+const CREDIT_LOW_HOURS = 2;
+const CREDIT_LOW_MIN_USD = 1;
+
+export type LayoutMode = "wide" | "medium" | "narrow";
+export type PanelPref = "open" | "collapsed";
+export type CreditTone = "ok" | "warn" | "bad" | "neutral";
+
+/** "wide": sidebar, page and panel side by side; "medium": the panel is a drawer; "narrow": the menu is a drawer too. */
+export function layoutMode(width: number): LayoutMode {
+  if (!Number.isFinite(width)) return "narrow";
+  if (width >= PANEL_WIDE_MIN_PX) return "wide";
+  return width >= MENU_WIDE_MIN_PX ? "medium" : "narrow";
+}
+
+/** The stored panel choice; only the exact word "collapsed" collapses it. */
+export function parsePanelPref(text: string | null): PanelPref {
+  return text === "collapsed" ? "collapsed" : "open";
+}
+
+/** Used up at or below zero; low under about two hours at the current price (at least $1); neutral when unknown. */
+export function creditTone(credit: number | null, dph: number | null): CreditTone {
+  if (credit === null || !Number.isFinite(credit)) return "neutral";
+  if (credit <= 0) return "bad";
+  const price = dph !== null && Number.isFinite(dph) && dph > 0 ? dph : 0;
+  return credit < Math.max(CREDIT_LOW_MIN_USD, CREDIT_LOW_HOURS * price) ? "warn" : "ok";
+}
+
+/** The word shown next to the credit, so the tone is never colour alone. */
+export function creditToneText(tone: CreditTone): string {
+  return tone === "warn" ? "low" : tone === "bad" ? "used up" : "";
+}
+
+const BOOTING_STATES = new Set(["creating", "booting", "downloading"]);
+const PILL_LABELS: Record<string, string> = {
+  none: "Stopped",
+  ready: "Ready",
+  stopping: "Stopping",
+  failed: "Failed",
+  destroy_failed: "Destroy failed",
+};
+
+/** The header pill: a short label ("Ready", "Booting 42%", "Idle 3m", "Stopped", "Failed") and the state's tone. */
+export function pillView(state: string | null, percent: number | null, idleSeconds: number | null): { label: string; tone: Tone } {
+  if (state === null) return { label: "Loading", tone: "idle" };
+  const tone = stateInfo(state).tone;
+  if (BOOTING_STATES.has(state)) return { label: percent === null ? "Booting" : `Booting ${percent}%`, tone };
+  if (state === "idle-warning") {
+    return { label: idleSeconds === null ? "Idle soon" : `Idle ${Math.ceil(Math.max(0, idleSeconds) / 60)}m`, tone };
+  }
+  return { label: PILL_LABELS[state] ?? "Unknown", tone };
+}
+
+/**
+ * The floating status widget shows while the panel is not on screen (collapsed at the wide layout, or a closed drawer
+ * below it), an instance has an uptime, and no overlay (a drawer, the log or a confirm dialog) covers the page.
+ */
+export function widgetVisible(v: { mode: LayoutMode; collapsed: boolean; overlayOpen: boolean; uptime: number | null }): boolean {
+  const panelOnScreen = v.mode === "wide" && !v.collapsed;
+  return !panelOnScreen && v.uptime !== null && !v.overlayOpen;
+}
+
+/** A warning for the Start dialog when the known credit is below the estimate's most; null otherwise. */
+export function startCreditWarning(credit: number | null, maxCost: number): string | null {
+  if (credit === null || !Number.isFinite(credit) || !Number.isFinite(maxCost) || credit >= maxCost) return null;
+  return `Your Vast credit (${formatCredit(credit)}) is less than this estimate (${formatCost(maxCost)}). The instance may stop when the credit runs out.`;
+}
+
+export interface PanelActions {
+  start: boolean;
+  extend: boolean;
+  /** Near the idle shutdown Extend is the first choice (open, primary). */
+  extendPrimary: boolean;
+  destroy: boolean;
+  destroyLabel: string;
+  /** A plain next step when no action fits (after a failure). */
+  hint: string;
+}
+
+const RETRY_STATES = new Set(["failed", "destroy_failed"]);
+
+/** Which admin actions the panel shows in a state (whether they are enabled is `controls`). */
+export function panelActions(state: string | null): PanelActions {
+  const s = state ?? "";
+  const retry = RETRY_STATES.has(s);
+  return {
+    start: s === "none",
+    extend: EXTEND_STATES.has(s),
+    extendPrimary: s === "idle-warning",
+    destroy: state !== null && s !== "none" && s !== "stopping",
+    destroyLabel: retry ? "Destroy instance (retry)" : "Destroy instance…",
+    hint: retry ? "Destroy it in the danger zone below, then start again." : "",
+  };
 }

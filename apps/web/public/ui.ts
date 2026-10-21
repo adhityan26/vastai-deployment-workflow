@@ -41,7 +41,6 @@ import {
   editLabel,
   pickReferences,
   referenceHint,
-  CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
   DEFAULT_START_FILTERS,
   REGION_CHOICES,
@@ -136,13 +135,24 @@ import {
   sizeLabel,
   nextSamples,
   stateInfo,
+  panelActions,
+  layoutMode,
+  startCreditWarning,
+  PANEL_STORAGE_KEY,
+  parsePanelPref,
+  widgetVisible,
+  type LayoutMode,
+  countdown,
+  creditTone,
+  creditToneText,
+  pillView,
   windowSpeed,
   type ApiState,
   type Estimate,
   type GpuOption,
   type Sample,
 } from "./model.js";
-import { iconNode } from "./icons.js";
+import { iconNode, uiIconNode } from "./icons.js";
 
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
 // never innerHTML. Decisions live in model.ts.
@@ -237,6 +247,7 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
+  let creditValue: number | null = null; // the last credit read (null: unknown or unreadable)
   let mode: PageMode = "generate"; // follows the selected menu entry (its tool)
   let selectedId: string | null = null; // the wanted menu entry; the one shown is chosen against the current menu
   const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
@@ -345,7 +356,7 @@ export function mountApp(doc: Document, env: Env): App {
   function showAuthScreen(kind: "login" | "noaccess", message: string): void {
     startSubmitting = false; // a Start request in flight must not keep the dialog over the login screen
     closeModal?.(false);
-    if (drawerOpen) setDrawer(false, false);
+    if (overlay !== null) setOverlay(null, false);
     pauseTimers();
     clearMessages();
     state = null;
@@ -375,6 +386,7 @@ export function mountApp(doc: Document, env: Env): App {
     }
     showAuthScreen("login", "");
   }
+  $("btn-logout").prepend(uiIconNode(doc, "logout"));
   $("btn-logout").addEventListener("click", () => void logout());
   $("btn-logout-noaccess").addEventListener("click", () => void logout());
   $("btn-retry").addEventListener("click", () => void start());
@@ -455,13 +467,19 @@ export function mountApp(doc: Document, env: Env): App {
       modalOk.className = danger ? "danger" : "primary";
       closeModal = (ok) => {
         closeModal = null;
-        modal.hidden = true;
+        setModalOpen(false);
         restoreFocus?.focus();
         resolve(ok);
       };
-      modal.hidden = false;
+      setModalOpen(true);
       modalCancel.focus();
     });
+  }
+
+  /** Show or hide the confirmation layer (the floating widget never shows over it). */
+  function setModalOpen(open: boolean): void {
+    modal.hidden = !open;
+    renderWidget();
   }
   modalOk.addEventListener("click", () => {
     if (okHandler !== null) void okHandler();
@@ -474,7 +492,7 @@ export function mountApp(doc: Document, env: Env): App {
   doc.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (!modal.hidden) closeModal?.(false);
-      else if (drawerOpen) setDrawer(false, true);
+      else if (overlay !== null) setOverlay(null, true);
     }
   });
 
@@ -491,6 +509,10 @@ export function mountApp(doc: Document, env: Env): App {
     } finally {
       busy = false;
       await refresh();
+      // The button that opened a confirmation was disabled while it ran: give it the focus back once enabled
+      // (inside a drawer the focus must not fall out to the page).
+      const at = doc.activeElement;
+      if (restoreFocus?.isConnected && (at === null || at === doc.body || modal.contains(at))) restoreFocus.focus();
     }
   }
 
@@ -645,6 +667,12 @@ export function mountApp(doc: Document, env: Env): App {
           ...(where === null ? [] : [make("p", `Server: ${where}.`)]),
           make("p", `Estimated cost if it runs for the full failsafe time (${estimate.horizon_hours} hours): up to ${formatCost(estimate.max_cost)}.`),
         );
+        const low = startCreditWarning(creditValue, estimate.max_cost);
+        if (low !== null) {
+          const warn = make("p", low, "alert warn");
+          warn.id = "start-credit-warning";
+          estBox.append(warn);
+        }
       };
 
       const loadEstimate = async (): Promise<void> => {
@@ -673,7 +701,7 @@ export function mountApp(doc: Document, env: Env): App {
         closeModal = null;
         okHandler = null;
         modalOk.disabled = false;
-        modal.hidden = true;
+        setModalOpen(false);
         restoreFocus?.focus();
         resolve();
       };
@@ -721,7 +749,7 @@ export function mountApp(doc: Document, env: Env): App {
         }
       };
 
-      modal.hidden = false;
+      setModalOpen(true);
       modalCancel.focus();
 
       const gpusPath = (): string => {
@@ -869,7 +897,7 @@ export function mountApp(doc: Document, env: Env): App {
     return act(async () => {
       const ok = await confirmDialog(
         "Destroy the instance?",
-        ["This stops billing and deletes the instance. Running jobs are lost."],
+        ["This stops billing and deletes the instance. Running jobs are lost.", ...costSoFarLine()],
         "Destroy",
         true,
       );
@@ -923,21 +951,31 @@ export function mountApp(doc: Document, env: Env): App {
   // ---- admin panel ----
 
   const adminPanel = $("admin-panel");
+  const dangerZone = $("danger-zone");
+  const dangerTitle = $("danger-title");
+  let extendWasPrimary = false;
+
+  /** "Cost so far: $0.37." for the destroy confirmation, when an instance has a cost. */
+  function costSoFarLine(): string[] {
+    if (state === null || state.cost_so_far === null) return [];
+    return [`Cost so far: ${clockView(state, Math.max(0, env.now() - fetchedAt)).cost}.`];
+  }
+
+  // The main action (Start or Extend) sits in the panel's admin section; Destroy and the untracked instances sit in
+  // the danger zone at the bottom of the panel, never next to Extend.
   function buildAdmin(): void {
     adminBuilt = true;
-    const title = make("h2", "Controls");
-    title.id = "admin-title";
-    const start = make("button", "Start instance", "primary");
+    const start = make("button", "Start instance…", "primary");
     start.id = "btn-start";
     start.type = "button";
     start.addEventListener("click", () => void onStart());
-    const destroy = make("button", "Destroy instance", "danger");
-    destroy.id = "btn-destroy";
-    destroy.type = "button";
-    destroy.addEventListener("click", () => void onDestroy());
-    const row = make("div", undefined, "row");
-    row.append(start, destroy);
+    const hint = make("p", "", "muted");
+    hint.id = "action-hint";
+    hint.hidden = true;
 
+    const extendBox = make("details", undefined, "extend-box");
+    extendBox.id = "extend-box";
+    const summary = make("summary", "Extend…");
     const extend = make("div", undefined, "extend");
     const kindLabel = make("label", "Extend");
     kindLabel.htmlFor = "extend-kind";
@@ -965,11 +1003,47 @@ export function mountApp(doc: Document, env: Env): App {
     const right = make("div");
     right.append(minLabel, minutes);
     extend.append(left, right, go);
+    extendBox.append(summary, extend);
+    adminPanel.replaceChildren(start, extendBox, hint);
 
+    const destroy = make("button", "Destroy instance…", "danger");
+    destroy.id = "btn-destroy";
+    destroy.type = "button";
+    destroy.addEventListener("click", () => void onDestroy());
+    const unknownBox = make("details", undefined, "unknown-box");
+    unknownBox.id = "unknown-box";
+    unknownBox.hidden = true;
+    const unknownSummary = make("summary", "Untracked instances on Vast");
+    unknownSummary.id = "unknown-summary";
     const unknown = make("div", undefined, "unknown");
     unknown.id = "unknown";
     unknown.hidden = true;
-    adminPanel.replaceChildren(title, row, extend, unknown);
+    unknownBox.append(unknownSummary, unknown);
+    dangerZone.replaceChildren(dangerTitle, destroy, unknownBox);
+    extendWasPrimary = false;
+  }
+
+  /** Show the admin actions that fit the state; whether they are enabled stays with `controls`. */
+  function renderActions(c: ReturnType<typeof controls>): void {
+    const a = panelActions(state?.state ?? null);
+    const start = $<HTMLButtonElement>("btn-start");
+    start.hidden = !a.start;
+    start.disabled = !c.canStart;
+    const extendBox = $<HTMLDetailsElement>("extend-box");
+    extendBox.hidden = !a.extend;
+    // Near the idle shutdown Extend opens as the first choice, once: the admin may close it again.
+    if (a.extendPrimary && !extendWasPrimary) extendBox.open = true;
+    extendWasPrimary = a.extendPrimary;
+    const go = $<HTMLButtonElement>("btn-extend");
+    go.disabled = !c.canExtend;
+    go.classList.toggle("primary", a.extendPrimary);
+    setText("action-hint", a.hint);
+    const destroy = $<HTMLButtonElement>("btn-destroy");
+    destroy.hidden = !a.destroy;
+    destroy.disabled = !c.canDestroy;
+    if (destroy.textContent !== a.destroyLabel) destroy.textContent = a.destroyLabel;
+    renderUnknown(state?.unknown ?? []);
+    dangerZone.hidden = !a.destroy && (state?.unknown ?? []).length === 0;
   }
 
   function renderUnknown(list: ApiState["unknown"]): void {
@@ -978,6 +1052,8 @@ export function mountApp(doc: Document, env: Env): App {
     unknownKey = key;
     const box = $("unknown");
     box.hidden = list.length === 0;
+    $("unknown-box").hidden = list.length === 0;
+    $("unknown-summary").textContent = `Untracked instances on Vast (${list.length})`;
     if (list.length === 0) {
       box.replaceChildren();
       return;
@@ -1008,6 +1084,22 @@ export function mountApp(doc: Document, env: Env): App {
     $("f-idle").textContent = c.idle;
     $("f-failsafe").textContent = c.failsafe;
     $("f-hardcap").textContent = c.hardCap;
+    $("float-uptime").textContent = c.uptime;
+    $("float-cost").textContent = c.cost;
+    $("float-idle").textContent = c.idle;
+    $("float-idle-cell").hidden = state.remaining.idle_s === null;
+    renderPill(Math.max(0, env.now() - fetchedAt));
+  }
+
+  /** The header pill: a short label and the state's tone (never a live region: the state line is). */
+  function renderPill(elapsedMs: number): void {
+    const s = state;
+    const pct = s === null ? null : s.download ? downloadPercent(s.download) : progressPercent(s.progress);
+    const view = pillView(s?.state ?? null, pct, s === null ? null : countdown(s.remaining.idle_s, elapsedMs));
+    const text = $("status-pill-text");
+    if (text.textContent !== view.label) text.textContent = view.label;
+    $("status-pill").dataset["tone"] = view.tone;
+    $("float-status").dataset["tone"] = view.tone;
   }
 
   // While the boot console says a phase is running, a plain sentence replaces the "agent cannot
@@ -1024,8 +1116,15 @@ export function mountApp(doc: Document, env: Env): App {
     const pct = s.download ? downloadPercent(s.download) : progressPercent(s.progress);
     const info = stateInfo(s.state, pct);
     const line = $("state-line");
-    line.textContent = info.label;
+    // The only live region of the panel: set it only when the words change, so nothing is announced twice.
+    if (line.textContent !== info.label) line.textContent = info.label;
     line.dataset["tone"] = info.tone;
+    const noInstance = s.state === "none" && s.uptime_s === null;
+    $("none-note").hidden = !noInstance;
+    $("key-figures").hidden = noInstance;
+    $("facts").hidden = noInstance;
+    $("key-idle").hidden = s.remaining.idle_s === null;
+    $("key-idle").dataset["tone"] = s.state === "idle-warning" ? "warn" : "";
     const downloading = s.state === "downloading" && (s.progress !== null || s.download !== null);
     $("progress-box").hidden = !downloading;
     if (downloading) {
@@ -1328,7 +1427,6 @@ export function mountApp(doc: Document, env: Env): App {
   const menuBackdrop = $("menu-backdrop");
   let menuKey = "";
   let query = "";
-  let drawerOpen = false;
 
   // The stored id is only ever compared with the ids of the current menu (chooseEntry), never shown or parsed.
   function readTool(): string | null {
@@ -1417,8 +1515,8 @@ export function mountApp(doc: Document, env: Env): App {
     showRefErrors([]);
     formError.hidden = true;
     styleKey = "";
-    const fromDrawer = drawerOpen;
-    if (fromDrawer) setDrawer(false, false);
+    const fromDrawer = overlay === "menu";
+    if (fromDrawer) setOverlay(null, false);
     if (state) renderForm(state);
     renderReferences();
     if (focusPanel && fromDrawer) $("gen-title").focus();
@@ -1457,22 +1555,12 @@ export function mountApp(doc: Document, env: Env): App {
     next.focus();
   });
 
-  /** Open or close the drawer (narrow screens). While open, the page behind it is inert. */
-  function setDrawer(open: boolean, returnFocus: boolean): void {
-    drawerOpen = open;
-    nav.classList.toggle("open", open);
-    menuBackdrop.hidden = !open;
-    pageBox.toggleAttribute("inert", open);
-    menuOpenBtn.setAttribute("aria-expanded", String(open));
-    if (open) menuSearch.focus();
-    else if (returnFocus) menuOpenBtn.focus();
-  }
-  menuOpenBtn.addEventListener("click", () => setDrawer(!drawerOpen, true));
-  menuCloseBtn.addEventListener("click", () => setDrawer(false, true));
-  menuBackdrop.addEventListener("click", () => setDrawer(false, true));
+  menuOpenBtn.addEventListener("click", () => setOverlay(overlay === "menu" ? null : "menu", true));
+  menuCloseBtn.addEventListener("click", () => setOverlay(null, true));
+  menuBackdrop.addEventListener("click", () => setOverlay(null, true));
   // Focus trap: Tab and Shift+Tab wrap inside the open drawer.
   nav.addEventListener("keydown", (e) => {
-    if (!drawerOpen || e.key !== "Tab") return;
+    if (overlay !== "menu" || e.key !== "Tab") return;
     const stops = [menuCloseBtn, menuSearch, ...menuButtons()];
     const first = stops[0]!;
     const last = stops[stops.length - 1]!;
@@ -1484,11 +1572,177 @@ export function mountApp(doc: Document, env: Env): App {
       first.focus();
     }
   });
-  // The drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
+  // The menu drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
   const wide = typeof doc.defaultView?.matchMedia === "function" ? doc.defaultView.matchMedia(WIDE_SCREEN_QUERY) : null;
   wide?.addEventListener?.("change", (e) => {
-    if (e.matches && drawerOpen) setDrawer(false, false);
+    if (e.matches && overlay === "menu") setOverlay(null, false);
   });
+
+  // ---- overlays: the menu drawer, the panel drawer, the boot log dialog (one at a time) ----
+
+  type Overlay = "menu" | "panel" | "log";
+  let overlay: Overlay | null = null;
+  let panelOpener: HTMLElement | null = null; // where the focus goes back when the panel drawer closes
+  let logReturn: HTMLElement | null = null; // where the focus goes back when the log dialog closes
+  const consoleDialog = $("console-card");
+  const consoleBackdrop = $("console-backdrop");
+  const consoleOpenBtn = $<HTMLButtonElement>("console-open");
+  const consoleCloseBtn = $<HTMLButtonElement>("console-close");
+  const statusPanel = $("status-panel");
+  const statusTitle = $("status-title");
+  const statusPill = $<HTMLButtonElement>("status-pill");
+  const panelBackdrop = $("panel-backdrop");
+  const panelClose = $<HTMLButtonElement>("panel-close");
+  const panelHide = $<HTMLButtonElement>("panel-hide");
+
+  /** The layout now; jsdom and old browsers without a width count as narrow. */
+  function currentMode(): LayoutMode {
+    return layoutMode(doc.defaultView?.innerWidth ?? 0);
+  }
+
+  // Whether the column is hidden (from 1280 px only; a drawer always starts closed). The stored word is only
+  // compared with "collapsed"; storage can be missing or throw.
+  let collapsed = false;
+  try {
+    collapsed = parsePanelPref(doc.defaultView?.localStorage.getItem(PANEL_STORAGE_KEY) ?? null) === "collapsed";
+  } catch {
+    collapsed = false;
+  }
+  function setCollapsed(next: boolean): void {
+    collapsed = next;
+    try {
+      doc.defaultView?.localStorage.setItem(PANEL_STORAGE_KEY, next ? "collapsed" : "open");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+    renderPanelState();
+  }
+
+  /** True at the wide layout: the panel is a column there (shown unless collapsed), never a drawer. */
+  function panelIsColumn(): boolean {
+    return currentMode() === "wide";
+  }
+
+  /**
+   * Open one overlay (closing any other) or close it. While one is open the page behind it is inert; the focus moves
+   * into it and, on close with returnFocus, back to what opened it.
+   */
+  function setOverlay(next: Overlay | null, returnFocus: boolean): void {
+    const prev = overlay;
+    overlay = next;
+    nav.classList.toggle("open", next === "menu");
+    menuBackdrop.hidden = next !== "menu";
+    menuOpenBtn.setAttribute("aria-expanded", String(next === "menu"));
+    statusPanel.classList.toggle("open", next === "panel");
+    panelBackdrop.hidden = next !== "panel";
+    consoleDialog.hidden = next !== "log";
+    consoleBackdrop.hidden = next !== "log";
+    pageBox.toggleAttribute("inert", next !== null);
+    nav.toggleAttribute("inert", next === "panel" || next === "log");
+    statusPanel.toggleAttribute("inert", next === "log");
+    renderPanelState();
+    if (next === "menu") menuSearch.focus();
+    else if (next === "panel") statusTitle.focus();
+    else if (next === "log") consoleCloseBtn.focus();
+    else if (returnFocus && prev !== null) returnTarget(prev).focus();
+  }
+
+  function returnTarget(closed: Overlay): HTMLElement {
+    const wanted = closed === "menu" ? menuOpenBtn : closed === "panel" ? panelOpener : logReturn;
+    // The opener may be gone or hidden meanwhile (the widget, a summary that closed): the pill is always there.
+    return wanted !== null && wanted.isConnected && wanted.closest("[hidden]") === null ? wanted : statusPill;
+  }
+
+  /** The pill (and the widget): at the wide layout bring the panel's heading into focus, else open the drawer. */
+  function openPanelFrom(opener: HTMLElement): void {
+    if (panelIsColumn()) {
+      if (collapsed) setCollapsed(false);
+      statusTitle.focus();
+      return;
+    }
+    panelOpener = opener;
+    setOverlay(overlay === "panel" ? null : "panel", true);
+  }
+  statusPill.addEventListener("click", () => openPanelFrom(statusPill));
+  panelClose.addEventListener("click", () => setOverlay(null, true));
+  panelHide.addEventListener("click", () => {
+    setCollapsed(true);
+    (floatBtn.hidden ? statusPill : floatBtn).focus(); // the Hide button is gone with the column
+  });
+  panelBackdrop.addEventListener("click", () => setOverlay(null, true));
+  statusPanel.addEventListener("keydown", (e) => {
+    if (overlay === "panel") trapTab(statusPanel, e);
+  });
+
+  // The boot log dialog: opened from the panel's boot summary. From the drawer it replaces the drawer, so the focus
+  // then goes back to the pill.
+  consoleOpenBtn.addEventListener("click", () => {
+    logReturn = panelIsColumn() && !collapsed ? consoleOpenBtn : statusPill;
+    setOverlay("log", false);
+    consoleFollow = true;
+    renderConsoleLines();
+  });
+  consoleCloseBtn.addEventListener("click", () => setOverlay(null, true));
+  consoleBackdrop.addEventListener("click", () => setOverlay(null, true));
+  consoleDialog.addEventListener("keydown", (e) => {
+    if (overlay === "log") trapTab(consoleDialog, e);
+  });
+
+  /** The controls the Tab key can reach inside a container (jsdom has no layout: hidden attributes decide). */
+  function tabStops(container: HTMLElement): HTMLElement[] {
+    const all = Array.from(container.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea, summary, [tabindex]"));
+    return all.filter((el) => {
+      if (el.tabIndex < 0 || (el as HTMLButtonElement).disabled === true || el.closest("[hidden]") !== null) return false;
+      // Inside a closed <details> only its own summary can be reached.
+      for (let d = el.parentElement?.closest("details") ?? null; d !== null; d = d.parentElement?.closest("details") ?? null) {
+        if (!(d as HTMLDetailsElement).open && el.closest("summary")?.parentElement !== d) return false;
+      }
+      return true;
+    });
+  }
+
+  /** Keep Tab and Shift+Tab inside an open overlay. */
+  function trapTab(container: HTMLElement, e: KeyboardEvent): void {
+    if (e.key !== "Tab") return;
+    const stops = tabStops(container);
+    if (stops.length === 0) return;
+    const first = stops[0]!;
+    const last = stops[stops.length - 1]!;
+    const at = doc.activeElement;
+    if (e.shiftKey && (at === first || !container.contains(at))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (at === last || !container.contains(at))) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  /** The layout-dependent parts: which panel buttons are offered and whether the pill says the panel is shown. */
+  function renderPanelState(): void {
+    const column = panelIsColumn();
+    panelHide.hidden = !column;
+    panelClose.hidden = column;
+    screens.app.classList.toggle("panel-collapsed", column && collapsed);
+    statusPill.setAttribute("aria-expanded", String((column && !collapsed) || overlay === "panel"));
+    renderWidget();
+  }
+
+  /** The floating widget: shown while the panel is off screen, an instance has an uptime and nothing covers the page. */
+  const floatBtn = $<HTMLButtonElement>("float-status");
+  function renderWidget(): void {
+    const show = widgetVisible({ mode: currentMode(), collapsed, overlayOpen: overlay !== null || !modal.hidden, uptime: state?.uptime_s ?? null });
+    floatBtn.hidden = !show;
+    floatBtn.toggleAttribute("inert", overlay !== null);
+    screens.app.classList.toggle("widget-on", show);
+  }
+  floatBtn.addEventListener("click", () => openPanelFrom(floatBtn));
+
+  doc.defaultView?.addEventListener("resize", () => {
+    if (overlay === "panel" && panelIsColumn()) setOverlay(null, false);
+    else renderPanelState();
+  });
+  renderPanelState();
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);
@@ -2053,20 +2307,40 @@ export function mountApp(doc: Document, env: Env): App {
     creditRunning = true;
     creditAskedAt = env.now();
     let text = "unavailable";
+    let value: number | null = null;
     try {
       const reading = parseCredit(await call("GET", API.credit));
-      if (reading !== null) text = formatCredit(reading.credit);
+      if (reading !== null) {
+        text = formatCredit(reading.credit);
+        value = reading.credit;
+      }
     } catch (err) {
       if (err instanceof AuthLostError) return;
     } finally {
       creditRunning = false;
     }
     $("f-credit").textContent = text;
+    creditValue = value;
+    renderCredit();
+  }
+
+  /** The credit's tone (it follows the current price) in the header and in the panel's first line. */
+  function renderCredit(): void {
+    const admin = state?.role === "admin";
+    const tone = creditTone(creditValue, state?.dph ?? null);
+    const word = creditToneText(tone);
+    $("f-credit-box").dataset["tone"] = tone;
+    $("f-credit-tone").textContent = word;
+    const line = $("panel-credit");
+    line.hidden = !admin;
+    line.dataset["tone"] = tone;
+    $("panel-credit-value").textContent = $("f-credit").textContent ?? "";
+    $("panel-credit-tone").textContent = word;
   }
 
   // ---- boot console (admin only) ----
 
-  const consoleCard = $("console-card");
+  const bootSummary = $("boot-summary");
   const consoleLog = $("console-log");
   const consoleSteps = $("console-steps");
   const consolePauseBtn = $<HTMLButtonElement>("console-pause");
@@ -2077,34 +2351,6 @@ export function mountApp(doc: Document, env: Env): App {
   consoleDownload.href = "#";
   consoleDownload.setAttribute("download", "boot-console.txt");
   $("console-actions").append(consoleDownload);
-
-  // The log part can be folded away; the stepper and the ended notice stay visible. The choice is
-  // only a per-viewer convenience, so storage failures are ignored.
-  const consoleBody = $("console-body");
-  const consoleToggle = $<HTMLButtonElement>("console-toggle");
-  function setConsoleCollapsed(collapsed: boolean, remember: boolean): void {
-    consoleBody.hidden = collapsed;
-    consoleToggle.setAttribute("aria-expanded", String(!collapsed));
-    consoleToggle.textContent = collapsed ? "Show log" : "Hide log";
-    if (!remember) return;
-    try {
-      doc.defaultView?.localStorage.setItem(CONSOLE_COLLAPSED_KEY, collapsed ? "1" : "0");
-    } catch {
-      // Storage unavailable: the choice is just not remembered.
-    }
-  }
-  try {
-    setConsoleCollapsed(doc.defaultView?.localStorage.getItem(CONSOLE_COLLAPSED_KEY) === "1", false);
-  } catch {
-    // Storage unavailable: start expanded.
-  }
-  consoleToggle.addEventListener("click", () => {
-    setConsoleCollapsed(!consoleBody.hidden, true);
-    if (!consoleBody.hidden) {
-      consoleFollow = true;
-      renderConsoleLines();
-    }
-  });
 
   function resetConsole(): void {
     consoleEpoch++;
@@ -2124,7 +2370,7 @@ export function mountApp(doc: Document, env: Env): App {
     consoleLog.replaceChildren();
     consoleSteps.replaceChildren();
     consolePauseBtn.setAttribute("aria-pressed", "false");
-    consoleCard.hidden = true;
+    bootSummary.hidden = true;
   }
 
   function setConsoleStatus(text: string): void {
@@ -2172,8 +2418,11 @@ export function mountApp(doc: Document, env: Env): App {
 
   function renderConsole(): void {
     const p = consolePayload;
+    // The boot summary in the panel (stepper, sentence, ended notice, "View log") shows while the console is
+    // relevant; the log itself is in a dialog. Polling does not depend on the dialog being open.
     const show = consoleCardVisible(state?.role ?? null, p);
-    consoleCard.hidden = !show;
+    bootSummary.hidden = !show;
+    if (!show && overlay === "log") setOverlay(null, true);
     if (state) renderAgentNotice(state);
     if (!show || p === null) return;
     renderSteps(p);
@@ -2398,22 +2647,24 @@ export function mountApp(doc: Document, env: Env): App {
       renderResultActions(state);
     }
     $("f-credit-box").hidden = !c.showAdmin;
+    renderCredit();
+    renderWidget();
     if (c.showAdmin) {
       if (creditDue(creditAskedAt, env.now(), creditRunning)) void refreshCredit();
       if (!adminBuilt) buildAdmin();
       adminPanel.hidden = false;
-      $<HTMLButtonElement>("btn-start").disabled = !c.canStart;
-      $<HTMLButtonElement>("btn-destroy").disabled = !c.canDestroy;
-      $<HTMLButtonElement>("btn-extend").disabled = !c.canExtend;
-      renderUnknown(state?.unknown ?? []);
+      renderActions(c);
       renderUsage(state, true);
     } else {
       renderUsage(state, false);
       adminPanel.replaceChildren();
       adminPanel.hidden = true;
+      dangerZone.replaceChildren(dangerTitle);
+      dangerZone.hidden = true;
       adminBuilt = false;
       unknownKey = "";
       creditAskedAt = Number.NEGATIVE_INFINITY;
+      creditValue = null;
     }
   }
 
