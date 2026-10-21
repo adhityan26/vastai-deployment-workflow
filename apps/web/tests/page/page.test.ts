@@ -1941,6 +1941,9 @@ describe("start dialog: advanced server choice", () => {
     expect(q("#modal")!.textContent).toContain("no longer available");
     expect(q("#notice")!.hidden).toBe(true);
     expect(calls.filter((c) => c.path.startsWith("/api/offers")).length).toBe(offerReads + 1);
+    // The price shown is the automatic one again, not the vanished server's (no offer_id in the last estimate).
+    expect(lastPath("/api/estimate")).toBe("/api/estimate?gpu=RTX%20A5000&region=europe");
+    expect(q("#modal")!.textContent).toContain("$0.30/hour");
     q("#modal-ok")!.click(); // a second try is a plain automatic one
     await flush();
     expect(startPosts().at(-1)).toEqual({ confirm: true, gpu: "RTX A5000", region: "europe" });

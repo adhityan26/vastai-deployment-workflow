@@ -14,6 +14,7 @@ import {
   NoGpuConfiguredError,
   NoOffersError,
   OfferGoneError,
+  VastError,
   StartFilterError,
   type StartFilters,
   ObjectStoreError,
@@ -667,6 +668,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     try {
       return deps.lifecycle.parseFilters(raw);
     } catch (err) {
+      // A malformed VAST_* value is a server configuration problem, reported like the lifecycle's config_invalid.
+      if (err instanceof VastError) {
+        log("warn", `filters refused: ${errorName(err)} (internal: config_invalid)`);
+        sendError(reply, 502, "config_invalid", "the server configuration for Vast offers is invalid");
+        return null;
+      }
       if (gpuRefusal(reply, err) === null) throw err;
       return null;
     }

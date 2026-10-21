@@ -3129,6 +3129,17 @@ describe("advanced server choice (offers, filters, explicit offer)", () => {
     expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200);
   });
 
+  it("a malformed VAST_MAX_DPH is a plain 502 config_invalid on the read routes and on Start, never a 500", async () => {
+    h = await harness({ ready: false, cfg: { vastMaxDph: "abc" } });
+    const a = await admin();
+    for (const res of [await call("GET", "/api/offers", a), await call("GET", "/api/estimate", a), await post("/api/start", a, { confirm: true, region: "europe" })]) {
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error.code).toBe("config_invalid");
+      expect(res.body).not.toContain("abc");
+    }
+    expect(h.vast.creates).toBe(0);
+  });
+
   it("the shipped OpenAPI document describes the offers route and the new request members", () => {
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     expect(doc.paths["/api/offers"].get).toBeDefined();

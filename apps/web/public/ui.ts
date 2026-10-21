@@ -708,6 +708,8 @@ export function mountApp(doc: Document, env: Env): App {
           if (err instanceof ApiError && err.code === "offer_gone") {
             // The chosen server vanished: nothing was rented. Forget the pick and list the servers again.
             resetOffers();
+            void loadEstimate(); // the price shown must be the automatic one again, not the vanished server's
+            showError(err); // loadEstimate clears the error box first: say why again
             void loadOffers();
           }
           select.disabled = false;
@@ -818,7 +820,10 @@ export function mountApp(doc: Document, env: Env): App {
       showOffers.addEventListener("click", () => void loadOffers());
 
       const renderOffers = (list: OfferView[]): void => {
-        chosenOffer = null;
+        if (chosenOffer !== null) {
+          chosenOffer = null;
+          void loadEstimate(); // the listing replaced the pick: show the automatic price
+        }
         offerList.replaceChildren();
         if (list.length === 0) {
           offerList.hidden = true;
