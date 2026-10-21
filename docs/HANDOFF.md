@@ -68,6 +68,17 @@ NOTHING was built or booted: the Dockerfile, the GHCR pull from Vast and the boo
 **Phase 2:** bake the ComfyUI-GGUF node and its requirements, after a real instance shows where ComfyUI lives
 inside the image and whether `/workspace` is overlaid at runtime. Model files stay out of the image.
 
+## History dialog (2026-10-21, branch `feat/history-dialog`, merged to master)
+
+The admin usage history ("History": start, duration, GPU, stop reason, estimated cost) is no longer a card at the
+bottom of every tool page. It is a full-screen dialog like the boot log (`#usage-card`, `role="dialog"`, overlay kind
+`history` in `setOverlay`), opened by the admin-only `#history-open` button in the server panel (after the boot
+summary, above the Danger zone, also shown without an instance). `GET /api/history` is read when the dialog opens and,
+while open, again when the state turns none or ready; never while closed. `#usage-toggle` and
+`vast-comfy.history-collapsed` were removed. No server, API or config change. Runbook: `deploy/web/README.md`
+"Usage history" and "Menu". Checked in jsdom and in headless Chromium at 1280 and 375 px against a fake state; never on
+a real phone, with a screen reader, or against a real instance.
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)

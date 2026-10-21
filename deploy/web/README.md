@@ -380,11 +380,21 @@ values, long hex/base64 strings, URL credentials); the instance hostname shows a
 
 ## Usage history
 
-Admins see a "History" card (`GET /api/history`; members get 403): one line per instance session with
+Admins open the usage history with the "History" button in the server panel (`GET /api/history`; members get 403):
+one line per instance session with
 the start time, duration, GPU, an estimated cost (duration x price per hour; disk and traffic are
 billed separately) and why it stopped: the Destroy button (with who pressed it), the idle timeout,
 the failsafe deadline, the hard cap, a failed boot or Start, an unreachable agent, or "disappeared"
 when the cause is unknown (e.g. Vast removed it).
+
+- On the page the history is a dialog, not a card in the main column: the History button (admins only, also when
+  no instance exists; members never see it) sits in the server panel after the boot summary, above the Danger zone.
+  The dialog works like the boot log dialog: full screen on phones, a centred dialog from 900 px, Esc, the backdrop
+  and Close close it, the focus starts on Close, stays inside and returns to the History button (or to the header's
+  status pill when it was opened from the panel drawer, which it closes); it is one of the overlays of which only one
+  is open at a time. The history is read when the dialog opens and, while it stays open, again when the state turns
+  none or ready; nothing is read while it is closed (no polling). The old fold toggle and its storage key
+  `vast-comfy.history-collapsed` are gone.
 
 - When the web service stops the instance itself it records why before it acts. When the instance
   stops itself, the reason comes from the last agent `/status` the web saw: the agent's own destroy
@@ -441,8 +451,8 @@ The page lists every tool in a menu: a fixed sidebar of about 250 px from 900 px
 drawer opened by the "Menu" button of a sticky top bar (Esc, the backdrop and the close button close it; the focus
 stays inside while it is open and returns to the Menu button). A search box on top filters the entries by title and
 description, ignoring case. Each entry is one tool with its own panel (title, description, the style's labelled
-image slots and hint, notes or prompt, quality/size/resolution, Advanced, the action button); the Results,
-Gallery and History cards follow it. The server status lives in a server panel on the right (below). Arrow keys, Home and End move through the entries; the chosen
+image slots and hint, notes or prompt, quality/size/resolution, Advanced, the action button); the Results
+and Gallery cards follow it (the usage history is a dialog opened from the server panel, see "Usage history"). The server status lives in a server panel on the right (below). Arrow keys, Home and End move through the entries; the chosen
 entry is marked (`aria-current`) and remembered in this browser (`localStorage` key `vast-comfy.tool`, an entry id
 only; an id the current menu does not have falls back to the first entry). "Use as reference" and "Upscale" on a
 result or a saved image select the matching entry. Requests are the same as before the menu: an entry only picks
@@ -478,20 +488,21 @@ three plain tools. Edit and upscale entries are left out while that mode is off 
   only live region), alerts and download progress (a failure reason first), uptime, cost so far and the idle
   shutdown countdown, the admin's main action (Start without an instance; Extend as a closed section that opens as
   the first choice when the idle shutdown is near; nothing while stopping), the boot summary (see "Boot console"),
-  and the detail facts. The Danger zone is pinned at the bottom: Destroy (labelled "(retry)" after a failure; its
+  the admin's History button (see "Usage history") and the detail facts. The Danger zone is pinned at the bottom: Destroy (labelled "(retry)" after a failure; its
   confirmation names the cost so far and Cancel has the focus) and the untracked instances in a closed section.
   Members see the state, figures and facts only. "Hide" collapses the column; the choice is remembered in this
   browser (`localStorage` key `vast-comfy.panel`, `open` or `collapsed`, anything else means open) and applies
   only from 1280 px.
 - Below 1280 px the panel is a right drawer opened from the header's status pill or the floating widget (backdrop,
   the page inert, Tab kept inside, Esc closes, the focus returns to the opener). It always starts closed. Only one
-  overlay is open at a time: the menu drawer, the panel drawer or the boot log dialog; a confirmation sits above all
-  of them (z-index: header 10, widget 12, backdrop 15, drawers 20, log 25, confirmation 30).
+  overlay is open at a time: the menu drawer, the panel drawer, the boot log dialog or the history dialog; a
+  confirmation sits above all of them (z-index: header 10, widget 12, backdrop 15, drawers 20, log and history
+  dialogs 25, confirmation 30).
 - The header: title, the status pill ("Ready", "Booting 42%", "Idle 3m", "Stopped", "Failed"; a button, never
   announced on every tick), the admin's Vast credit (see "Vast credit"), the name and Logout. Below 600 px the name
   and the credit leave the header (the credit becomes the first line of the panel) and Logout is a 44 px icon button.
 - The floating widget (bottom right, above the home indicator) shows uptime, cost so far and the idle countdown
-  while the panel is not on screen and an instance has an uptime, unless a drawer, the log or a confirmation is
+  while the panel is not on screen and an instance has an uptime, unless a drawer, a dialog or a confirmation is
   open. Members see it too. Its name is fixed ("Server status, open panel") and its numbers are hidden from screen
   readers; activating it opens the panel and focuses its heading.
 

@@ -51,7 +51,6 @@ const BYTES_PER_KB = 1e3;
 const MAX_GPU_NAME = 64; // the API refuses longer names
 // Where the last GPU choice is remembered in the browser (only a model name, no secret).
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
-export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
 // The menu entry the user chose last (an entry id only; checked against the current menu before use).
 export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
 // Layout rule (the same breakpoint as style.css): from this width the menu is a fixed sidebar, below it a drawer.

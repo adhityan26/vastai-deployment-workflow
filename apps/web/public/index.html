@@ -154,19 +154,6 @@
     <button id="gal-more" type="button" hidden>Load more</button>
   </section>
 
-  <section id="usage-card" class="card" aria-labelledby="usage-title" hidden>
-    <div class="card-head">
-      <h2 id="usage-title">History</h2>
-      <button id="usage-toggle" type="button" aria-expanded="true" aria-controls="usage-body">Hide history</button>
-    </div>
-    <div id="usage-body">
-      <p id="usage-error" class="muted" role="status" hidden></p>
-      <p id="usage-empty" class="muted">No instance sessions yet.</p>
-      <ul id="usage-list" class="usage-list" aria-label="Recent instance sessions"></ul>
-      <p class="muted">Costs are estimates: duration &times; price per hour. Disk and traffic are billed separately.</p>
-    </div>
-  </section>
-
   </main>
   </div>
   <div id="panel-backdrop" class="backdrop" hidden></div>
@@ -211,6 +198,7 @@
         <p id="boot-sentence" class="alert ok" hidden></p>
         <button id="console-open" type="button" aria-haspopup="dialog" aria-controls="console-card">View log</button>
       </section>
+      <button id="history-open" type="button" aria-haspopup="dialog" aria-controls="usage-card" hidden>History</button>
       <dl id="facts" class="facts">
         <div><dt>Price</dt><dd id="f-price">&mdash;</dd></div>
         <div><dt>GPU</dt><dd id="f-gpu">&mdash;</dd></div>
@@ -240,6 +228,19 @@
       <button id="console-clear" type="button">Clear view</button>
     </div>
     <p id="console-status" class="muted" role="status"></p>
+  </section>
+  <div id="history-backdrop" class="backdrop" hidden></div>
+  <section id="usage-card" class="log-dialog history-dialog" role="dialog" aria-modal="true" aria-labelledby="usage-title" hidden>
+    <div class="log-head">
+      <h2 id="usage-title">History</h2>
+      <button id="history-close" type="button" class="icon-btn" aria-label="Close history">&times;</button>
+    </div>
+    <div id="usage-body">
+      <p id="usage-error" class="muted" role="status" hidden></p>
+      <p id="usage-empty" class="muted" hidden>No instance sessions yet.</p>
+      <ul id="usage-list" class="usage-list" aria-label="Recent instance sessions"></ul>
+      <p class="muted">Costs are estimates: duration &times; price per hour. Disk and traffic are billed separately.</p>
+    </div>
   </section>
   <button id="float-status" type="button" class="float-status" aria-controls="status-panel" aria-label="Server status, open panel" data-tone="idle" hidden>
     <span class="dot" aria-hidden="true"></span>
