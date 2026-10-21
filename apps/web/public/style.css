@@ -142,8 +142,6 @@ ul { padding: 0; margin: 0; list-style: none; }
 .console-log .cl { white-space: pre-wrap; overflow-wrap: anywhere; }
 .console-log .ct, .console-log .cs { color: var(--muted); }
 .console-actions > * { flex: 1 1 6rem; }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.card-head h2 { margin: 0; }
 .usage-list { list-style: none; margin: 8px 0; padding: 0; }
 .usage-list li { padding: 6px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .usage-list li:last-child { border-bottom: none; }
@@ -286,6 +284,7 @@ ul { padding: 0; margin: 0; list-style: none; }
 .boot-summary h3 { margin: 0; font-size: 0.95rem; }
 .boot-summary > * { margin: 0; }
 #console-open { width: 100%; }
+#history-open { width: 100%; }
 .danger-zone { flex: none; display: grid; gap: 8px; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); border-top: 2px solid var(--bad-fg); background: var(--surface); max-height: 45%; overflow-y: auto; }
 .danger-zone h3 { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--bad-fg); }
 .danger-zone #btn-destroy { width: 100%; }
@@ -312,8 +311,11 @@ ul { padding: 0; margin: 0; list-style: none; }
 .log-head h2 { margin: 0; }
 .log-dialog .console-log { flex: 1 1 auto; height: auto; min-height: 8rem; }
 .log-dialog .console-actions { flex: none; margin-top: 0; }
+.history-dialog #usage-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.history-dialog #usage-body > p { margin: 8px 0; }
 @media (min-width: 900px) {
   .log-dialog { inset: 24px 48px; height: auto; max-width: 72rem; margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35); padding: 14px 16px; }
+  .history-dialog { max-width: 48rem; }
 }
 
 @media (min-width: 1280px) {

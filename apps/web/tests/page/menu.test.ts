@@ -139,9 +139,11 @@ describe("the page layout", () => {
     expect(q("#app #tool-nav")).not.toBeNull();
     expect(q("#tool-nav #menu-search")).not.toBeNull();
     expect(q("#page header #menu-open")!.textContent).toBe("Menu");
-    // The status and the boot console moved out of the main column: the server panel and the log dialog.
+    // The status, the boot console and the usage history moved out of the main column: the server panel, the log
+    // dialog and the history dialog.
     const order = [...document.querySelectorAll("#main > section")].map((s) => s.id || s.getAttribute("aria-labelledby"));
-    expect(order).toEqual(["tool-card", "hist-title", "gallery-card", "usage-card"]);
+    expect(order).toEqual(["tool-card", "hist-title", "gallery-card"]);
+    expect(q("#app > #usage-card")).not.toBeNull();
     expect(q("#main #status-title")).toBeNull();
     expect(q("#main #console-card")).toBeNull();
     expect(q("#app > #status-panel #status-title")).not.toBeNull();

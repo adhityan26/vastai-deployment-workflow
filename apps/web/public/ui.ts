@@ -63,7 +63,6 @@ import {
   WIDE_SCREEN_QUERY,
   type MenuEntry,
   type MenuInfo,
-  HISTORY_COLLAPSED_KEY,
   formatDuration,
   historyRefreshDue,
   historyTime,
@@ -1578,12 +1577,17 @@ export function mountApp(doc: Document, env: Env): App {
     if (e.matches && overlay === "menu") setOverlay(null, false);
   });
 
-  // ---- overlays: the menu drawer, the panel drawer, the boot log dialog (one at a time) ----
+  // ---- overlays: the menu drawer, the panel drawer, the boot log and history dialogs (one at a time) ----
 
-  type Overlay = "menu" | "panel" | "log";
+  type Overlay = "menu" | "panel" | "log" | "history";
   let overlay: Overlay | null = null;
   let panelOpener: HTMLElement | null = null; // where the focus goes back when the panel drawer closes
   let logReturn: HTMLElement | null = null; // where the focus goes back when the log dialog closes
+  let historyReturn: HTMLElement | null = null; // where the focus goes back when the history dialog closes
+  const usageCard = $("usage-card");
+  const historyBackdrop = $("history-backdrop");
+  const historyOpenBtn = $<HTMLButtonElement>("history-open");
+  const historyCloseBtn = $<HTMLButtonElement>("history-close");
   const consoleDialog = $("console-card");
   const consoleBackdrop = $("console-backdrop");
   const consoleOpenBtn = $<HTMLButtonElement>("console-open");
@@ -1637,18 +1641,21 @@ export function mountApp(doc: Document, env: Env): App {
     panelBackdrop.hidden = next !== "panel";
     consoleDialog.hidden = next !== "log";
     consoleBackdrop.hidden = next !== "log";
+    usageCard.hidden = next !== "history";
+    historyBackdrop.hidden = next !== "history";
     pageBox.toggleAttribute("inert", next !== null);
-    nav.toggleAttribute("inert", next === "panel" || next === "log");
-    statusPanel.toggleAttribute("inert", next === "log");
+    nav.toggleAttribute("inert", next === "panel" || next === "log" || next === "history");
+    statusPanel.toggleAttribute("inert", next === "log" || next === "history");
     renderPanelState();
     if (next === "menu") menuSearch.focus();
     else if (next === "panel") statusTitle.focus();
     else if (next === "log") consoleCloseBtn.focus();
+    else if (next === "history") historyCloseBtn.focus();
     else if (returnFocus && prev !== null) returnTarget(prev).focus();
   }
 
   function returnTarget(closed: Overlay): HTMLElement {
-    const wanted = closed === "menu" ? menuOpenBtn : closed === "panel" ? panelOpener : logReturn;
+    const wanted = closed === "menu" ? menuOpenBtn : closed === "panel" ? panelOpener : closed === "log" ? logReturn : historyReturn;
     // The opener may be gone or hidden meanwhile (the widget, a summary that closed): the pill is always there.
     return wanted !== null && wanted.isConnected && wanted.closest("[hidden]") === null ? wanted : statusPill;
   }
@@ -1686,6 +1693,20 @@ export function mountApp(doc: Document, env: Env): App {
   consoleBackdrop.addEventListener("click", () => setOverlay(null, true));
   consoleDialog.addEventListener("keydown", (e) => {
     if (overlay === "log") trapTab(consoleDialog, e);
+  });
+
+  // The history dialog (admins only): opened from the panel like the boot log. The history is read when it opens.
+  historyOpenBtn.addEventListener("click", () => {
+    if (state === null || state.role !== "admin" || historyOpenBtn.hidden) return;
+    historyReturn = panelIsColumn() && !collapsed ? historyOpenBtn : statusPill;
+    setOverlay("history", false);
+    usageSeenState = state.state;
+    void loadUsage();
+  });
+  historyCloseBtn.addEventListener("click", () => setOverlay(null, true));
+  historyBackdrop.addEventListener("click", () => setOverlay(null, true));
+  usageCard.addEventListener("keydown", (e) => {
+    if (overlay === "history") trapTab(usageCard, e);
   });
 
   /** The controls the Tab key can reach inside a container (jsdom has no layout: hidden attributes decide). */
@@ -2551,39 +2572,20 @@ export function mountApp(doc: Document, env: Env): App {
     }
   });
 
-  // ---- usage history (admin only) ----
+  // ---- usage history (admin only, in a dialog opened from the server panel) ----
 
-  const usageCard = $("usage-card");
-  const usageBody = $("usage-body");
-  const usageToggle = $<HTMLButtonElement>("usage-toggle");
   const usageList = $("usage-list");
-  function setUsageCollapsed(collapsed: boolean, remember: boolean): void {
-    usageBody.hidden = collapsed;
-    usageToggle.setAttribute("aria-expanded", String(!collapsed));
-    usageToggle.textContent = collapsed ? "Show history" : "Hide history";
-    if (!remember) return;
-    try {
-      doc.defaultView?.localStorage.setItem(HISTORY_COLLAPSED_KEY, collapsed ? "1" : "0");
-    } catch {
-      // Storage unavailable: the choice is just not remembered.
-    }
-  }
-  try {
-    setUsageCollapsed(doc.defaultView?.localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1", false);
-  } catch {
-    // Storage unavailable: start expanded.
-  }
-  usageToggle.addEventListener("click", () => setUsageCollapsed(!usageBody.hidden, true));
 
+  /** Forget the history: the list, the note, pending reads (an answer in flight is discarded) and the button. */
   function resetUsage(): void {
     usageEpoch++;
     usageSeenState = null;
     usageBusy = false;
     usageDirty = false;
     usageList.replaceChildren();
-    $("usage-empty").hidden = false;
+    $("usage-empty").hidden = true; // "no sessions" only once a read said so
     setText("usage-error", "");
-    usageCard.hidden = true;
+    historyOpenBtn.hidden = true;
   }
 
   function usageRow(e: UsageEntry): HTMLElement {
@@ -2616,21 +2618,28 @@ export function mountApp(doc: Document, env: Env): App {
       setText("usage-error", "");
     } catch (err) {
       if (err instanceof AuthLostError || epoch !== usageEpoch) return;
-      // A short note in the card only: the history is never worth a page-wide banner.
-      setText("usage-error", "The history could not be loaded. It is tried again when the instance state changes.");
+      // A short note in the dialog only: the history is never worth a page-wide banner.
+      setText("usage-error", "The history could not be loaded. Close it and open it again to retry.");
     } finally {
       if (epoch === usageEpoch) usageBusy = false;
     }
-    if (epoch === usageEpoch && usageDirty) void loadUsage();
+    // A read that became due meanwhile runs only while the dialog is still open: nothing is read in the background.
+    if (epoch === usageEpoch && usageDirty && overlay === "history") void loadUsage();
   }
 
-  /** Admins only: read the history on the first state and when the state turns none or ready. */
+  /**
+   * Admins only: the History button. While the dialog is open the history is read again when the state turns none
+   * or ready (it was read when it opened); while it is closed nothing is read.
+   */
   function renderUsage(s: ApiState | null, isAdmin: boolean): void {
     if (!isAdmin || s === null) {
-      if (!usageCard.hidden || usageSeenState !== null) resetUsage();
+      const wasOpen = overlay === "history";
+      if (!historyOpenBtn.hidden || usageSeenState !== null || usageList.childElementCount > 0) resetUsage();
+      if (wasOpen) setOverlay(null, true); // after the reset: the hidden History button sends the focus to the pill
       return;
     }
-    usageCard.hidden = false;
+    historyOpenBtn.hidden = false;
+    if (overlay !== "history") return;
     const due = historyRefreshDue(usageSeenState, s.state);
     usageSeenState = s.state;
     if (due) void loadUsage();

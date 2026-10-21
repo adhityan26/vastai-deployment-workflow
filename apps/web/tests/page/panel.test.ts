@@ -136,14 +136,15 @@ describe("the server panel markup", () => {
     expect(panel().querySelectorAll('[role="status"], [role="log"]')).toHaveLength(0);
   });
 
-  it("orders state, alerts, key figures, the main action, the boot summary, then the facts; the danger zone comes last", async () => {
+  it("orders state, alerts, key figures, the main action, the boot summary, History, then the facts; the danger zone comes last", async () => {
     await mount();
     expect(before("state-line", "alert-failed")).toBe(true);
     expect(before("alert-failed", "progress-box")).toBe(true);
     expect(before("progress-box", "key-figures")).toBe(true);
     expect(before("key-figures", "admin-panel")).toBe(true);
     expect(before("admin-panel", "boot-summary")).toBe(true);
-    expect(before("boot-summary", "facts")).toBe(true);
+    expect(before("boot-summary", "history-open")).toBe(true);
+    expect(before("history-open", "facts")).toBe(true);
     expect(["f-uptime", "f-cost", "f-idle"].every((id) => q("#key-figures").querySelector(`#${id}`))).toBe(true);
     expect(["f-price", "f-gpu", "f-server", "f-failsafe", "f-hardcap", "f-queue", "f-vram"].every((id) => q("#facts").querySelector(`#${id}`))).toBe(true);
     expect(panel().lastElementChild!.id).toBe("danger-zone");
@@ -153,21 +154,23 @@ describe("the server panel markup", () => {
     expect(q("#danger-zone").getAttribute("aria-labelledby")).toBe(q("#danger-zone h3").id);
   });
 
-  it("an admin sees the main action, the boot summary and the danger zone; Destroy is never next to Extend", async () => {
+  it("an admin sees the main action, the boot summary, History and the danger zone; Destroy is never next to Extend", async () => {
     await mount();
     expect(q("#admin-panel").hidden).toBe(false);
     expect(q("#boot-summary").hidden).toBe(false);
+    expect(q("#history-open").hidden).toBe(false);
     expect(q("#danger-zone").hidden).toBe(false);
     expect(q("#btn-destroy").textContent).toBe("Destroy instance…");
     expect(q("#btn-destroy").closest("#admin-panel")).toBeNull();
   });
 
-  it("a member sees state, figures and facts but no action, boot summary or danger zone", async () => {
+  it("a member sees state, figures and facts but no action, boot summary, History or danger zone", async () => {
     await mount({ role: "member" });
     expect(q("#state-line").textContent).toBe("Ready");
     expect(q("#f-uptime").textContent).toBe("1h 12m");
     expect(q("#admin-panel").hidden).toBe(true);
     expect(q("#boot-summary").hidden).toBe(true);
+    expect(q("#history-open").hidden).toBe(true);
     expect(q("#danger-zone").hidden).toBe(true);
     expect(document.querySelector("#btn-destroy")).toBeNull();
     expect(calls.some((c) => c.path.startsWith("/api/console"))).toBe(false);
@@ -180,6 +183,7 @@ describe("the server panel markup", () => {
     await app!.refresh();
     for (const id of ["btn-start", "btn-extend", "btn-destroy", "unknown"]) expect(document.querySelector(`#${id}`), id).toBeNull();
     expect(q("#danger-zone").hidden).toBe(true);
+    expect(q("#history-open").hidden).toBe(true);
     expect(q("#danger-title").textContent).toBe("Danger zone");
   });
 
@@ -409,7 +413,7 @@ describe("the panel as a right drawer (below 1280 px)", () => {
     // Hidden controls are no stops either.
     q("#btn-destroy").hidden = true;
     q("#unknown-box").hidden = true;
-    const lastNow = q("#console-open");
+    const lastNow = q("#history-open"); // the admin's History button follows the boot summary
     lastNow.focus();
     expect(key(lastNow, "Tab").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(first);
