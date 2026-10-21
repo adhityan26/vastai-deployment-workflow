@@ -40,6 +40,7 @@ let app: App | null = null;
 let calls: Call[] = [];
 let routes: Record<string, Reply> = {};
 let timers: { fn: () => void; ms: number }[] = [];
+let nowMs = 1_000_000;
 
 function setWidth(px: number): void {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: px });
@@ -67,7 +68,7 @@ async function mount(over: Record<string, unknown> = {}, extra: Record<string, R
       if (r === undefined) return new Response(JSON.stringify({ error: { code: "not_found", message: "not found" } }), { status: 404 });
       return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
     }) as typeof fetch,
-    now: () => 1_000_000,
+    now: () => nowMs,
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: () => undefined,
   });
@@ -95,6 +96,7 @@ beforeEach(() => {
   document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
   calls = [];
   timers = [];
+  nowMs = 1_000_000;
   window.localStorage.clear();
   setWidth(1024);
 });
@@ -243,5 +245,101 @@ describe("the server panel markup", () => {
     await app!.refresh();
     await flush();
     expect(writes).toBe(0);
+  });
+});
+
+describe("the header", () => {
+  const tick = () => { const t = [...timers].reverse().find((x) => x.ms === 1_000)!; t.fn(); };
+
+  it("has the title, a status pill that controls the panel, the name and a Logout button with an icon", async () => {
+    await mount();
+    const header = q("#page header");
+    for (const id of ["menu-open", "status-pill", "f-credit-box", "user-name", "role", "btn-logout"]) expect(header.querySelector(`#${id}`), id).not.toBeNull();
+    const pill = q<HTMLButtonElement>("#status-pill");
+    expect(pill.type).toBe("button");
+    expect(pill.getAttribute("aria-controls")).toBe("status-panel");
+    expect(pill.hasAttribute("aria-expanded")).toBe(true);
+    expect(pill.querySelector(".dot")!.getAttribute("aria-hidden")).toBe("true");
+    expect(q("#status-pill-text").textContent).toBe("Ready");
+    expect(pill.textContent).toBe("Server: Ready");
+    expect(pill.dataset["tone"]).toBe("ok");
+    expect(pill.hasAttribute("aria-live")).toBe(false);
+    const logout = q<HTMLButtonElement>("#btn-logout");
+    expect(logout.textContent).toBe("Logout");
+    expect(logout.getAttribute("aria-label")).toBe("Logout");
+    expect(logout.querySelector("svg")!.getAttribute("aria-hidden")).toBe("true");
+    expect(q("#user-name").textContent).toBe("Ayu");
+    expect(q("#main").querySelector("#btn-logout")).toBeNull();
+  });
+
+  it("the pill follows the state and counts the idle shutdown down", async () => {
+    await mount({ state: "downloading", download: { files_total: 3, files_done: 1, bytes_done: 42, bytes_total: 100, current_file: "m.gguf" } });
+    expect(q("#status-pill-text").textContent).toBe("Booting 42%");
+    expect(q("#status-pill").dataset["tone"]).toBe("busy");
+    routes["GET /api/state"] = { body: apiState({ state: "idle-warning", remaining: { idle_s: 181, failsafe_s: 9600, hard_cap_s: 20400 } }) };
+    await app!.refresh();
+    expect(q("#status-pill-text").textContent).toBe("Idle 4m");
+    expect(q("#status-pill").dataset["tone"]).toBe("warn");
+    nowMs += 2_000;
+    tick();
+    expect(q("#status-pill-text").textContent).toBe("Idle 3m");
+    routes["GET /api/state"] = { body: apiState({ state: "none", uptime_s: null }) };
+    await app!.refresh();
+    expect(q("#status-pill-text").textContent).toBe("Stopped");
+  });
+
+  it("shows the admin's credit with a tone and a word, never colour alone", async () => {
+    await mount({ dph: 0.6 }, { "GET /api/credit": { body: { credit: 1.1, as_of: 1 } } });
+    expect(q("#f-credit-box").hidden).toBe(false);
+    expect(q("#f-credit").textContent).toBe("$1.10");
+    expect(q("#f-credit-box").dataset["tone"]).toBe("warn");
+    expect(q("#f-credit-tone").textContent).toBe("low");
+    expect(q("#f-credit-box").textContent).toBe("Vast credit $1.10 low");
+    // The same line is the first thing in the panel on small phones.
+    expect(q("#panel-credit").hidden).toBe(false);
+    expect(panel().querySelector(".panel-body")!.firstElementChild!.id).toBe("panel-credit");
+    expect(q("#panel-credit").textContent).toBe("Vast credit: $1.10 low");
+    expect(q("#panel-credit").dataset["tone"]).toBe("warn");
+  });
+
+  it("a used-up credit is bad, a healthy one neutral-free ok, an unreadable one neutral without a word", async () => {
+    await mount({}, { "GET /api/credit": { body: { credit: -0.2, as_of: 1 } } });
+    expect(q("#f-credit-box").dataset["tone"]).toBe("bad");
+    expect(q("#f-credit-tone").textContent).toBe("used up");
+    app!.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount();
+    expect(q("#f-credit-box").dataset["tone"]).toBe("ok");
+    expect(q("#f-credit-tone").textContent).toBe("");
+    app!.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount({}, { "GET /api/credit": { status: 502, body: { error: { code: "vast_unavailable", message: "no" } } } });
+    expect(q("#f-credit").textContent).toBe("unavailable");
+    expect(q("#f-credit-box").dataset["tone"]).toBe("neutral");
+    expect(q("#f-credit-tone").textContent).toBe("");
+  });
+
+  it("the tone follows the price without a new credit read", async () => {
+    await mount({ dph: 0.31 }, { "GET /api/credit": { body: { credit: 1.5, as_of: 1 } } });
+    expect(q("#f-credit-box").dataset["tone"]).toBe("ok");
+    routes["GET /api/state"] = { body: apiState({ dph: 0.9 }) };
+    await app!.refresh();
+    expect(calls.filter((c) => c.path === "/api/credit")).toHaveLength(1);
+    expect(q("#f-credit-box").dataset["tone"]).toBe("warn");
+  });
+
+  it("a member sees no credit anywhere", async () => {
+    await mount({ role: "member" });
+    expect(q("#f-credit-box").hidden).toBe(true);
+    expect(q("#panel-credit").hidden).toBe(true);
+    expect(calls.some((c) => c.path === "/api/credit")).toBe(false);
+  });
+
+  it("logout from the header still posts {} and shows the login screen", async () => {
+    await mount({}, { "POST /auth/logout": { body: { ok: true } } });
+    q("#btn-logout").click();
+    await flush();
+    expect(calls.find((c) => c.method === "POST" && c.path === "/auth/logout")!.body).toEqual({});
+    expect(q("#login-screen").hidden).toBe(false);
   });
 });

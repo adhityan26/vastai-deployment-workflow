@@ -136,13 +136,17 @@ import {
   nextSamples,
   stateInfo,
   panelActions,
+  countdown,
+  creditTone,
+  creditToneText,
+  pillView,
   windowSpeed,
   type ApiState,
   type Estimate,
   type GpuOption,
   type Sample,
 } from "./model.js";
-import { iconNode } from "./icons.js";
+import { iconNode, uiIconNode } from "./icons.js";
 
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
 // never innerHTML. Decisions live in model.ts.
@@ -237,6 +241,7 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
+  let creditValue: number | null = null; // the last credit read (null: unknown or unreadable)
   let mode: PageMode = "generate"; // follows the selected menu entry (its tool)
   let selectedId: string | null = null; // the wanted menu entry; the one shown is chosen against the current menu
   const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
@@ -375,6 +380,7 @@ export function mountApp(doc: Document, env: Env): App {
     }
     showAuthScreen("login", "");
   }
+  $("btn-logout").prepend(uiIconNode(doc, "logout"));
   $("btn-logout").addEventListener("click", () => void logout());
   $("btn-logout-noaccess").addEventListener("click", () => void logout());
   $("btn-retry").addEventListener("click", () => void start());
@@ -1056,6 +1062,17 @@ export function mountApp(doc: Document, env: Env): App {
     $("f-idle").textContent = c.idle;
     $("f-failsafe").textContent = c.failsafe;
     $("f-hardcap").textContent = c.hardCap;
+    renderPill(Math.max(0, env.now() - fetchedAt));
+  }
+
+  /** The header pill: a short label and the state's tone (never a live region: the state line is). */
+  function renderPill(elapsedMs: number): void {
+    const s = state;
+    const pct = s === null ? null : s.download ? downloadPercent(s.download) : progressPercent(s.progress);
+    const view = pillView(s?.state ?? null, pct, s === null ? null : countdown(s.remaining.idle_s, elapsedMs));
+    const text = $("status-pill-text");
+    if (text.textContent !== view.label) text.textContent = view.label;
+    $("status-pill").dataset["tone"] = view.tone;
   }
 
   // While the boot console says a phase is running, a plain sentence replaces the "agent cannot
@@ -2108,15 +2125,35 @@ export function mountApp(doc: Document, env: Env): App {
     creditRunning = true;
     creditAskedAt = env.now();
     let text = "unavailable";
+    let value: number | null = null;
     try {
       const reading = parseCredit(await call("GET", API.credit));
-      if (reading !== null) text = formatCredit(reading.credit);
+      if (reading !== null) {
+        text = formatCredit(reading.credit);
+        value = reading.credit;
+      }
     } catch (err) {
       if (err instanceof AuthLostError) return;
     } finally {
       creditRunning = false;
     }
     $("f-credit").textContent = text;
+    creditValue = value;
+    renderCredit();
+  }
+
+  /** The credit's tone (it follows the current price) in the header and in the panel's first line. */
+  function renderCredit(): void {
+    const admin = state?.role === "admin";
+    const tone = creditTone(creditValue, state?.dph ?? null);
+    const word = creditToneText(tone);
+    $("f-credit-box").dataset["tone"] = tone;
+    $("f-credit-tone").textContent = word;
+    const line = $("panel-credit");
+    line.hidden = !admin;
+    line.dataset["tone"] = tone;
+    $("panel-credit-value").textContent = $("f-credit").textContent ?? "";
+    $("panel-credit-tone").textContent = word;
   }
 
   // ---- boot console (admin only) ----
@@ -2427,6 +2464,7 @@ export function mountApp(doc: Document, env: Env): App {
       renderResultActions(state);
     }
     $("f-credit-box").hidden = !c.showAdmin;
+    renderCredit();
     if (c.showAdmin) {
       if (creditDue(creditAskedAt, env.now(), creditRunning)) void refreshCredit();
       if (!adminBuilt) buildAdmin();
@@ -2442,6 +2480,7 @@ export function mountApp(doc: Document, env: Env): App {
       adminBuilt = false;
       unknownKey = "";
       creditAskedAt = Number.NEGATIVE_INFINITY;
+      creditValue = null;
     }
   }
 

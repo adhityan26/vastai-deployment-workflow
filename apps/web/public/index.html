@@ -54,14 +54,12 @@
   <header class="top">
     <button id="menu-open" type="button" class="menu-btn" aria-controls="tool-nav" aria-expanded="false">Menu</button>
     <h1>Image generator</h1>
-    <span id="f-credit-box" class="credit" hidden><span class="credit-label">Vast credit</span> <span id="f-credit">&mdash;</span></span>
-    <span id="role" class="chip" hidden></span>
+    <button id="status-pill" type="button" class="pill" aria-controls="status-panel" aria-expanded="false" data-tone="idle"><span class="dot" aria-hidden="true"></span><span class="sr">Server: </span><span id="status-pill-text">Loading</span></button>
+    <span id="f-credit-box" class="credit" data-tone="neutral" hidden><span class="credit-label">Vast credit</span> <span id="f-credit">&mdash;</span> <span id="f-credit-tone" class="credit-tone"></span></span>
+    <span class="who"><span id="user-name" class="muted"></span> <span id="role" class="chip" hidden></span></span>
+    <button id="btn-logout" type="button" class="logout-btn" aria-label="Logout"><span class="btn-label">Logout</span></button>
   </header>
   <main id="main" class="main">
-  <div class="userbar">
-    <span id="user-name" class="muted"></span>
-    <button id="btn-logout" type="button">Logout</button>
-  </div>
   <p id="logout-error" class="alert bad" role="status" aria-live="polite" hidden></p>
 
   <div id="banner" class="alert bad" role="alert" hidden></div>
@@ -179,6 +177,7 @@
       <button id="panel-close" type="button" class="icon-btn" aria-label="Close server panel">&times;</button>
     </div>
     <div class="panel-body">
+      <p id="panel-credit" class="credit-line" data-tone="neutral" hidden>Vast credit: <span id="panel-credit-value">&mdash;</span> <span id="panel-credit-tone" class="credit-tone"></span></p>
       <p id="state-line" class="state" aria-live="polite" data-tone="idle">Loading</p>
       <div id="alert-failed" class="alert bad" role="alert" hidden>
         <strong>Failed.</strong> <span id="failed-reason"></span>
