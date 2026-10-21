@@ -189,8 +189,10 @@ class FakeVast {
     this.searches.push(filters);
     return this.offers;
   }
-  async createInstance(_offer: number, req: CreateRequest): Promise<{ id: number }> {
+  createdOffers: number[] = [];
+  async createInstance(offer: number, req: CreateRequest): Promise<{ id: number }> {
     this.creates++;
+    this.createdOffers.push(offer);
     const id = this.nextId++;
     this.instances.push({ id, label: req.label, actual_status: "loading", start_date: NOW_S, dph_total: 0.3 });
     return { id };
@@ -280,6 +282,7 @@ async function harness(
     vastMinVramGb: 24,
     vastMaxDph: "0.50",
     vastMinDownloadMbps: 500,
+    startOfferListMax: 3,
     vastMinReliability: "0.98",
     vastAllowedGpus: ["RTX A5000", "RTX 3090", "RTX 4090"],
     comfyPort: comfy.port,
@@ -581,7 +584,7 @@ describe("request hygiene", () => {
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe("invalid_json");
     expect(bad.body).not.toMatch(/at .*\.ts/);
-    const extra = await post("/api/start", a, { confirm: true, offer_id: 1 });
+    const extra = await post("/api/start", a, { confirm: true, vast_offer: 1 });
     expect(extra.statusCode).toBe(400);
     expect((await post("/api/start", a, { confirm: "true" })).statusCode).toBe(400);
     expect(h.vast.creates).toBe(0);
@@ -2041,7 +2044,7 @@ describe("GPU choice", () => {
     expect(h.vast.searches).toHaveLength(before);
     expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).json().error.code).toBe("no_offers");
     expect((await call("GET", "/api/estimate?gpu=RTX%203090", a)).statusCode).toBe(409);
-    for (const q of ["gpu=a&gpu=b", "gpu=", `gpu=${"x".repeat(65)}`, "offer_id=5", "gpu=RTX%204090&max_dph=9"]) {
+    for (const q of ["gpu=a&gpu=b", "gpu=", `gpu=${"x".repeat(65)}`, "vast_offer=5"]) {
       const res = await call("GET", `/api/estimate?${q}`, a);
       expect(res.statusCode, q).toBe(400);
       expect(res.json().error.code, q).toBe("invalid_body");
@@ -2058,8 +2061,8 @@ describe("GPU choice", () => {
       { confirm: true, gpu: ["RTX 4090"] },
       { confirm: true, gpu: null },
       { confirm: true, gpu: "x".repeat(65) },
-      { confirm: true, gpu: "RTX 4090", offer_id: 40 },
-      { confirm: true, gpu: "RTX 4090", max_dph: 9 },
+      { confirm: true, gpu: "RTX 4090", vast_offer: 40 },
+      { confirm: true, gpu: "RTX 4090", host: "203.0.113.9" },
       { gpu: "RTX 4090" },
     ]) {
       const res = await post("/api/start", a, body);
@@ -2343,6 +2346,8 @@ function newFilesWith(before: Map<string, number>, roots: string[], marker: Buff
 
 describe("styles", () => {
   const LORA = "Qwen2.1_Anything2RealCharacters.safetensors";
+  // The sample presets, on for the live test (presets: nothing to download).
+  const SAMPLES = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
 
   /** The shipped profile with the Anything to Real style switched on (its LoRA among the models). */
   function styledProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -2365,7 +2370,8 @@ describe("styles", () => {
   it("lists the enabled styles in /api/state with their limits, and nothing about the LoRA file or the workflow nodes", async () => {
     h = await harness({ profile: styledProfile() });
     const body = (await call("GET", "/api/state", await member())).json();
-    expect(body.styles).toEqual([
+    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
+    expect(body.styles.slice(0, 2)).toEqual([
       {
         id: "anything2real",
         title: "Anime / cartoon to real",
@@ -2394,13 +2400,13 @@ describe("styles", () => {
   });
 
   it("the shipped profile offers the style", async () => {
-    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
+    expect((await call("GET", "/api/state", await member())).json().styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
   });
 
   it("with the style off, state.styles is empty and the style is refused as unknown", async () => {
     h = await harness({ profile: styledProfile((doc) => (doc.styles[0].enabled = false)) });
     const m = await member();
-    expect((await call("GET", "/api/state", m)).json().styles.map((s: { id: string }) => s.id)).toEqual(["faceswap"]);
+    expect((await call("GET", "/api/state", m)).json().styles.map((s: { id: string }) => s.id)).toEqual(["faceswap", ...SAMPLES]);
     h.setComfy(comfyEdit());
     const res = await post("/api/edit", m, { ...okEdit, style: { id: "anything2real" } });
     expect(res.statusCode).toBe(400);
@@ -2812,7 +2818,7 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
   const sentPrompt = () => JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
   const t2i = JSON.parse(readFileSync(repo("instance/workflows/qwen-image-t2i.json"), "utf8"));
 
-  /** The shipped profile after `change` (by default: every sample style switched on; they ship off). */
+  /** The shipped profile after `change` (by default: every style switched on, as they ship since the live test). */
   function variant(change: (doc: Record<string, any>) => void = (d) => d.styles.forEach((s: { enabled: boolean }) => (s.enabled = true))): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
     const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
     change(doc);
@@ -2823,13 +2829,18 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
     return loadProfile(path);
   }
 
-  it("the shipped state: guidance, both knobs in both modes, the live styles without defaults, and no recipes", async () => {
+  it("the shipped state: guidance, both knobs in both modes, the live styles without defaults, the samples with theirs, and no recipes", async () => {
     h = await harness();
     const body = (await call("GET", "/api/state", await member())).json();
     expect(body.guidance).toEqual({ min: 1, max: 6, step: 0.5, default: 1 });
     expect(body.advanced).toEqual({ generate: { negative_prompt: true, cfg: true }, edit: { negative_prompt: true, cfg: true }, negative_prompt_max_chars: 400 });
-    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap"]);
-    for (const st of body.styles) expect(st.defaults).toEqual({});
+    expect(body.styles.map((s: { id: string }) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
+    for (const st of body.styles.slice(0, 2)) expect(st.defaults).toEqual({});
+    const defaults = Object.fromEntries(body.styles.slice(2).map((st: { id: string; defaults: Record<string, unknown> }) => [st.id, Object.keys(st.defaults).sort()]));
+    expect(defaults).toEqual({
+      portrait_photo: ["cfg", "negative_prompt"], family_photo: ["cfg", "negative_prompt"], anime: ["cfg", "negative_prompt"],
+      outfit_swap: ["negative_prompt"], photo_restore: ["negative_prompt"], to_anime: ["negative_prompt"],
+    });
     expect(body).not.toHaveProperty("recipes");
     expect(body).not.toHaveProperty("negative_prompt");
   });
@@ -2911,9 +2922,11 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
 
   it("a mode whose workflow maps no knob says so in the state and refuses them with a clear code", async () => {
     h = await harness({
+      // The edit styles' knob defaults go with the mappings (an enabled style may not pre-fill an unmapped knob).
       profile: variant((d) => {
         delete d.edit.params.negative_prompt;
         delete d.edit.params.cfg;
+        for (const st of d.styles) if (st.modes.includes("edit") && st.defaults) delete st.defaults.negative_prompt;
       }),
     });
     h.setComfy(comfyEdit());
@@ -2946,5 +2959,191 @@ describe("negative prompt, guidance and style defaults (Advanced)", () => {
     expect(state.properties).not.toHaveProperty("recipes");
     expect(state.properties.styles.items.required).toContain("defaults");
     expect(state.properties.styles.items.properties.defaults.additionalProperties).toBe(false);
+  });
+});
+
+// ---- the tool menu ----
+
+describe("menu", () => {
+  const ITEM_KEYS = ["available", "category", "description", "icon", "id", "style", "title", "tool"];
+  const items = (body: { menu: { items: { id: string; available: boolean }[] } }) => body.menu.items;
+  const ids = (body: Parameters<typeof items>[0]) => items(body).map((i) => i.id);
+
+  it("lists the categories and every entry in display order, with no template, node, file or LoRA detail", async () => {
+    h = await harness({ profile });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.menu.categories).toEqual([{ id: "create", title: "Create" }, { id: "edit", title: "Edit & combine" }, { id: "enhance", title: "Enhance" }]);
+    expect(ids(body)).toEqual([
+      "text_to_image", "portrait_photo", "family_photo", "anime",
+      "free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime",
+      "photo_restore", "upscale",
+    ]);
+    for (const item of body.menu.items) expect(Object.keys(item).sort()).toEqual(ITEM_KEYS);
+    expect(body.menu.items[0]).toEqual({ id: "text_to_image", title: "Text to image", description: "Describe a picture and generate it.", icon: "image", category: "create", tool: "generate", style: null, available: true });
+    expect(body.menu.items.find((i: { id: string }) => i.id === "photo_restore")).toMatchObject({ category: "enhance", tool: "edit", style: "photo_restore", icon: "restore", available: true });
+    const text = JSON.stringify(body.menu);
+    for (const secret of ["safetensors", "prompt_template", "model_from", "workflow", "Convert this anime", "\"node\"", "order"]) expect(text).not.toContain(secret);
+  });
+
+  it("marks the edit and upscale entries unavailable while that mode is off here; a disabled style has no entry", async () => {
+    h = await harness({ editTemplate: null }); // edit off, and no upscale template (upscale off)
+    const body = (await call("GET", "/api/state", await member())).json();
+    const off = items(body).filter((i) => !i.available).map((i) => i.id);
+    expect(off).toEqual(["free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime", "photo_restore", "upscale"]);
+    expect(items(body).filter((i) => i.available).map((i) => i.id)).toEqual(["text_to_image", "portrait_photo", "family_photo", "anime"]);
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    doc.styles.find((s: { id: string }) => s.id === "anime").enabled = false;
+    const dir = mkdtempSync(join(tmpdir(), "menu-profile-"));
+    tempDirs.push(dir);
+    writeFileSync(join(dir, "image.yaml"), stringifyYaml(doc));
+    h = await harness({ profile: loadProfile(join(dir, "image.yaml")) });
+    expect(ids((await call("GET", "/api/state", await member())).json())).not.toContain("anime");
+  });
+
+  it("is the same for admins and members, and the request shapes of generate, edit and upscale are unchanged", async () => {
+    h = await harness({ profile });
+    const a = (await call("GET", "/api/state", await admin())).json().menu;
+    const m = (await call("GET", "/api/state", await member())).json().menu;
+    expect(a).toEqual(m);
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    for (const path of ["/api/generate", "/api/edit", "/api/upscale"]) {
+      expect(doc.paths[path].post.requestBody.content["application/json"].schema.properties).not.toHaveProperty("menu");
+    }
+  });
+
+  it("the OpenAPI document describes the menu strictly", async () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const state = doc.components.schemas.State;
+    expect(state.required).toContain("menu");
+    const menu = state.properties.menu;
+    expect(menu.additionalProperties).toBe(false);
+    expect(menu.required).toEqual(["categories", "items"]);
+    expect(menu.properties.categories.items.additionalProperties).toBe(false);
+    expect(menu.properties.categories.items.required).toEqual(["id", "title"]);
+    const item = menu.properties.items.items;
+    expect(item.additionalProperties).toBe(false);
+    expect([...item.required].sort()).toEqual(ITEM_KEYS);
+    expect(Object.keys(item.properties).sort()).toEqual(ITEM_KEYS);
+    expect(item.properties.tool.enum).toEqual(["generate", "edit", "upscale"]);
+    expect(item.properties.icon.enum).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush"]);
+    // What the server sends fits the document: the same keys, and every icon in the enum.
+    h = await harness({ profile });
+    const body = (await call("GET", "/api/state", await member())).json();
+    for (const i of body.menu.items) expect(item.properties.icon.enum).toContain(i.icon);
+    expect(Object.keys(body.menu).sort()).toEqual(["categories", "items"]);
+  });
+});
+
+describe("advanced server choice (offers, filters, explicit offer)", () => {
+  const rtx = (id: number, dph: number, geo: string, down: number, rel: number): Offer => ({
+    id, dph_total: dph, gpu_name: "RTX A5000", gpu_ram: 24564, geolocation: geo, inet_down: down, reliability2: rel, machine_id: 7000 + id, host_id: 9, public_ipaddr: "203.0.113.9",
+  });
+  const offers = [
+    rtx(1, 0.3, "Lithuania, LT", 600, 0.99),
+    rtx(2, 0.4, "Quebec, CA", 900, 0.995),
+    rtx(3, 0.25, "Texas, US", 700, 0.98),
+    rtx(4, 0.45, "Tokyo, JP", 800, 0.999),
+  ];
+  beforeEach(async () => {
+    h = await harness({ ready: false });
+    h.vast.offers = offers;
+  });
+
+  it("GET /api/offers: 401 anonymous, 403 member, a bounded list in the public shape for an admin", async () => {
+    expect((await call("GET", "/api/offers")).statusCode).toBe(401);
+    expect((await call("GET", "/api/offers", await member())).statusCode).toBe(403);
+    const res = await call("GET", "/api/offers", await admin());
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.json().offers.map((o: { id: number }) => o.id)).toEqual([3, 1, 2]);
+    expect(res.json().offers[0]).toEqual({ id: 3, gpu_name: "RTX A5000", dph: 0.25, vram_gb: 24, location: "Texas, US", region: "north_america", down_mbps: 700, reliability: 0.98 });
+    for (const secret of ["machine", "host", "203.0.113.9", "7003"]) expect(res.body).not.toContain(secret);
+  });
+
+  it("GET /api/offers filters and sorts by the query", async () => {
+    const a = await admin();
+    const ids = async (q: string) => (await call("GET", `/api/offers?${q}`, a)).json().offers?.map((o: { id: number }) => o.id);
+    expect(await ids("region=north_america")).toEqual([3, 2]);
+    expect(await ids("max_dph=0.3")).toEqual([3, 1]);
+    expect(await ids("min_down_mbps=800")).toEqual([2, 4]);
+    expect(await ids("sort=speed")).toEqual([2, 4, 3]);
+    expect(await ids("sort=reliability&region=asia")).toEqual([4]);
+  });
+
+  it.each([
+    "region=mars", "max_dph=0", "max_dph=0.51", "max_dph=abc", "min_down_mbps=-1", "min_down_mbps=1.5", "sort=random", "offer_id=0", "host=1.2.3.4", "gpu=Tesla%20P40",
+  ])("GET /api/offers?%s is refused with 400 and the list is not read", async (q) => {
+    const before = h.vast.searches.length;
+    const res = await call("GET", `/api/offers?${q}`, await admin());
+    expect(res.statusCode).toBe(400);
+    expect(h.vast.searches).toHaveLength(before);
+  });
+
+  it("estimate and gpus follow the filters", async () => {
+    const a = await admin();
+    expect((await call("GET", "/api/estimate?region=asia", a)).json()).toMatchObject({ dph: 0.45, location: "Tokyo, JP" });
+    const gpus = (await call("GET", "/api/gpus?region=europe", a)).json().gpus;
+    expect(gpus[0]).toMatchObject({ name: "RTX A5000", dph: 0.3, location: "Lithuania, LT" });
+    expect((await call("GET", "/api/estimate?region=oceania", a)).statusCode).toBe(409);
+  });
+
+  it("start with filters rents the first of the filtered order; with offer_id exactly that offer", async () => {
+    const a = await admin();
+    expect((await post("/api/start", a, { confirm: true, region: "asia" })).statusCode).toBe(200);
+    expect(h.vast.createdOffers).toEqual([4]);
+    await post("/api/destroy", a);
+    h.clock.ms += 3_600_001;
+    h = await harness({ ready: false });
+    h.vast.offers = offers;
+    const res = await post("/api/start", await admin(), { confirm: true, offer_id: 2 });
+    expect(res.statusCode).toBe(200);
+    expect(h.vast.createdOffers).toEqual([2]);
+    expect(res.body).not.toMatch(/offer_id|machine/);
+  });
+
+  it("start with an offer that vanished: 409 offer_gone, nothing rented and nothing billed", async () => {
+    const a = await admin();
+    h.vast.offers = offers.filter((o) => o.id !== 2);
+    const res = await post("/api/start", a, { confirm: true, offer_id: 2 });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("offer_gone");
+    expect(h.vast.creates).toBe(0);
+    expect((await h.registry.all()).every((r) => r.status === "gone")).toBe(true);
+    expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200); // the next plain Start works
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["an unknown region", { region: "mars" }],
+    ["a price above VAST_MAX_DPH", { max_dph: 0.9 }],
+    ["a text offer id", { offer_id: "2" }],
+    ["an unknown member", { machine_id: 7002 }],
+  ])("start with %s is 400 and creates nothing", async (_n, extra) => {
+    const res = await post("/api/start", await admin(), { confirm: true, ...extra });
+    expect(res.statusCode).toBe(400);
+    expect(h.vast.creates).toBe(0);
+  });
+
+  it("an invalid request does not use up the Start rate limit", async () => {
+    const a = await admin();
+    for (let i = 0; i < 5; i++) expect((await post("/api/start", a, { confirm: true, region: "mars" })).statusCode).toBe(400);
+    expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200);
+  });
+
+  it("a malformed VAST_MAX_DPH is a plain 502 config_invalid on the read routes and on Start, never a 500", async () => {
+    h = await harness({ ready: false, cfg: { vastMaxDph: "abc" } });
+    const a = await admin();
+    for (const res of [await call("GET", "/api/offers", a), await call("GET", "/api/estimate", a), await post("/api/start", a, { confirm: true, region: "europe" })]) {
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error.code).toBe("config_invalid");
+      expect(res.body).not.toContain("abc");
+    }
+    expect(h.vast.creates).toBe(0);
+  });
+
+  it("the shipped OpenAPI document describes the offers route and the new request members", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    expect(doc.paths["/api/offers"].get).toBeDefined();
+    const start = doc.paths["/api/start"].post.requestBody.content["application/json"].schema.properties;
+    expect(Object.keys(start)).toEqual(expect.arrayContaining(["region", "max_dph", "min_down_mbps", "sort", "offer_id"]));
   });
 });

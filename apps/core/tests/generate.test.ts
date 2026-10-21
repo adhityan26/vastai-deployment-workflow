@@ -6,6 +6,7 @@ import type { AppsConfig } from "../src/config.js";
 import { ComfyClient, Unreachable } from "../src/comfy.js";
 import { GenerateInputError, type Profile } from "../src/profile.js";
 import { parseStyles } from "../src/styles.js";
+import { DEFAULT_MENU } from "../src/menu.js";
 import { awaitResult, executionSeconds, generate, GenerateFailed, GenerateTimeout, pollResult, type GenerateDeps } from "../src/generate.js";
 
 const template = JSON.parse(readFileSync(new URL("../../../instance/workflows/qwen-image-t2i.json", import.meta.url), "utf8"));
@@ -13,6 +14,7 @@ const profile: Profile = {
   name: "t",
   edit: null,
   styles: [],
+  menu: DEFAULT_MENU,
   guidance: null,
   upscale: null,
   models: [],

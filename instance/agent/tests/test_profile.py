@@ -257,7 +257,7 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
 
 import copy
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -521,15 +521,23 @@ def test_the_optional_negative_prompt_and_cfg_params_are_accepted(tmp_path):
 
 
 def test_the_shipped_profile_has_one_preset_mechanism_and_its_samples_download_nothing():
-    """Recipes were folded into styles: the samples are disabled presets, so they add no model to the boot."""
+    """Recipes were folded into styles: the samples are presets (on for the live test), so they add no model to
+    the boot."""
     shipped, raw = _shipped_raw()
     assert "recipes" not in raw
     assert raw["guidance"] == {"min": 1.0, "max": 6.0, "step": 0.5, "default": 1.0}
-    samples = [s for s in raw["styles"] if s["enabled"] is False]
-    assert [s["id"] for s in samples] == ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"]
+    sample_ids = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"]
+    samples = [s for s in raw["styles"] if s["id"] in sample_ids]
+    assert [s["id"] for s in samples] == sample_ids
+    assert all(s["enabled"] is True for s in samples)
     assert all(s["kind"] == "preset" and "lora" not in s for s in samples)
     profile = load_profile(shipped)
     assert profile.generate is not None
+    # Nothing in models belongs to a sample: the boot downloads exactly the base model, the one LoRA and the
+    # upscale model.
+    assert [PurePosixPath(m.file).name for m in profile.models] == [
+        "qwen-image-2.1-UC-Q4_K_M.gguf", "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors",
+        "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors"]
     # Both workflows keep their own cfg 1.0, the guidance default (the web app checks this at startup too).
     root = shipped.parents[1]
     for name, node in (("qwen-image-t2i.json", "8"), ("qwen-image-edit.json", "7")):

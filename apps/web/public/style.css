@@ -38,7 +38,9 @@ body {
   font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
-main { max-width: 40rem; margin: 0 auto; padding: 12px; display: grid; gap: 12px; }
+/* The app screen: the tool menu (a fixed sidebar, or a drawer on narrow screens) beside the page column. */
+.page { max-width: 40rem; margin: 0 auto; padding: 12px; display: grid; gap: 12px; min-width: 0; }
+.main { display: grid; gap: 12px; min-width: 0; }
 [hidden] { display: none !important; }
 h1 { font-size: 1.25rem; margin: 0; }
 h2 { font-size: 1.05rem; margin: 0 0 8px; }
@@ -116,7 +118,6 @@ ul { padding: 0; margin: 0; list-style: none; }
 .refs .ref-name { font-size: 0.8rem; color: var(--muted); overflow-wrap: anywhere; margin: 4px 0; }
 .refs .ref-tag { font-size: 0.8rem; font-weight: 600; }
 .refs button { width: 100%; min-height: 44px; padding: 4px 8px; }
-#mode-box { margin-bottom: 8px; }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 400; margin: 12px 0 4px; }
 .check input { width: auto; min-width: 22px; min-height: 22px; margin: 0; }
 .grid button.save, #gal-open, #gal-more { width: 100%; margin-top: 4px; }
@@ -181,3 +182,51 @@ ul { padding: 0; margin: 0; list-style: none; }
 #advanced-box[open] > summary::before { content: "\25BE"; content: "\25BE" / ""; } /* empty alt text: decorative */
 #advanced-box input[type="range"] { width: 100%; min-height: 44px; }
 #advanced-box textarea { width: 100%; }
+
+/* ---- tool menu ---- */
+.sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 12px; overflow-y: auto; overscroll-behavior: contain; }
+.side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.side-title { margin: 0; font-weight: 700; font-size: 1.05rem; }
+.icon-btn { padding: 0; font-size: 1.5rem; line-height: 1; }
+.menu-search { margin: 0; }
+.menu-list { margin-top: 4px; }
+/* Group headings in small capitals. */
+.menu-heading { margin: 14px 10px 4px; font-size: 0.95rem; font-weight: 700; font-variant-caps: all-small-caps; letter-spacing: 0.06em; color: var(--muted); }
+.menu-group ul { display: grid; gap: 2px; }
+.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 10px; text-align: left; font-weight: 500; color: var(--text); background: transparent; border: 0; border-radius: 8px; }
+.menu-item:hover { background: var(--bg); }
+.menu-item[aria-current="page"] { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.menu-title { min-width: 0; overflow-wrap: anywhere; }
+.icon { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.menu-empty { margin: 12px 10px; }
+.backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 15; }
+/* Narrow screens: the menu is an off-canvas drawer, opened from the Menu button of a sticky top bar. */
+@media (max-width: 899.98px) {
+  .sidebar { position: fixed; top: 0; bottom: 0; left: 0; width: min(20rem, 85vw); z-index: 20; transform: translateX(-100%); visibility: hidden; padding-top: calc(12px + env(safe-area-inset-top)); }
+  .sidebar.open { transform: none; visibility: visible; box-shadow: 0 0 24px rgba(0, 0, 0, 0.35); }
+  .top { position: sticky; top: 0; z-index: 10; margin: -12px -12px 0; padding: calc(8px + env(safe-area-inset-top)) 12px 8px; background: var(--bg); border-bottom: 1px solid var(--border); justify-content: flex-start; gap: 10px; }
+  .top h1 { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .menu-btn { flex: none; }
+}
+/* Wide screens: a fixed sidebar of about 250 px; the drawer controls are not needed. */
+@media (min-width: 900px) {
+  .sidebar { position: fixed; top: 0; bottom: 0; left: 0; width: 250px; z-index: 5; }
+  .app { padding-left: 250px; }
+  .page { max-width: 48rem; }
+  .menu-btn, #menu-close, .backdrop { display: none; }
+}
+/* The drawer turns visible at once when it opens (so the focus can move into it) and hidden only after it slid out. */
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar { transition: transform 0.2s, visibility 0s linear 0.2s; }
+  .sidebar.open { transition: transform 0.2s, visibility 0s; }
+}
+
+/* Start dialog: advanced server choice */
+#start-advanced { margin: 12px 0; }
+#start-advanced summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+.start-field { margin: 8px 0; }
+.start-field label { display: block; margin-bottom: 4px; }
+.start-field select, .start-field input { width: 100%; min-height: 44px; box-sizing: border-box; }
+.start-offers { display: grid; gap: 6px; margin: 8px 0; }
+.start-offer { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.start-offer input { width: 22px; height: 22px; margin-top: 2px; flex: none; }

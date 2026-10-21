@@ -75,8 +75,25 @@ edit:
 # real instance; compare a few values on the same seed before changing any default.
 guidance: {min: 1.0, max: 6.0, step: 0.5, default: 1.0}
 
-# Styles: a LoRA (kind: lora, the default) or a preset prompt (kind: preset) with its own parameters, offered as a
-# sub-menu of a mode. This is the ONLY preset mechanism (the "recipes" of branch feat/recipes-negative-prompt were
+# The tool menu of the page (deploy/web/README.md "Menu"): ordered categories, and the built-in tools (plain
+# generate, plain edit, upscale), at most one per mode. Every enabled style below is its own entry too; a style may
+# set `category` (one of these ids), `description` (one line, at most 120 characters), `icon` (one of the page's
+# built-in icons: image, wand, user, users, swap, shirt, restore, sparkles, expand, camera, brush) and `order`
+# (lower first inside its category; entries without one come last, in profile order). A style without a category
+# or icon takes those of its mode's tool. An edit or upscale entry shows only while that mode is on (the API marks
+# it unavailable otherwise).
+menu:
+  categories:
+    - {id: create, title: Create}
+    - {id: edit, title: "Edit & combine"}
+    - {id: enhance, title: Enhance}
+  tools:
+    - {id: text_to_image, title: Text to image, description: "Describe a picture and generate it.", icon: image, mode: generate, category: create, order: 10}
+    - {id: free_edit, title: Free edit, description: "Change or combine your images with an instruction.", icon: wand, mode: edit, category: edit, order: 10}
+    - {id: upscale, title: Upscale, description: "Make an image two or four times bigger.", icon: expand, mode: upscale, category: enhance, order: 20}
+
+# Styles: a LoRA (kind: lora, the default) or a preset prompt (kind: preset) with its own parameters, each offered
+# as its own entry of the tool menu (menu: above) in the mode(s) it lists. This is the ONLY preset mechanism (the "recipes" of branch feat/recipes-negative-prompt were
 # folded into it). Optional `defaults` are values the page pre-fills when the style is chosen and the user can change:
 # negative_prompt, cfg (on the guidance grid), preset (quality), size (generate styles) and resolution (edit styles).
 # The server never applies them on its own: a request runs with what it sends. (Design:
@@ -91,6 +108,10 @@ styles:
   # Strength 0 leaves the LoRA loader out (prompt only, as the instruction worked without a LoRA in spike S6).
   - id: anything2real
     title: Anime / cartoon to real
+    category: edit
+    description: "Turn an anime or cartoon character into a realistic photo."
+    icon: camera
+    order: 20
     modes: [edit]
     enabled: true
     lora:
@@ -107,69 +128,103 @@ styles:
   # the face to use. The whole prompt must fit GENERATE_MAX_PROMPT_CHARS.
   - id: faceswap
     title: Face swap
+    category: edit
+    description: "Put the face from one photo onto the person in another."
+    icon: swap
+    order: 30
     kind: preset
     modes: [edit]
     enabled: true
     prompt_template: "Edit <image1>: replace only the face of the person in <image1> with the face of the person in <image2>. Keep the body, pose, hair, clothing, background, lighting and camera framing of <image1> exactly the same. The result must contain exactly one person. {prompt}"
     references: {min: 2, max: 2, labels: ["Scene to keep", "Face to use"]}
     hint: "Results depend on the model. Only use a face with the consent of the person in the second photo."
-  # Sample presets ported from the recipes of feat/recipes-negative-prompt. ALL OFF: their wording is a first draft,
-  # never compared on real output, and their negative prompt and cfg defaults are UNVERIFIED for this model. The
-  # recipe "face_swap" was not ported: `faceswap` above (the owner's tested instruction) replaces it.
+  # Sample presets ported from the recipes of feat/recipes-negative-prompt. ON for the live test (2026-10-20): they
+  # are presets, so they download nothing. Their wording is a first draft, never compared on real output, and their
+  # negative prompt and cfg defaults are UNVERIFIED for this model (and QwenImage21Cache): the page only pre-fills
+  # them and the user can change or clear each one; the live test decides whether they stay. The recipe
+  # "face_swap" was not ported: `faceswap` above (the owner's tested instruction) replaces it.
   - id: portrait_photo
     title: Portrait photo
+    category: create
+    description: "A realistic portrait with natural skin and soft light."
+    icon: user
+    order: 20
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A realistic portrait photograph with natural skin texture, fine pores and small imperfections, soft natural light, shallow depth of field, 85mm lens, true-to-life colors and sharp eyes. {prompt}"
-    hint: "Describe the person in the notes."
+    hint: "Describe the person in the notes. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "plastic skin, airbrushed, waxy, oversmoothed, uncanny face, deformed hands, extra fingers, blurry, low quality, watermark, text, oversaturated"
       cfg: 3.0
   - id: family_photo
     title: Family photo
+    category: create
+    description: "A warm, candid photo of a group of people."
+    icon: users
+    order: 30
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A warm, candid family photograph, everyone looking natural and relaxed, realistic faces and hands, natural daylight, 50mm lens, true-to-life colors, detailed clothing. {prompt}"
-    hint: "Describe who is in the photo and where."
+    hint: "Describe who is in the photo and where. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "plastic skin, distorted faces, merged people, extra fingers, deformed hands, extra limbs, blurry, low quality, watermark, text"
       cfg: 3.0
   - id: anime
     title: Anime illustration
+    category: create
+    description: "An anime-style illustration from your description."
+    icon: sparkles
+    order: 40
     kind: preset
     modes: [generate]
-    enabled: false
+    enabled: true
     prompt_template: "A high-quality anime illustration with clean line art, expressive eyes, detailed cel shading and a balanced color palette. {prompt}"
+    hint: "Describe the scene in the notes. Pre-fills guidance 3 and a negative prompt (untested on this model; change or reset them under Advanced)."
     defaults:
       negative_prompt: "photorealistic, 3d render, blurry, low quality, jpeg artifacts, bad anatomy, extra fingers, watermark, text"
       cfg: 3.0
   - id: outfit_swap
     title: Outfit swap
+    category: edit
+    description: "Dress the person in one photo in the clothing from another."
+    icon: shirt
+    order: 40
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Make the person in <image1> wear the clothing from <image2>. Keep the face, pose, background and lighting of <image1> unchanged. {prompt}"
     references: {min: 2, max: 2, labels: ["Person", "Clothing to use"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "changed face, changed pose, mismatched lighting, blurry, distorted clothing"
   - id: photo_restore
     title: Restore old photo
+    category: enhance
+    description: "Repair scratches, noise and faded colors of an old photo."
+    icon: restore
+    order: 10
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Restore this old photograph: remove scratches, dust and noise, repair damaged areas, correct the faded colors and sharpen the detail while keeping every face and the identity of every person exactly the same. {prompt}"
     references: {min: 1, max: 1, labels: ["Photo to restore"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "changed faces, new people, over-smoothed skin, artifacts"
   - id: to_anime
     title: Photo to anime
+    category: edit
+    description: "Redraw a photo as an anime illustration."
+    icon: brush
+    order: 50
     kind: preset
     modes: [edit]
-    enabled: false
+    enabled: true
     prompt_template: "Redraw <image1> as a high-quality anime illustration with clean line art and cel shading, keeping the identity, pose and composition. {prompt}"
     references: {min: 1, max: 1, labels: ["Photo to redraw"]}
+    hint: "Pre-fills a negative prompt (untested; it only counts with guidance above 1, under Advanced)."
     defaults:
       negative_prompt: "photorealistic, 3d render, blurry, low quality"
 

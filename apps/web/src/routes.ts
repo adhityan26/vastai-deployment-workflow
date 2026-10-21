@@ -13,6 +13,10 @@ import {
   NoActiveInstanceError,
   NoGpuConfiguredError,
   NoOffersError,
+  OfferGoneError,
+  VastError,
+  StartFilterError,
+  type StartFilters,
   ObjectStoreError,
   RefusedError,
   ResponseTooLarge,
@@ -26,6 +30,7 @@ import {
   checkGuidanceDefault,
   generate,
   labelHostname,
+  menuItems,
   pollResult,
   referenceLimits,
   tenthsOfSeconds,
@@ -248,16 +253,34 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
 const EMPTY_BODY = { type: "object", additionalProperties: false, properties: {} } as const;
 // The browser sends only a model NAME; the server checks it against VAST_ALLOWED_GPUS.
 const GPU_FIELD = { type: "string", minLength: 1, maxLength: GPU_NAME_MAX } as const;
+// The advanced server choice: the same members in the query of the read routes and in the Start body. The shape is
+// checked here; the values (region list, price cap, speed bound, offer id) are checked by the lifecycle.
+// Query values are text (the server does not coerce types), so numbers are matched by pattern and converted below.
+const FILTER_QUERY_PROPS = {
+  region: { type: "string", maxLength: 32 },
+  max_dph: { type: "string", pattern: "^[0-9]{1,6}(\\.[0-9]{1,6})?$" },
+  min_down_mbps: { type: "string", pattern: "^[0-9]{1,9}$" },
+  sort: { type: "string", maxLength: 16 },
+  offer_id: { type: "string", pattern: "^[0-9]{1,15}$" },
+} as const;
+const FILTER_BODY_PROPS = {
+  region: { type: ["string", "null"], maxLength: 32 },
+  max_dph: { type: ["number", "null"] },
+  min_down_mbps: { type: ["integer", "null"] },
+  sort: { type: ["string", "null"], maxLength: 16 },
+  offer_id: { type: ["integer", "null"] },
+} as const;
+const FILTER_KEYS = ["region", "max_dph", "min_down_mbps", "sort", "offer_id"] as const;
 const START_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["confirm"],
-  properties: { confirm: { const: true }, gpu: GPU_FIELD },
+  properties: { confirm: { const: true }, gpu: GPU_FIELD, ...FILTER_BODY_PROPS },
 } as const;
 const ESTIMATE_QUERY = {
   type: "object",
   additionalProperties: false,
-  properties: { gpu: GPU_FIELD },
+  properties: { gpu: GPU_FIELD, ...FILTER_QUERY_PROPS },
 } as const;
 const ID_PARAMS = {
   type: "object",
@@ -430,6 +453,17 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           maxIntermediatePixels: intCfg(cfg, "upscaleMaxIntermediatePixels", "UPSCALE_MAX_INTERMEDIATE_PIXELS"),
         };
 
+  // The tool menu is fixed at startup (profile and which modes are on here); only titles, descriptions, icon
+  // names and ids, never templates, node ids or file names.
+  const menuItemsOn = menuItems(deps.profile.menu, deps.profile.styles).map((item) => ({
+    ...item,
+    available: item.tool === "generate" || (item.tool === "edit" ? limits !== null && editSpec !== null : upscaleLimits !== null),
+  }));
+  const menuView = {
+    categories: deps.profile.menu.categories.filter((c) => menuItemsOn.some((i) => i.category === c.id)).map((c) => ({ id: c.id, title: c.title })),
+    items: menuItemsOn,
+  };
+
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
@@ -590,6 +624,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               max_pixels: upscaleLimits.maxPixels,
               types: [...upscaleLimits.types],
             },
+      // The tool menu: categories and entries in display order; `available` is false while the entry's mode is off.
+      menu: menuView,
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null
@@ -613,12 +649,41 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     if (err instanceof NoOffersError) {
       return sendError(reply, 409, "no_offers", "no Vast offer matches for this GPU model right now");
     }
+    if (err instanceof OfferGoneError) {
+      return sendError(reply, 409, "offer_gone", "that offer is no longer available; choose another or refresh the list");
+    }
+    if (err instanceof StartFilterError) return sendError(reply, 400, "invalid_filter", err.message);
     return null;
   };
 
-  app.get("/api/gpus", admin, async (_req, reply) => {
+  /** The filter members of a query or body, checked against the configured limits; null after a 400 reply was sent. */
+  const readFilters = (reply: FastifyReply, source: unknown, fromQuery = false): StartFilters | null => {
+    const raw: Record<string, unknown> = {};
+    const from = (source ?? {}) as Record<string, unknown>;
+    for (const key of FILTER_KEYS) {
+      const v = from[key];
+      if (v === undefined) continue;
+      raw[key] = fromQuery && typeof v === "string" && key !== "region" && key !== "sort" ? Number(v) : v;
+    }
     try {
-      return { gpus: await deps.lifecycle.gpuOptions() };
+      return deps.lifecycle.parseFilters(raw);
+    } catch (err) {
+      // A malformed VAST_* value is a server configuration problem, reported like the lifecycle's config_invalid.
+      if (err instanceof VastError) {
+        log("warn", `filters refused: ${errorName(err)} (internal: config_invalid)`);
+        sendError(reply, 502, "config_invalid", "the server configuration for Vast offers is invalid");
+        return null;
+      }
+      if (gpuRefusal(reply, err) === null) throw err;
+      return null;
+    }
+  };
+
+  app.get("/api/gpus", { ...admin, schema: { querystring: { type: "object", additionalProperties: false, properties: FILTER_QUERY_PROPS } } }, async (req, reply) => {
+    const filters = readFilters(reply, req.query, true);
+    if (filters === null) return reply;
+    try {
+      return { gpus: await deps.lifecycle.gpuOptions(filters) };
     } catch (err) {
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
@@ -639,10 +704,27 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     }
   });
 
+  // The offers an admin may pick from in the advanced part of the Start dialog (ids are Vast offer ids, never machines).
+  app.get("/api/offers", { ...admin, schema: { querystring: ESTIMATE_QUERY } }, async (req, reply) => {
+    const { gpu } = req.query as { gpu?: string };
+    const filters = readFilters(reply, req.query, true);
+    if (filters === null) return reply;
+    try {
+      return reply.header("cache-control", "no-store").send({ offers: await deps.lifecycle.offers(gpu, filters) });
+    } catch (err) {
+      const refused = gpuRefusal(reply, err);
+      if (refused) return refused;
+      log("warn", `offers failed: ${errorName(err)}`);
+      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+    }
+  });
+
   app.get("/api/estimate", { ...admin, schema: { querystring: ESTIMATE_QUERY } }, async (req, reply) => {
     const { gpu } = req.query as { gpu?: string };
+    const filters = readFilters(reply, req.query, true);
+    if (filters === null) return reply;
     try {
-      return publicEstimate(await deps.lifecycle.estimate(gpu));
+      return publicEstimate(await deps.lifecycle.estimate(gpu, filters));
     } catch (err) {
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
@@ -652,12 +734,15 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   });
 
   app.post("/api/start", { ...admin, schema: { body: START_BODY } }, async (req, reply) => {
+    // A malformed filter is refused before it counts: only a well-formed attempt uses the hourly limit.
+    const filters = readFilters(reply, req.body);
+    if (filters === null) return reply;
     // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
     if (!startLimiter.take("start")) return sendError(reply, 429, "rate_limited", "too many start requests this hour");
     const { gpu } = req.body as { gpu?: string };
     log("info", `start requested by ${userLabel(req.identity?.username) ?? "?"}`);
     try {
-      const { record, estimate } = await deps.lifecycle.start(gpu, req.identity?.username ?? null);
+      const { record, estimate } = await deps.lifecycle.start(gpu, req.identity?.username ?? null, filters);
       return { status: record.status, vast_instance_id: record.vast_instance_id, estimate: publicEstimate(estimate) };
     } catch (err) {
       if (err instanceof AlreadyActiveError) return sendError(reply, 409, "already_active", "an instance is already active");

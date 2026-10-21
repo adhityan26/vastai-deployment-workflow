@@ -17,6 +17,18 @@ const editTemplate = JSON.parse(readFileSync(join(root, "instance/workflows/qwen
 
 type Doc = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
+/** The sample presets, on since the live test of 2026-10-20 (kind preset: they download nothing). */
+const SAMPLES = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
+
+/**
+ * Drop the edit section. The enabled edit styles stay, but their defaults go too: a default negative prompt or
+ * cfg needs the edit workflow's mapping, which is gone with the section (the loader refuses that, see below).
+ */
+const withoutEdit = (d: Doc): void => {
+  delete d.edit;
+  for (const st of d.styles) if (st.modes.includes("edit")) delete st.defaults;
+};
+
 function writeProfile(mutate: (doc: Doc) => void): string {
   const doc = parse(readFileSync(shipped, "utf8")) as Doc;
   mutate(doc);
@@ -150,7 +162,14 @@ describe("edit section", () => {
   });
 
   it("treats a profile without an edit section as edit-disabled", () => {
-    expect(loadProfile(writeProfile((d) => delete d.edit)).edit).toBeNull();
+    const profile = loadProfile(writeProfile(withoutEdit));
+    expect(profile.edit).toBeNull();
+    // The edit styles are still listed (the API marks edit unavailable); only their knob defaults had to go.
+    expect(profile.styles.filter((st) => st.modes.includes("edit")).map((st) => st.id)).toEqual(["anything2real", "faceswap", "outfit_swap", "photo_restore", "to_anime"]);
+  });
+
+  it("refuses to drop the edit section while an enabled edit style pre-fills an edit knob", () => {
+    expect(() => loadProfile(writeProfile((d) => delete d.edit))).toThrow(/style outfit_swap defaults: negative_prompt is not mapped in the edit workflow/);
   });
 
   const bad: Record<string, (e: Doc) => void> = {
@@ -217,7 +236,7 @@ describe("buildEditPrompt", () => {
   });
 
   it("refuses when the profile has no edit section", () => {
-    const noEdit = loadProfile(writeProfile((d) => delete d.edit));
+    const noEdit = loadProfile(writeProfile(withoutEdit));
     expect(() => buildEditPrompt(noEdit, editTemplate, input)).toThrowError(expect.objectContaining({ code: "edit_unavailable" }));
   });
 
@@ -242,19 +261,19 @@ describe("styles in the profile", () => {
     const doc = parse(readFileSync(shipped, "utf8")) as Doc;
     expect(doc.styles[0].id).toBe("anything2real");
     expect(doc.styles[0].enabled).toBe(true);
-    expect(loadProfile(shipped).styles.map((s) => s.id)).toEqual(["anything2real", "faceswap"]);
+    expect(loadProfile(shipped).styles.map((s) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
     const entry = doc.models.find((m: Doc) => m.file === LORA);
     expect(entry).toMatchObject({ repo: "WarmBloodAban/Qwen-Image-2.1-LoRAs", dest: "models/loras/", size_bytes: 318820200 });
     expect(entry.revision).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("with the style off, its LoRA is not required among the models", () => {
-    expect(loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = false; })).styles.map((s) => s.id)).toEqual(["faceswap"]);
+    expect(loadProfile(writeProfile((d) => { withoutLora(d); d.styles[0].enabled = false; })).styles.map((s) => s.id)).toEqual(["faceswap", ...SAMPLES]);
   });
 
   it("turning the style on (model entry added, enabled true) offers it and counts its download", () => {
     const profile = loadProfile(writeProfile(enable));
-    expect(profile.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap"]);
+    expect(profile.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap", ...SAMPLES]);
     expect(profile.models.map((m) => m.file)).toContain(LORA);
   });
 

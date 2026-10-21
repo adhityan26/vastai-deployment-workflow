@@ -43,6 +43,27 @@ import {
   referenceHint,
   CONSOLE_COLLAPSED_KEY,
   GPU_STORAGE_KEY,
+  DEFAULT_START_FILTERS,
+  REGION_CHOICES,
+  SORT_CHOICES,
+  START_FILTERS_STORAGE_KEY,
+  filterBodyMembers,
+  filterQueryString,
+  offerLabel,
+  parseOffers,
+  parseStoredFilters,
+  startFilterProblem,
+  startFiltersAreDefault,
+  type OfferView,
+  type StartFilterState,
+  TOOL_STORAGE_KEY,
+  chainTargets,
+  chooseEntry,
+  menuGroups,
+  usableMenu,
+  WIDE_SCREEN_QUERY,
+  type MenuEntry,
+  type MenuInfo,
   HISTORY_COLLAPSED_KEY,
   formatDuration,
   historyRefreshDue,
@@ -69,6 +90,7 @@ import {
   controls,
   downloadPercent,
   downloadText,
+  errorCode,
   errorReason,
   errorText,
   estimatePath,
@@ -120,6 +142,7 @@ import {
   type GpuOption,
   type Sample,
 } from "./model.js";
+import { iconNode } from "./icons.js";
 
 // DOM glue. Every string that came from the API goes in through textContent or setAttribute,
 // never innerHTML. Decisions live in model.ts.
@@ -144,7 +167,7 @@ export interface App {
 }
 
 class ApiError extends Error {
-  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null) {
+  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null, readonly code: string | null = null) {
     super(message);
   }
 }
@@ -214,7 +237,8 @@ export function mountApp(doc: Document, env: Env): App {
   let samples: Sample[] = []; // recent download byte counts, for speed and ETA
   let creditAskedAt = Number.NEGATIVE_INFINITY; // when the credit was last requested (success or not)
   let creditRunning = false;
-  let mode: PageMode = "generate";
+  let mode: PageMode = "generate"; // follows the selected menu entry (its tool)
+  let selectedId: string | null = null; // the wanted menu entry; the one shown is chosen against the current menu
   const chosenStyle: Record<Mode, string | null> = { generate: null, edit: null }; // null = Standard
   let guidanceValue: number | null = null; // null = at the guidance default (the workflows' own cfg: nothing is sent)
   let prefilled: Prefilled = {}; // what the current style pre-filled, so leaving it undoes that
@@ -266,7 +290,7 @@ export function mountApp(doc: Document, env: Env): App {
       throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
     }
     if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
-    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status);
+    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status, errorCode(json));
     return json;
   }
 
@@ -321,6 +345,7 @@ export function mountApp(doc: Document, env: Env): App {
   function showAuthScreen(kind: "login" | "noaccess", message: string): void {
     startSubmitting = false; // a Start request in flight must not keep the dialog over the login screen
     closeModal?.(false);
+    if (drawerOpen) setDrawer(false, false);
     pauseTimers();
     clearMessages();
     state = null;
@@ -447,7 +472,10 @@ export function mountApp(doc: Document, env: Env): App {
     if (e.target === modal) closeModal?.(false);
   });
   doc.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal?.(false);
+    if (e.key === "Escape") {
+      if (!modal.hidden) closeModal?.(false);
+      else if (drawerOpen) setDrawer(false, true);
+    }
   });
 
   // ---- actions ----
@@ -477,6 +505,21 @@ export function mountApp(doc: Document, env: Env): App {
       return null;
     }
   }
+  function readFilters(): StartFilterState {
+    try {
+      return parseStoredFilters(doc.defaultView?.localStorage.getItem(START_FILTERS_STORAGE_KEY) ?? null);
+    } catch {
+      return DEFAULT_START_FILTERS; // storage unavailable: no remembered choice
+    }
+  }
+  function writeFilters(f: StartFilterState): void {
+    try {
+      doc.defaultView?.localStorage.setItem(START_FILTERS_STORAGE_KEY, JSON.stringify(f));
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+
   function writeRemembered(name: string): void {
     try {
       doc.defaultView?.localStorage.setItem(GPU_STORAGE_KEY, name);
@@ -507,6 +550,62 @@ export function mountApp(doc: Document, env: Env): App {
       select.disabled = true;
       const gpuNote = make("p", "", "muted");
       gpuNote.hidden = true;
+      // Advanced server choice: filters (remembered per device), a list of matching servers, an explicit pick.
+      let filters = readFilters();
+      let chosenOffer: number | null = null;
+      const advanced = make("details");
+      advanced.id = "start-advanced";
+      advanced.open = !startFiltersAreDefault(filters);
+      advanced.append(make("summary", "Advanced server choice"));
+      const field = (labelText: string, id: string, control: HTMLElement): HTMLElement => {
+        const row = make("div", undefined, "start-field");
+        const label = make("label", labelText);
+        label.htmlFor = id;
+        control.id = id;
+        row.append(label, control);
+        return row;
+      };
+      const choiceSelect = (list: readonly { value: string; label: string }[], value: string): HTMLSelectElement => {
+        const sel = make("select");
+        for (const c of list) {
+          const o = make("option", c.label);
+          o.value = c.value;
+          sel.append(o);
+        }
+        sel.value = value;
+        return sel;
+      };
+      const regionSel = choiceSelect(REGION_CHOICES, filters.region);
+      const sortSel = choiceSelect(SORT_CHOICES, filters.sort);
+      const priceIn = make("input");
+      priceIn.type = "text";
+      priceIn.inputMode = "decimal";
+      priceIn.autocomplete = "off";
+      priceIn.placeholder = "no limit";
+      priceIn.value = filters.maxDph;
+      const speedIn = make("input");
+      speedIn.type = "text";
+      speedIn.inputMode = "numeric";
+      speedIn.autocomplete = "off";
+      speedIn.placeholder = "no minimum";
+      speedIn.value = filters.minDown;
+      const showOffers = make("button", "Show matching servers");
+      showOffers.type = "button";
+      const offerList = make("div", undefined, "start-offers");
+      offerList.setAttribute("role", "radiogroup");
+      offerList.setAttribute("aria-label", "Servers");
+      offerList.hidden = true;
+      const offerNote = make("p", "", "muted");
+      offerNote.hidden = true;
+      advanced.append(
+        field("Region", "start-region", regionSel),
+        field("Highest price per hour (USD)", "start-max-price", priceIn),
+        field("Lowest download speed (Mbps)", "start-min-speed", speedIn),
+        field("Order", "start-sort", sortSel),
+        showOffers,
+        offerNote,
+        offerList,
+      );
       const estBox = make("div", undefined, "estimate");
       estBox.setAttribute("aria-live", "polite");
       const errBox = make("div", undefined, "alert bad");
@@ -517,7 +616,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -556,7 +655,7 @@ export function mountApp(doc: Document, env: Env): App {
         modalOk.disabled = true;
         if (select.value === "") return;
         try {
-          const est = parseEstimate(await call("GET", estimatePath(select.value)));
+          const est = parseEstimate(await call("GET", estimatePath(select.value, filterQueryString(filters, chosenOffer))));
           if (seq !== estimateSeq || token !== dialogToken) return;
           if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
           estimate = est;
@@ -594,7 +693,7 @@ export function mountApp(doc: Document, env: Env): App {
         clearMessages();
         render();
         try {
-          const res = await call("POST", API.start, { confirm: true, gpu: chosen });
+          const res = await call("POST", API.start, { confirm: true, gpu: chosen, ...filterBodyMembers(filters, chosenOffer) });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
           const started = parseEstimate(res !== null && typeof res === "object" ? (res as Record<string, unknown>)["estimate"] : null);
@@ -606,6 +705,13 @@ export function mountApp(doc: Document, env: Env): App {
           if (authLost(err)) return;
           showError(err);
           showBanner(err instanceof Error ? err.message : "Something went wrong.");
+          if (err instanceof ApiError && err.code === "offer_gone") {
+            // The chosen server vanished: nothing was rented. Forget the pick and list the servers again.
+            resetOffers();
+            void loadEstimate(); // the price shown must be the automatic one again, not the vanished server's
+            showError(err); // loadEstimate clears the error box first: say why again
+            void loadOffers();
+          }
           select.disabled = false;
           modalOk.disabled = estimate === null;
           modalOk.focus();
@@ -618,17 +724,23 @@ export function mountApp(doc: Document, env: Env): App {
       modal.hidden = false;
       modalCancel.focus();
 
-      void (async () => {
+      const gpusPath = (): string => {
+        const q = filterQueryString(filters, null);
+        return q === "" ? API.gpus : `${API.gpus}?${q}`;
+      };
+
+      /** Read the GPU models (they follow the filters) and rebuild the select; false when it could not. */
+      const populateGpus = async (keep: string | null): Promise<boolean> => {
         try {
-          const list = parseGpus(await call("GET", API.gpus));
-          if (token !== dialogToken) return;
+          const list = parseGpus(await call("GET", gpusPath()));
+          if (token !== dialogToken) return false;
           if (list === null) throw new ApiError("The GPU list was not understood. Nothing was started.");
           gpus = list;
         } catch (err) {
-          if (token !== dialogToken || authLost(err)) return;
+          if (token !== dialogToken || authLost(err)) return false;
           loading.hidden = true;
           showError(err);
-          return;
+          return false;
         }
         loading.hidden = true;
         select.replaceChildren(
@@ -639,17 +751,115 @@ export function mountApp(doc: Document, env: Env): App {
             return o;
           }),
         );
-        const pick = chooseGpu(readRemembered(), gpus);
+        const pick = chooseGpu(keep ?? readRemembered(), gpus);
         if (pick === null) {
           select.value = "";
           select.disabled = true;
           gpuNote.textContent = gpus.length === 0 ? "No GPU model is configured." : "No GPU model has offers right now. Try again later.";
           gpuNote.hidden = false;
-          return;
+          return true;
         }
+        gpuNote.hidden = true;
         select.value = pick;
         select.disabled = false;
-        select.addEventListener("change", () => void loadEstimate());
+        return true;
+      };
+
+      const resetOffers = (): void => {
+        chosenOffer = null;
+        offerList.replaceChildren();
+        offerList.hidden = true;
+        offerNote.hidden = true;
+      };
+
+      /** Take the filter inputs; false (with the problem shown) when they cannot be sent. */
+      const takeFilters = (): boolean => {
+        const next: StartFilterState = { region: regionSel.value, maxDph: priceIn.value.trim(), minDown: speedIn.value.trim(), sort: sortSel.value };
+        const problem = startFilterProblem(next);
+        if (problem !== null) {
+          estimateSeq++;
+          estimate = null;
+          showEstimate();
+          modalOk.disabled = true;
+          showError(new ApiError(problem));
+          return false;
+        }
+        filters = next;
+        writeFilters(filters);
+        return true;
+      };
+
+      const onFiltersChanged = async (): Promise<void> => {
+        if (startSubmitting) return;
+        if (!takeFilters()) return;
+        resetOffers();
+        clearError();
+        if (await populateGpus(select.value === "" ? null : select.value)) await loadEstimate();
+      };
+      for (const control of [regionSel, sortSel, priceIn, speedIn]) control.addEventListener("change", () => void onFiltersChanged());
+
+      const loadOffers = async (): Promise<void> => {
+        if (!takeFilters() || select.value === "") return;
+        offerNote.hidden = false;
+        offerNote.textContent = "Loading servers…";
+        showOffers.disabled = true;
+        try {
+          const query = [`gpu=${encodeURIComponent(select.value)}`, filterQueryString(filters, null)].filter((p) => p !== "").join("&");
+          const list = parseOffers(await call("GET", `${API.offers}?${query}`));
+          if (token !== dialogToken) return;
+          if (list === null) throw new ApiError("The server list was not understood. Nothing was started.");
+          renderOffers(list);
+        } catch (err) {
+          if (token !== dialogToken || authLost(err)) return;
+          offerNote.hidden = true;
+          showError(err);
+        } finally {
+          showOffers.disabled = false;
+        }
+      };
+      showOffers.addEventListener("click", () => void loadOffers());
+
+      const renderOffers = (list: OfferView[]): void => {
+        if (chosenOffer !== null) {
+          chosenOffer = null;
+          void loadEstimate(); // the listing replaced the pick: show the automatic price
+        }
+        offerList.replaceChildren();
+        if (list.length === 0) {
+          offerList.hidden = true;
+          offerNote.hidden = false;
+          offerNote.textContent = "No server matches these filters right now.";
+          return;
+        }
+        offerNote.hidden = true;
+        offerList.hidden = false;
+        const choices: { id: number | null; text: string }[] = [
+          { id: null, text: "Automatic: the first server of this list when you start" },
+          ...list.map((o) => ({ id: o.id, text: offerLabel(o) })),
+        ];
+        choices.forEach((c, i) => {
+          const row = make("label", undefined, "start-offer");
+          const radio = make("input");
+          radio.type = "radio";
+          radio.name = "start-offer";
+          radio.checked = i === 0;
+          radio.addEventListener("change", () => {
+            if (!radio.checked) return;
+            chosenOffer = c.id;
+            void loadEstimate();
+          });
+          row.append(radio, make("span", c.text));
+          offerList.append(row);
+        });
+      };
+
+      void (async () => {
+        if (!(await populateGpus(null))) return;
+        if (select.value === "") return;
+        select.addEventListener("change", () => {
+          resetOffers();
+          void loadEstimate();
+        });
         await loadEstimate();
       })();
     });
@@ -856,11 +1066,7 @@ export function mountApp(doc: Document, env: Env): App {
   const sizeSelect = $<HTMLSelectElement>("size");
   const generateBtn = $<HTMLButtonElement>("btn-generate");
   const promptBox = $<HTMLTextAreaElement>("prompt");
-  const modeBox = $("mode-box");
-  const modeGenerate = $<HTMLButtonElement>("mode-generate");
-  const modeEdit = $<HTMLButtonElement>("mode-edit");
   const editBox = $("edit-box");
-  const modeUpscale = $<HTMLButtonElement>("mode-upscale");
   const promptRow = $("prompt-box");
   const samplingBox = $("sampling-box");
   const resolutionBox = $("resolution-box");
@@ -879,9 +1085,11 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderForm(s: ApiState): void {
-    // Edit can disappear (server config) while it is selected: fall back to plain generate.
-    if (s.edit === null && mode === "edit") mode = "generate";
-    if (s.upscale === null && mode === "upscale") mode = "generate";
+    // The menu decides the mode and the style. An entry can disappear (edit or upscale off, a style gone):
+    // the first entry still offered takes over.
+    const entry = syncSelection(s);
+    $("gen-title").textContent = entry?.title ?? "Generate";
+    setText("tool-desc", entry?.description ?? "");
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
     const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale]);
     if (key !== formKey) {
@@ -943,12 +1151,6 @@ export function mountApp(doc: Document, env: Env): App {
     renderAdvanced(s);
     const editing = mode === "edit";
     const upscaling = mode === "upscale";
-    modeBox.hidden = s.edit === null && s.upscale === null;
-    modeEdit.hidden = s.edit === null;
-    modeUpscale.hidden = s.upscale === null;
-    modeGenerate.setAttribute("aria-pressed", String(mode === "generate"));
-    modeEdit.setAttribute("aria-pressed", String(editing));
-    modeUpscale.setAttribute("aria-pressed", String(upscaling));
     editBox.hidden = !editing && !upscaling;
     resolutionBox.hidden = upscaling;
     scaleBox.hidden = !upscaling;
@@ -973,15 +1175,14 @@ export function mountApp(doc: Document, env: Env): App {
           : "Generating is available when the instance is ready.";
   }
 
-  // ---- styles (a sub-menu per mode, with the panel of the chosen style) ----
+  // ---- style options (the panel of the selected entry's style) ----
 
   const styleBox = $("style-box");
-  const stylesSeg = $("styles");
   const styleParamsBox = $("style-params");
   const styleHint = $("style-hint");
   let styleKey = "";
 
-  /** The style chosen for the current mode, only if the server still lists it for that mode. */
+  /** The style of the selected entry, only if the server still lists it for the current mode. */
   function currentStyle(s: ApiState | null): StyleInfo | null {
     if (mode === "upscale") return null;
     const id = chosenStyle[mode];
@@ -1034,39 +1235,12 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   function renderStyles(s: ApiState): void {
-    if (mode === "upscale") {
-      styleBox.hidden = true;
-      if (styleKey !== "") {
-        styleKey = "";
-        renderReferences();
-      }
-      return;
-    }
-    const m: Mode = mode;
-    const list = stylesForMode(s.styles, m);
-    styleBox.hidden = list.length === 0;
-    if (list.length === 0) {
-      if (styleKey !== "") {
-        styleKey = "";
-        renderReferences();
-      }
-      return;
-    }
-    if (chosenStyle[m] !== null && !list.some((st) => st.id === chosenStyle[m])) chosenStyle[m] = null;
-    const chosen = chosenStyle[m];
-    // Rebuild only when the list or the choice changes, so a poll never resets a slider.
-    const key = JSON.stringify([m, chosen, list.map((st) => st.id), s.styles]);
+    const style = currentStyle(s);
+    // Rebuild only when the style or its definition changes, so a poll never resets a slider.
+    const key = JSON.stringify([mode, style?.id ?? null, style]);
     if (key === styleKey) return;
     styleKey = key;
-    const buttons = [{ id: null as string | null, title: "Standard" }, ...list].map((st) => {
-      const b = make("button", st.title);
-      b.type = "button";
-      b.setAttribute("aria-pressed", String(st.id === chosen));
-      b.addEventListener("click", () => selectStyle(st.id));
-      return b;
-    });
-    stylesSeg.replaceChildren(...buttons);
-    const style = currentStyle(s);
+    styleBox.hidden = style === null || style.params.length === 0;
     styleParamsBox.replaceChildren(...(style ? style.params.map((p) => paramControl(style, p)) : []));
     styleHint.textContent = style?.hint ?? "";
     styleHint.hidden = style?.hint == null;
@@ -1142,25 +1316,179 @@ export function mountApp(doc: Document, env: Env): App {
     guidanceOut.textContent = String(value);
   });
 
-  function selectStyle(id: string | null): void {
-    if (mode === "upscale") return;
-    chosenStyle[mode] = id;
-    styleKey = "";
-    if (state) renderForm(state);
+  // ---- the tool menu (a sidebar on wide screens, a drawer on narrow ones) ----
+
+  const nav = $("tool-nav");
+  const pageBox = $("page");
+  const menuList = $("menu-list");
+  const menuSearch = $<HTMLInputElement>("menu-search");
+  const menuEmpty = $("menu-empty");
+  const menuOpenBtn = $<HTMLButtonElement>("menu-open");
+  const menuCloseBtn = $<HTMLButtonElement>("menu-close");
+  const menuBackdrop = $("menu-backdrop");
+  let menuKey = "";
+  let query = "";
+  let drawerOpen = false;
+
+  // The stored id is only ever compared with the ids of the current menu (chooseEntry), never shown or parsed.
+  function readTool(): string | null {
+    try {
+      return doc.defaultView?.localStorage.getItem(TOOL_STORAGE_KEY) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function writeTool(id: string): void {
+    try {
+      doc.defaultView?.localStorage.setItem(TOOL_STORAGE_KEY, id);
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
   }
 
-  function setMode(next: PageMode): void {
-    if (next === "edit" && state?.edit == null) return;
-    if (next === "upscale" && state?.upscale == null) return;
+  /** The entries offered now, in menu order. */
+  function offeredEntries(): readonly MenuEntry[] {
+    return state === null ? [] : usableMenu(state).items;
+  }
+
+  /**
+   * The entry shown now: the chosen (or remembered) one when the menu still has it, else the first. A fallback
+   * becomes the selection, so an entry that comes back later does not pull the form away. Sets mode and style.
+   */
+  function syncSelection(s: ApiState): MenuEntry | null {
+    const menu = usableMenu(s);
+    if (selectedId === null) selectedId = readTool();
+    const entry = chooseEntry(selectedId, menu.items);
+    if (entry !== null) selectedId = entry.id;
+    mode = entry?.tool ?? "generate";
+    if (mode !== "upscale") chosenStyle[mode] = entry?.style ?? null;
+    renderMenu(menu, entry);
+    return entry;
+  }
+
+  function menuButtons(): HTMLButtonElement[] {
+    return Array.from(menuList.querySelectorAll<HTMLButtonElement>("button.menu-item"));
+  }
+
+  function renderMenu(menu: MenuInfo, entry: MenuEntry | null): void {
+    // Rebuild only when the menu or the search changes (focus and scroll stay put across polls).
+    const key = JSON.stringify([menu, query]);
+    if (key !== menuKey) {
+      menuKey = key;
+      const groups = menuGroups(menu, query);
+      menuList.replaceChildren(
+        ...groups.map(({ category, items }) => {
+          const group = make("section", undefined, "menu-group");
+          const heading = make("h3", category.title, "menu-heading");
+          heading.id = `menu-heading-${category.id}`;
+          group.setAttribute("aria-labelledby", heading.id);
+          const ul = make("ul");
+          for (const item of items) {
+            const b = make("button", undefined, "menu-item");
+            b.type = "button";
+            b.dataset["toolId"] = item.id;
+            if (item.description !== null) b.title = item.description;
+            b.append(iconNode(doc, item.icon), make("span", item.title, "menu-title"));
+            b.addEventListener("click", () => selectEntry(item.id));
+            const li = make("li");
+            li.append(b);
+            ul.append(li);
+          }
+          group.append(heading, ul);
+          return group;
+        }),
+      );
+      menuEmpty.hidden = groups.length > 0 || menu.items.length === 0;
+    }
+    for (const b of menuButtons()) {
+      if (b.dataset["toolId"] === entry?.id) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+    }
+  }
+
+  /**
+   * Choose a menu entry: what the old mode switch and style selector did. From the drawer, the drawer closes and
+   * the focus goes to the chosen tool's panel; in the sidebar it stays on the entry.
+   */
+  function selectEntry(id: string, focusPanel = true): void {
+    if (!offeredEntries().some((i) => i.id === id)) return;
+    selectedId = id;
+    writeTool(id);
     showRefErrors([]);
-    mode = next;
     formError.hidden = true;
+    styleKey = "";
+    const fromDrawer = drawerOpen;
+    if (fromDrawer) setDrawer(false, false);
     if (state) renderForm(state);
     renderReferences();
+    if (focusPanel && fromDrawer) $("gen-title").focus();
+    else if (focusPanel) {
+      // Scrolled down to the results: bring the panel's top back into view (never scroll otherwise).
+      const card = $("tool-card");
+      if (card.getBoundingClientRect().top < 0) card.scrollIntoView?.({ block: "start" });
+    }
   }
-  modeGenerate.addEventListener("click", () => setMode("generate"));
-  modeEdit.addEventListener("click", () => setMode("edit"));
-  modeUpscale.addEventListener("click", () => setMode("upscale"));
+
+  menuSearch.addEventListener("input", () => {
+    query = menuSearch.value;
+    if (state) renderMenu(usableMenu(state), chooseEntry(selectedId, usableMenu(state).items));
+  });
+  menuSearch.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      menuButtons()[0]?.focus();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const first = menuButtons()[0]?.dataset["toolId"];
+      if (first !== undefined) selectEntry(first);
+    }
+  });
+  menuList.addEventListener("keydown", (e) => {
+    const buttons = menuButtons();
+    const at = buttons.indexOf(doc.activeElement as HTMLButtonElement);
+    if (at === -1) return;
+    let next: HTMLElement | undefined;
+    if (e.key === "ArrowDown") next = buttons[Math.min(at + 1, buttons.length - 1)];
+    else if (e.key === "ArrowUp") next = at === 0 ? menuSearch : buttons[at - 1];
+    else if (e.key === "Home") next = buttons[0];
+    else if (e.key === "End") next = buttons[buttons.length - 1];
+    if (next === undefined) return;
+    e.preventDefault();
+    next.focus();
+  });
+
+  /** Open or close the drawer (narrow screens). While open, the page behind it is inert. */
+  function setDrawer(open: boolean, returnFocus: boolean): void {
+    drawerOpen = open;
+    nav.classList.toggle("open", open);
+    menuBackdrop.hidden = !open;
+    pageBox.toggleAttribute("inert", open);
+    menuOpenBtn.setAttribute("aria-expanded", String(open));
+    if (open) menuSearch.focus();
+    else if (returnFocus) menuOpenBtn.focus();
+  }
+  menuOpenBtn.addEventListener("click", () => setDrawer(!drawerOpen, true));
+  menuCloseBtn.addEventListener("click", () => setDrawer(false, true));
+  menuBackdrop.addEventListener("click", () => setDrawer(false, true));
+  // Focus trap: Tab and Shift+Tab wrap inside the open drawer.
+  nav.addEventListener("keydown", (e) => {
+    if (!drawerOpen || e.key !== "Tab") return;
+    const stops = [menuCloseBtn, menuSearch, ...menuButtons()];
+    const first = stops[0]!;
+    const last = stops[stops.length - 1]!;
+    if (e.shiftKey && doc.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && doc.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+  // The drawer is a narrow-screen thing: a screen that becomes wide shows the sidebar instead.
+  const wide = typeof doc.defaultView?.matchMedia === "function" ? doc.defaultView.matchMedia(WIDE_SCREEN_QUERY) : null;
+  wide?.addEventListener?.("change", (e) => {
+    if (e.matches && drawerOpen) setDrawer(false, false);
+  });
 
   promptBox.addEventListener("input", () => {
     $("prompt-count").textContent = characterCount(promptBox.value);
@@ -1373,32 +1701,26 @@ export function mountApp(doc: Document, env: Env): App {
 
   // ---- chaining: a result becomes the reference image of the next edit ----
 
-  /** One button per way to continue from a result; null when edit is not offered or the url is not ours. */
+  /** One button per way to continue from a result; null when no edit or upscale entry is offered or the url is not ours. */
   function chainButtons(src: string, name: string): HTMLElement | null {
-    const s = state;
-    if (s === null || (s.edit === null && s.upscale === null) || !isChainableUrl(src)) return null;
+    const targets = chainTargets(offeredEntries().filter((i) => i.tool !== "generate"));
+    if (targets.length === 0 || !isChainableUrl(src)) return null;
     const row = make("div", undefined, "chain");
-    const targets: { mode: PageMode; id: string | null; title: string }[] = [
-      ...(s.edit ? [{ mode: "edit" as const, id: null, title: "Use as reference" }] : []),
-      ...(s.edit ? stylesForMode(s.styles, "edit") : []).map((st) => ({ mode: "edit" as const, id: st.id, title: `Use as reference: ${st.title}` })),
-      ...(s.upscale ? [{ mode: "upscale" as const, id: null, title: "Upscale" }] : []),
-    ];
     for (const t of targets) {
       const b = make("button", t.title);
       b.type = "button";
-      b.addEventListener("click", () => void chainResult(src, name, t.mode, t.id));
+      b.addEventListener("click", () => void chainResult(src, name, t.id));
       row.append(b);
     }
     return row;
   }
 
-  async function chainResult(src: string, name: string, target: PageMode, styleId: string | null): Promise<void> {
-    mode = target;
-    if (target === "edit") chosenStyle.edit = styleId;
-    styleKey = "";
-    formError.hidden = true;
+  async function chainResult(src: string, name: string, entryId: string): Promise<void> {
+    const target = offeredEntries().find((i) => i.id === entryId);
+    if (target === undefined) return;
     // One image for an upscale, so a result replaces whatever was attached; edit adds to the list.
-    if (target === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    if (target.tool === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    selectEntry(entryId, false);
     const rules = refLimits(state);
     if (rules === null) return;
     try {
@@ -1489,7 +1811,7 @@ export function mountApp(doc: Document, env: Env): App {
    */
   let resultActionsKey = "";
   function renderResultActions(s: ApiState): void {
-    const key = JSON.stringify([s.gallery, s.edit !== null, s.upscale !== null, s.edit ? stylesForMode(s.styles, "edit").map((st) => [st.id, st.title]) : []]);
+    const key = JSON.stringify([s.gallery, chainTargets(usableMenu(s).items.filter((i) => i.tool !== "generate"))]);
     if (key === resultActionsKey) return;
     resultActionsKey = key;
     for (const e of history) if (e.status === "done") renderEntry(e);

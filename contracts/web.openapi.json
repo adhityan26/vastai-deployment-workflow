@@ -295,7 +295,8 @@
           "styles",
           "upscale",
           "guidance",
-          "advanced"
+          "advanced",
+          "menu"
         ],
         "properties": {
           "state": {
@@ -631,6 +632,115 @@
                 },
                 "height": {
                   "type": "integer"
+                }
+              }
+            }
+          },
+          "menu": {
+            "type": "object",
+            "description": "The tool menu of the page, in display order: the profile's categories that have entries, and one entry per built-in tool (plain generate, plain edit, upscale) and per enabled style (a style offered in two modes has one entry per mode). Never templates, node ids, file names or LoRA details. The request shapes of /api/generate, /api/edit and /api/upscale do not change: an entry only tells the page which request to send and which style id to put in it.",
+            "required": [
+              "categories",
+              "items"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "categories": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "title"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 40
+                    }
+                  }
+                }
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "title",
+                    "description",
+                    "icon",
+                    "category",
+                    "tool",
+                    "style",
+                    "available"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                      "description": "Unique entry id: the tool id, the style id, or '<style id>-<mode>' for a style offered in two modes"
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "description": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120,
+                      "description": "One line shown under the title"
+                    },
+                    "icon": {
+                      "type": "string",
+                      "enum": [
+                        "image",
+                        "wand",
+                        "user",
+                        "users",
+                        "swap",
+                        "shirt",
+                        "restore",
+                        "sparkles",
+                        "expand",
+                        "camera",
+                        "brush"
+                      ],
+                      "description": "A built-in inline SVG icon of the page bundle"
+                    },
+                    "category": {
+                      "type": "string",
+                      "description": "The id of one of the listed categories"
+                    },
+                    "tool": {
+                      "type": "string",
+                      "enum": [
+                        "generate",
+                        "edit",
+                        "upscale"
+                      ],
+                      "description": "Which request the entry sends"
+                    },
+                    "style": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "The style id the entry puts in that request; null for a built-in tool"
+                    },
+                    "available": {
+                      "type": "boolean",
+                      "description": "False while the entry's mode is off on this server (edit or upscale not offered)"
+                    }
+                  }
                 }
               }
             }
@@ -1405,6 +1515,73 @@
             "description": "Admins only"
           }
         }
+      },
+      "Offer": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "gpu_name",
+          "dph",
+          "vram_gb",
+          "location",
+          "region",
+          "down_mbps",
+          "reliability"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "gpu_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dph": {
+            "type": "number"
+          },
+          "vram_gb": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "north_america",
+              "south_america",
+              "europe",
+              "asia",
+              "oceania",
+              "africa",
+              null
+            ]
+          },
+          "down_mbps": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reliability": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
       }
     }
   },
@@ -1826,6 +2003,67 @@
               "maxLength": 64,
               "description": "A GPU model name exactly as listed by GET /api/gpus (underscores count as spaces; case is kept). Anything outside VAST_ALLOWED_GPUS is 400 gpu_not_allowed."
             }
+          },
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "north_america",
+                "south_america",
+                "europe",
+                "asia",
+                "oceania",
+                "africa"
+              ]
+            },
+            "description": "Only offers whose server is in this region (derived from Vast's location text, e.g. 'Quebec, CA'). An offer with an unknown place never matches."
+          },
+          {
+            "name": "max_dph",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "description": "Highest price per hour; can only lower VAST_MAX_DPH (above it is 400 invalid_filter)."
+          },
+          {
+            "name": "min_down_mbps",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Lowest reported download speed in Mbps; an offer that reports none is dropped."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "price",
+                "speed",
+                "reliability"
+              ]
+            },
+            "description": "Order of the offers (default price, cheapest first); speed and reliability are best first, unknown last."
+          },
+          {
+            "name": "offer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
           }
         ]
       }
@@ -1901,8 +2139,81 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Bad filter (code invalid_filter)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "north_america",
+                "south_america",
+                "europe",
+                "asia",
+                "oceania",
+                "africa"
+              ]
+            },
+            "description": "Only offers whose server is in this region (derived from Vast's location text, e.g. 'Quebec, CA'). An offer with an unknown place never matches."
+          },
+          {
+            "name": "max_dph",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "description": "Highest price per hour; can only lower VAST_MAX_DPH (above it is 400 invalid_filter)."
+          },
+          {
+            "name": "min_down_mbps",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Lowest reported download speed in Mbps; an offer that reports none is dropped."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "price",
+                "speed",
+                "reliability"
+              ]
+            },
+            "description": "Order of the offers (default price, cheapest first); speed and reliability are best first, unknown last."
+          },
+          {
+            "name": "offer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          }
+        ]
       }
     },
     "/api/credit": {
@@ -2564,6 +2875,54 @@
                     "minLength": 1,
                     "maxLength": 64,
                     "description": "A GPU model name exactly as listed by GET /api/gpus (underscores count as spaces; case is kept). Anything outside VAST_ALLOWED_GPUS is 400 gpu_not_allowed."
+                  },
+                  "region": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "north_america",
+                      "south_america",
+                      "europe",
+                      "asia",
+                      "oceania",
+                      "africa",
+                      "any",
+                      null
+                    ],
+                    "description": "Same meaning as the query parameter of GET /api/offers"
+                  },
+                  "max_dph": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "min_down_mbps": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "sort": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "price",
+                      "speed",
+                      "reliability",
+                      null
+                    ]
+                  },
+                  "offer_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Rent exactly this offer from GET /api/offers instead of the first of the sort order; 409 offer_gone when it vanished or no longer passes the filters (nothing is rented, nothing billed)."
                   }
                 }
               }
@@ -2651,7 +3010,7 @@
             }
           },
           "409": {
-            "description": "An instance is already active (code already_active), or no offer matches for the chosen model(s) right now (code no_offers)",
+            "description": "An instance is already active (code already_active), or no offer matches for the chosen model(s) right now (code no_offers); or the chosen offer is gone (code offer_gone)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4063,6 +4422,175 @@
             }
           }
         }
+      }
+    },
+    "/api/offers": {
+      "get": {
+        "operationId": "offers",
+        "summary": "The best current offers (at most START_OFFER_LIST_MAX) after the configured limits, the bad-machine list and the filters, for the advanced part of the Start dialog (admin). Offer ids are Vast offer ids; machine ids, host ids and addresses never appear.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "offers"
+                  ],
+                  "properties": {
+                    "offers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Offer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown query parameter or bad gpu value (code invalid_body), or a model outside VAST_ALLOWED_GPUS (code gpu_not_allowed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No offer matches for the chosen model(s) right now (code no_offers)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Vast unavailable (code vast_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "VAST_ALLOWED_GPUS is empty: the server refuses to search any GPU (code no_gpu_configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "gpu",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "A GPU model name exactly as listed by GET /api/gpus (underscores count as spaces; case is kept). Anything outside VAST_ALLOWED_GPUS is 400 gpu_not_allowed."
+            }
+          },
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "north_america",
+                "south_america",
+                "europe",
+                "asia",
+                "oceania",
+                "africa"
+              ]
+            },
+            "description": "Only offers whose server is in this region (derived from Vast's location text, e.g. 'Quebec, CA'). An offer with an unknown place never matches."
+          },
+          {
+            "name": "max_dph",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "description": "Highest price per hour; can only lower VAST_MAX_DPH (above it is 400 invalid_filter)."
+          },
+          {
+            "name": "min_down_mbps",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Lowest reported download speed in Mbps; an offer that reports none is dropped."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "price",
+                "speed",
+                "reliability"
+              ]
+            },
+            "description": "Order of the offers (default price, cheapest first); speed and reliability are best first, unknown last."
+          },
+          {
+            "name": "offer_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          }
+        ]
       }
     }
   }

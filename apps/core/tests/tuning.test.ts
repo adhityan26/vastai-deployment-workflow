@@ -43,6 +43,19 @@ function variant(change: (doc: Doc) => void): Profile {
   return loadProfile(path);
 }
 
+/**
+ * Drop the edit workflow's negative prompt and cfg mappings, and with them the edit styles' defaults for those
+ * knobs (an enabled style may not pre-fill a knob its workflow does not map).
+ */
+const noEditKnobsChange = (d: Doc): void => {
+  delete d.edit.params.negative_prompt;
+  delete d.edit.params.cfg;
+  for (const st of d.styles) if (st.modes.includes("edit") && st.defaults) {
+    delete st.defaults.negative_prompt;
+    delete st.defaults.cfg;
+  }
+};
+
 describe("guidance section", () => {
   it("parses the shipped section and refuses a broken one", () => {
     expect(parseGuidance(shippedRaw.guidance)).toEqual(GUIDANCE);
@@ -84,10 +97,12 @@ describe("guidance section", () => {
   it("says per mode what the shipped workflows take", () => {
     expect(tuningSupport(shipped, "generate")).toEqual(FULL);
     expect(tuningSupport(shipped, "edit")).toEqual(FULL);
-    const noEditKnobs = variant((d) => {
+    // Keeping an edit style's default for a knob the workflow no longer maps is refused at load.
+    expect(() => variant((d) => {
       delete d.edit.params.negative_prompt;
       delete d.edit.params.cfg;
-    });
+    })).toThrow(/negative_prompt is not mapped in the edit workflow/);
+    const noEditKnobs = variant(noEditKnobsChange);
     expect(tuningSupport(noEditKnobs, "edit")).toEqual({ negativePrompt: false, cfg: false });
     expect(tuningSupport({ ...shipped, edit: null }, "edit")).toEqual({ negativePrompt: false, cfg: false });
   });
@@ -224,16 +239,28 @@ describe("style defaults", () => {
     expect(parse({ enabled: false, modes: ["generate", "edit"], defaults: { negative_prompt: "blurry" } })).toEqual([]);
   });
 
-  it("the shipped sample presets (ported recipes) are off, valid, and the live styles are unchanged", () => {
-    expect(shipped.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap"]);
-    for (const s of shipped.styles) expect(s.defaults).toEqual({ negativePrompt: null, cfg: null, preset: null, size: null, resolution: null });
+  it("the shipped sample presets (ported recipes) are on for the live test, valid, download nothing, and the live styles are unchanged", () => {
     const samples = ["portrait_photo", "family_photo", "anime", "outfit_swap", "photo_restore", "to_anime"];
-    expect(shippedRaw.styles.filter((s: Doc) => s.enabled === false).map((s: Doc) => s.id)).toEqual(samples);
+    expect(shipped.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap", ...samples]);
+    for (const s of shipped.styles.slice(0, 2)) expect(s.defaults).toEqual({ negativePrompt: null, cfg: null, preset: null, size: null, resolution: null });
+    expect(shippedRaw.styles.filter((s: Doc) => s.enabled === false)).toEqual([]);
     expect(shippedRaw).not.toHaveProperty("recipes");
-    const all = variant((d) => d.styles.forEach((s: Doc) => (s.enabled = true)));
-    expect(all.styles.map((s) => s.id)).toEqual(["anything2real", "faceswap", ...samples]);
-    expect(all.styles.find((s) => s.id === "anime")).toMatchObject({ kind: "preset", modes: ["generate"], defaults: { cfg: 3, negativePrompt: expect.stringMatching(/^photorealistic/) } });
-    expect(all.styles.find((s) => s.id === "outfit_swap")).toMatchObject({ references: { min: 2, max: 2, labels: ["Person", "Clothing to use"] } });
+    // Presets without a LoRA: they add no model to the boot download.
+    for (const id of samples) expect(shipped.styles.find((s) => s.id === id)).toMatchObject({ kind: "preset", lora: null });
+    expect(shipped.models.map((m) => m.file.split("/").pop())).toEqual([
+      "qwen-image-2.1-UC-Q4_K_M.gguf", "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors",
+      "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors",
+    ]);
+    // The three generate samples pre-fill guidance 3 and a negative prompt (UNVERIFIED on this model); the edit
+    // samples only a negative prompt.
+    for (const id of ["portrait_photo", "family_photo", "anime"]) {
+      expect(shipped.styles.find((s) => s.id === id), id).toMatchObject({ modes: ["generate"], defaults: { cfg: 3, negativePrompt: expect.any(String) } });
+    }
+    for (const id of ["outfit_swap", "photo_restore", "to_anime"]) {
+      expect(shipped.styles.find((s) => s.id === id), id).toMatchObject({ modes: ["edit"], defaults: { cfg: null, negativePrompt: expect.any(String) } });
+    }
+    expect(shipped.styles.find((s) => s.id === "anime")).toMatchObject({ defaults: { negativePrompt: expect.stringMatching(/^photorealistic/) } });
+    expect(shipped.styles.find((s) => s.id === "outfit_swap")).toMatchObject({ references: { min: 2, max: 2, labels: ["Person", "Clothing to use"] } });
   });
 });
 
@@ -317,10 +344,7 @@ describe("generate and edit services", () => {
   });
 
   it("refuses bad knobs before anything is sent, also a knob the mode's workflow does not map", async () => {
-    const noEditKnobs = variant((d) => {
-      delete d.edit.params.negative_prompt;
-      delete d.edit.params.cfg;
-    });
+    const noEditKnobs = variant(noEditKnobsChange);
     const { gen, ed, seen } = await fake(noEditKnobs);
     await expect(generate(gen, { ...base, cfg: 9 })).rejects.toMatchObject({ code: "invalid_cfg" });
     await expect(generate(gen, { ...base, negativePrompt: "x".repeat(31) })).rejects.toMatchObject({ code: "negative_prompt_too_long" });

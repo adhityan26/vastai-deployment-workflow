@@ -1,5 +1,6 @@
 import { onGrid, type GuidanceSpec } from "./guidance.js";
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
+import { parseStyleMenuFields, type StyleMenuFields } from "./menu.js";
 import { landsIn, type ComfyPrompt, type ModelEntry } from "./profile.js";
 
 // Styles: a LoRA (or other workflow variation) with its own parameters, offered under a mode.
@@ -93,6 +94,8 @@ export interface StyleSpec {
   /** A short note the page shows with the style; null for none. */
   readonly hint: string | null;
   readonly defaults: StyleDefaults;
+  /** Where its menu entry goes and what it shows (category, description, icon, order). */
+  readonly menu: StyleMenuFields;
 }
 
 export interface ResolvedStyle {
@@ -112,7 +115,7 @@ const TITLE_MAX = 60;
 const CHOICE_MAX = 64;
 const MODES: readonly StyleMode[] = ["generate", "edit"];
 const TYPES: readonly StyleParamType[] = ["float", "int", "choice", "bool"];
-const STYLE_KEYS = new Set(["id", "title", "kind", "modes", "enabled", "lora", "params", "prompt_template", "references", "hint", "defaults"]);
+const STYLE_KEYS = new Set(["id", "title", "kind", "modes", "enabled", "lora", "params", "prompt_template", "references", "hint", "defaults", "category", "description", "icon", "order"]);
 const DEFAULT_KEYS = new Set(["negative_prompt", "cfg", "preset", "size", "resolution"]);
 /** Longest default negative prompt; the request limit (GENERATE_MAX_NEGATIVE_PROMPT_CHARS) is checked at startup. */
 const DEFAULT_NEGATIVE_MAX = 4000;
@@ -325,6 +328,7 @@ function parseOne(raw: unknown, models: readonly ModelEntry[], ctx: StyleContext
     references = { min: min as number, max: max as number, labels };
   }
   const hint = s["hint"] === undefined ? null : text(s["hint"], `style ${id} hint`, HINT_MAX);
+  const menu = parseStyleMenuFields(s, id);
   if (kind === "preset" && promptTemplate === null && params.length === 0) throw new ProfileError(`style ${id}: a preset needs a prompt_template or params`);
 
   const enabled = s["enabled"];
@@ -336,7 +340,7 @@ function parseOne(raw: unknown, models: readonly ModelEntry[], ctx: StyleContext
     // LoraLoaderModelOnly only lists ComfyUI's loras folder: anywhere else the style would fail at run time.
     if (!landsIn(entry, LORA_FOLDER)) throw new ProfileError(`style ${id}: the models entry for ${lora.file} must have dest ${LORA_FOLDER}/`);
   }
-  return { style: { id, title, kind, modes: modesRaw as StyleMode[], lora, params, promptTemplate, references, hint, defaults }, enabled };
+  return { style: { id, title, kind, modes: modesRaw as StyleMode[], lora, params, promptTemplate, references, hint, defaults, menu }, enabled };
 }
 
 /**

@@ -1,0 +1,199 @@
+[
+ {
+  "name": "sample portrait_photo untouched",
+  "kind": "generate",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "portrait_photo"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A realistic portrait photograph with natural skin texture, fine pores and small imperfections, soft natural light, shallow depth of field, 85mm lens, true-to-life colors and sharp eyes.\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample portrait_photo pre-filled",
+  "kind": "generate",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "portrait_photo"
+   },
+   "negativePrompt": "plastic skin, airbrushed, waxy, oversmoothed, uncanny face, deformed hands, extra fingers, blurry, low quality, watermark, text, oversaturated",
+   "cfg": 3
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A realistic portrait photograph with natural skin texture, fine pores and small imperfections, soft natural light, shallow depth of field, 85mm lens, true-to-life colors and sharp eyes. warm light\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"plastic skin, airbrushed, waxy, oversmoothed, uncanny face, deformed hands, extra fingers, blurry, low quality, watermark, text, oversaturated\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":3,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample family_photo untouched",
+  "kind": "generate",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "family_photo"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A warm, candid family photograph, everyone looking natural and relaxed, realistic faces and hands, natural daylight, 50mm lens, true-to-life colors, detailed clothing.\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample family_photo pre-filled",
+  "kind": "generate",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "family_photo"
+   },
+   "negativePrompt": "plastic skin, distorted faces, merged people, extra fingers, deformed hands, extra limbs, blurry, low quality, watermark, text",
+   "cfg": 3
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A warm, candid family photograph, everyone looking natural and relaxed, realistic faces and hands, natural daylight, 50mm lens, true-to-life colors, detailed clothing. warm light\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"plastic skin, distorted faces, merged people, extra fingers, deformed hands, extra limbs, blurry, low quality, watermark, text\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":3,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample anime untouched",
+  "kind": "generate",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "anime"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A high-quality anime illustration with clean line art, expressive eyes, detailed cel shading and a balanced color palette.\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample anime pre-filled",
+  "kind": "generate",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "size": "1:1",
+   "seed": 42,
+   "style": {
+    "id": "anime"
+   },
+   "negativePrompt": "photorealistic, 3d render, blurry, low quality, jpeg artifacts, bad anatomy, extra fingers, watermark, text",
+   "cfg": 3
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"ModelSamplingAuraFlow\",\"inputs\":{\"model\":[\"1\",0],\"shift\":3.1}},\"5\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"A high-quality anime illustration with clean line art, expressive eyes, detailed cel shading and a balanced color palette. warm light\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"inputs\":{\"clip\":[\"2\",0],\"text\":\"photorealistic, 3d render, blurry, low quality, jpeg artifacts, bad anatomy, extra fingers, watermark, text\"}},\"7\":{\"class_type\":\"EmptySD3LatentImage\",\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"8\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"5\",0],\"negative\":[\"6\",0],\"latent_image\":[\"7\",0],\"seed\":42,\"steps\":25,\"cfg\":3,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"9\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"8\",0],\"vae\":[\"3\",0]}},\"10\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"9\",0],\"filename_prefix\":\"s3\"}}}"
+ },
+ {
+  "name": "sample outfit_swap untouched",
+  "kind": "edit",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ==",
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAAAAAAAAAAAAQg=="
+   ],
+   "style": {
+    "id": "outfit_swap"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Make the person in <image1> wear the clothing from <image2>. Keep the face, pose, background and lighting of <image1> unchanged.\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0],\"images.image_2\":[\"ref_2\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}},\"ref_2\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n2.png\"}}}"
+ },
+ {
+  "name": "sample outfit_swap pre-filled",
+  "kind": "edit",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ==",
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAAAAAAAAAAAAQg=="
+   ],
+   "style": {
+    "id": "outfit_swap"
+   },
+   "negativePrompt": "changed face, changed pose, mismatched lighting, blurry, distorted clothing"
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Make the person in <image1> wear the clothing from <image2>. Keep the face, pose, background and lighting of <image1> unchanged. warm light\",\"negative_prompt\":\"changed face, changed pose, mismatched lighting, blurry, distorted clothing\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0],\"images.image_2\":[\"ref_2\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}},\"ref_2\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n2.png\"}}}"
+ },
+ {
+  "name": "sample photo_restore untouched",
+  "kind": "edit",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ=="
+   ],
+   "style": {
+    "id": "photo_restore"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Restore this old photograph: remove scratches, dust and noise, repair damaged areas, correct the faded colors and sharpen the detail while keeping every face and the identity of every person exactly the same.\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}}}"
+ },
+ {
+  "name": "sample photo_restore pre-filled",
+  "kind": "edit",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ=="
+   ],
+   "style": {
+    "id": "photo_restore"
+   },
+   "negativePrompt": "changed faces, new people, over-smoothed skin, artifacts"
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Restore this old photograph: remove scratches, dust and noise, repair damaged areas, correct the faded colors and sharpen the detail while keeping every face and the identity of every person exactly the same. warm light\",\"negative_prompt\":\"changed faces, new people, over-smoothed skin, artifacts\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}}}"
+ },
+ {
+  "name": "sample to_anime untouched",
+  "kind": "edit",
+  "request": {
+   "prompt": "",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ=="
+   ],
+   "style": {
+    "id": "to_anime"
+   }
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Redraw <image1> as a high-quality anime illustration with clean line art and cel shading, keeping the identity, pose and composition.\",\"negative_prompt\":\"\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}}}"
+ },
+ {
+  "name": "sample to_anime pre-filled",
+  "kind": "edit",
+  "request": {
+   "prompt": "warm light",
+   "preset": "standard",
+   "resolution": "1024",
+   "seed": 7,
+   "images": [
+    "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAAAAAAAAAAAAQQ=="
+   ],
+   "style": {
+    "id": "to_anime"
+   },
+   "negativePrompt": "photorealistic, 3d render, blurry, low quality"
+  },
+  "prompt": "{\"1\":{\"class_type\":\"UnetLoaderGGUF\",\"inputs\":{\"unet_name\":\"qwen-image-2.1-UC-Q4_K_M.gguf\"}},\"2\":{\"class_type\":\"CLIPLoader\",\"inputs\":{\"clip_name\":\"qwen3vl_8b_int8_convrot.safetensors\",\"type\":\"qwen_image\",\"device\":\"default\"}},\"3\":{\"class_type\":\"VAELoader\",\"inputs\":{\"vae_name\":\"qwen_image_2.1_vae_bf16.safetensors\"}},\"4\":{\"class_type\":\"QwenImage21Cache\",\"inputs\":{\"model\":[\"1\",0],\"device\":\"auto\",\"dtype\":\"default\"}},\"6\":{\"class_type\":\"TextEncodeQwenImage21\",\"inputs\":{\"clip\":[\"2\",0],\"prompt\":\"Redraw <image1> as a high-quality anime illustration with clean line art and cel shading, keeping the identity, pose and composition. warm light\",\"negative_prompt\":\"photorealistic, 3d render, blurry, low quality\",\"resolution\":1024,\"vae\":[\"3\",0],\"images.image_1\":[\"ref_1\",0]}},\"7\":{\"class_type\":\"KSampler\",\"inputs\":{\"model\":[\"4\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",1],\"latent_image\":[\"6\",2],\"seed\":7,\"steps\":25,\"cfg\":1,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1}},\"8\":{\"class_type\":\"VAEDecode\",\"inputs\":{\"samples\":[\"7\",0],\"vae\":[\"3\",0]}},\"9\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"8\",0],\"filename_prefix\":\"edit\"}},\"ref_1\":{\"class_type\":\"LoadImage\",\"inputs\":{\"image\":\"edit-n1.png\"}}}"
+ }
+]

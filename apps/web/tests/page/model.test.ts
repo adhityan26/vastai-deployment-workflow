@@ -87,7 +87,27 @@ import {
   styleRequest,
   stylesForMode,
   type StyleInfo,
+  TOOL_STORAGE_KEY,
+  chainTargets,
+  chooseEntry,
+  matchesQuery,
+  menuGroups,
+  usableMenu,
+  type MenuEntry,
+  START_FILTERS_STORAGE_KEY,
+  errorCode,
+  DEFAULT_START_FILTERS,
+  filterBodyMembers,
+  filterQueryString,
+  offerLabel,
+  parseOffers,
+  parseStoredFilters,
+  startFilterProblem,
+  startFiltersAreDefault,
 } from "../../public/model.js";
+import { DEFAULT_ICON, ICONS } from "../../public/icons.js";
+import { MENU_ICONS, loadProfile, menuItems } from "@vast-comfy/core";
+import { fileURLToPath } from "node:url";
 
 const base = {
   state: "ready",
@@ -852,5 +872,207 @@ describe("Advanced: knobs, the request and style defaults", () => {
     const c = switchDefaults(a.values, a.prefilled, { cfg: 2 }); // straight to another style
     expect(c.values).toEqual({ ...start, cfg: 2 });
     expect(switchDefaults(c.values, c.prefilled, {}).values).toEqual(start);
+  });
+});
+
+describe("the tool menu", () => {
+  const editInfo = { max_references: 2, max_bytes: 1000, max_pixels: 1000, types: ["png"], resolutions: [{ name: "1024", value: 1024 }] };
+  const upscale = { scales: ["2x"], max_bytes: 1000, max_pixels: 1000, types: ["png"] };
+  const item = (over: Record<string, unknown> = {}) => ({ id: "t", title: "T", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true, ...over });
+  const menu = (items: unknown[], categories: unknown[] = [{ id: "create", title: "Create" }, { id: "edit", title: "Edit" }]) => ({ categories, items });
+  const state = (over: Record<string, unknown> = {}) => parseState({ ...base, presets: [], sizes: [], ...over })!;
+  const entry = (over: Partial<MenuEntry> = {}): MenuEntry => ({ id: "t", title: "T", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true, ...over });
+
+  it("reads the server's menu and leaves out entries it cannot draw faithfully", () => {
+    const s = state({
+      menu: menu(
+        [
+          item({ id: "text_to_image", title: "Text to image", description: "Describe it." }),
+          item({ id: "dup", title: "A" }),
+          item({ id: "dup", title: "B" }), // a second entry with the same id
+          item({ id: "Bad Id" }),
+          item({ id: "nocat", category: "nowhere" }),
+          item({ id: "blank", title: "  " }),
+          item({ id: "long", title: "x".repeat(201) }),
+          item({ id: "tool", tool: "video" }),
+          item({ id: "upstyle", tool: "upscale", style: "anything" }), // upscale takes no style
+          item({ id: "badstyle", tool: "edit", style: "../x" }),
+          item({ id: "off", available: "yes" }), // only true is true
+          item({ id: "noicon", icon: 7, description: "   " }),
+        ],
+        [{ id: "create", title: "Create" }, { id: "create", title: "Again" }, { id: "BAD", title: "x" }, { id: "edit", title: "" }],
+      ),
+    });
+    expect(s.menu!.categories).toEqual([{ id: "create", title: "Create" }]);
+    expect(s.menu!.items.map((i) => i.id)).toEqual(["text_to_image", "dup", "off", "noicon"]);
+    expect(s.menu!.items[0]).toEqual({ id: "text_to_image", title: "Text to image", description: "Describe it.", icon: "image", category: "create", tool: "generate", style: null, available: true });
+    expect(s.menu!.items[1]!.title).toBe("A");
+    expect(s.menu!.items[2]!.available).toBe(false);
+    expect(s.menu!.items[3]).toMatchObject({ icon: "", description: null });
+    expect(state({ menu: "nope" }).menu).toBeNull();
+    expect(state().menu).toBeNull();
+  });
+
+  it("builds the plain tools and one entry per style and mode when the server sends no menu", () => {
+    const styles = [{ id: "a2r", title: "A2R", modes: ["edit"], params: [] }, { id: "mix", title: "Mix", modes: ["generate", "edit"], params: [] }];
+    const m = usableMenu(state({ edit: editInfo, upscale, styles }));
+    expect(m.categories).toEqual([{ id: "tools", title: "Tools" }]);
+    expect(m.items.map((i) => [i.id, i.tool, i.style])).toEqual([
+      ["generate", "generate", null], ["edit", "edit", null], ["upscale", "upscale", null],
+      ["a2r", "edit", "a2r"], ["mix-generate", "generate", "mix"], ["mix-edit", "edit", "mix"],
+    ]);
+    // Edit and upscale off: only what generate can do is offered.
+    expect(usableMenu(state({ styles })).items.map((i) => i.id)).toEqual(["generate", "mix-generate"]);
+  });
+
+  it("offers only available entries whose mode is on and whose style the state lists for that mode", () => {
+    const styles = [{ id: "a2r", title: "A2R", modes: ["edit"], params: [] }];
+    const items = [
+      item({ id: "gen" }),
+      item({ id: "free_edit", tool: "edit", category: "edit" }),
+      item({ id: "a2r", tool: "edit", style: "a2r", category: "edit" }),
+      item({ id: "a2r_gen", tool: "generate", style: "a2r" }), // a2r is edit-only here
+      item({ id: "gone", tool: "edit", style: "gone", category: "edit" }),
+      item({ id: "up", tool: "upscale", category: "edit" }),
+      item({ id: "off", available: false }),
+    ];
+    const on = usableMenu(state({ edit: editInfo, upscale, styles, menu: menu(items) }));
+    expect(on.items.map((i) => i.id)).toEqual(["gen", "free_edit", "a2r", "up"]);
+    const editOff = usableMenu(state({ upscale: null, styles, menu: menu(items) }));
+    expect(editOff.items.map((i) => i.id)).toEqual(["gen"]);
+    expect(editOff.categories.map((c) => c.id)).toEqual(["create"]); // a category without entries is left out
+  });
+
+  it("chooses the wanted entry only when the menu has it, else the first", () => {
+    const items = [entry({ id: "a" }), entry({ id: "b" })];
+    expect(chooseEntry("b", items)!.id).toBe("b");
+    expect(chooseEntry("zzz", items)!.id).toBe("a");
+    expect(chooseEntry(null, items)!.id).toBe("a");
+    expect(chooseEntry("__proto__", items)!.id).toBe("a");
+    expect(chooseEntry("constructor", items)!.id).toBe("a");
+    expect(chooseEntry("a", [])).toBeNull();
+    expect(TOOL_STORAGE_KEY).toBe("vast-comfy.tool");
+  });
+
+  it("matches the search on title and description, ignoring case and surrounding blanks", () => {
+    const e = entry({ title: "Face swap", description: "Put the FACE from one photo onto another." });
+    expect(matchesQuery(e, "")).toBe(true);
+    expect(matchesQuery(e, "   ")).toBe(true);
+    expect(matchesQuery(e, "SWAP")).toBe(true);
+    expect(matchesQuery(e, "  face ")).toBe(true);
+    expect(matchesQuery(e, "onto")).toBe(true);
+    expect(matchesQuery(e, "upscale")).toBe(false);
+    expect(matchesQuery(entry({ description: null }), "photo")).toBe(false);
+    expect(matchesQuery(entry({ title: "Face swap", description: null }), "FACE")).toBe(true);
+    expect(matchesQuery(entry({ title: "x", description: "Old PHOTO" }), "photo")).toBe(true);
+    expect(matchesQuery(entry({ title: "<b>x</b>" }), "<b>")).toBe(true); // plain text, never markup
+  });
+
+  it("groups the entries that match the search under their category, in menu order", () => {
+    const m = {
+      categories: [{ id: "create", title: "Create" }, { id: "edit", title: "Edit" }, { id: "enhance", title: "Enhance" }],
+      items: [
+        entry({ id: "t2i", title: "Text to image", category: "create" }),
+        entry({ id: "free", title: "Free edit", category: "edit", tool: "edit" }),
+        entry({ id: "swap", title: "Face swap", category: "edit", tool: "edit", style: "faceswap" }),
+        entry({ id: "up", title: "Upscale", category: "enhance", tool: "upscale" }),
+      ],
+    };
+    const ids = (q: string) => menuGroups(m, q).map((g) => [g.category.id, g.items.map((i) => i.id)]);
+    expect(ids("")).toEqual([["create", ["t2i"]], ["edit", ["free", "swap"]], ["enhance", ["up"]]]);
+    expect(ids("E")).toEqual([["create", ["t2i"]], ["edit", ["free", "swap"]], ["enhance", ["up"]]]);
+    expect(ids("swap")).toEqual([["edit", ["swap"]]]);
+    expect(ids("nothing")).toEqual([]);
+  });
+
+  it("lists the ways to continue from a result: every edit entry, then upscale", () => {
+    const items = [
+      entry({ id: "t2i" }),
+      entry({ id: "free", tool: "edit" }),
+      entry({ id: "swap", title: "Face swap", tool: "edit", style: "faceswap" }),
+      entry({ id: "up", tool: "upscale" }),
+    ];
+    expect(chainTargets(items)).toEqual([
+      { id: "free", title: "Use as reference" },
+      { id: "swap", title: "Use as reference: Face swap" },
+      { id: "up", title: "Upscale" },
+    ]);
+    expect(chainTargets([entry()])).toEqual([]);
+  });
+});
+
+describe("the shipped profile's menu", () => {
+  it("is drawn whole by the page: every category, entry and icon", () => {
+    const profile = loadProfile(fileURLToPath(new URL("../../../../instance/profiles/image.yaml", import.meta.url)));
+    const entries = menuItems(profile.menu, profile.styles);
+    const s = parseState({ ...base, menu: { categories: profile.menu.categories, items: entries.map((e) => ({ ...e, available: true })) } })!;
+    expect(s.menu!.items.map((i) => i.id)).toEqual(entries.map((e) => e.id));
+    expect(s.menu!.categories.map((c) => c.id)).toEqual(profile.menu.categories.map((c) => c.id));
+    for (const e of s.menu!.items) expect(Object.hasOwn(ICONS, e.icon)).toBe(true);
+  });
+});
+
+describe("menu icons", () => {
+  it("draws exactly the closed set the profile may name", () => {
+    expect(Object.keys(ICONS).sort()).toEqual([...MENU_ICONS].sort());
+    expect(Object.hasOwn(ICONS, DEFAULT_ICON)).toBe(true);
+  });
+});
+
+describe("advanced server choice (Start dialog)", () => {
+  const f = (over: Partial<typeof DEFAULT_START_FILTERS> = {}) => ({ ...DEFAULT_START_FILTERS, ...over });
+
+  it("reads the error code only when it is a plain identifier", () => {
+    expect(errorCode({ error: { code: "offer_gone" } })).toBe("offer_gone");
+    for (const bad of [null, {}, { error: {} }, { error: { code: "Offer Gone" } }, { error: { code: "<b>" } }, { error: { code: 5 } }]) expect(errorCode(bad)).toBeNull();
+  });
+
+  it("the defaults mean no filter at all: nothing in the query or the body", () => {
+    expect(startFiltersAreDefault(DEFAULT_START_FILTERS)).toBe(true);
+    expect(filterQueryString(DEFAULT_START_FILTERS, null)).toBe("");
+    expect(filterBodyMembers(DEFAULT_START_FILTERS, null)).toEqual({});
+    expect(startFiltersAreDefault(f({ region: "europe" }))).toBe(false);
+  });
+
+  it("builds the query and the body from what was chosen, only the members that are set", () => {
+    const chosen = f({ region: "europe", maxDph: "0.4", minDown: "300", sort: "speed" });
+    expect(filterQueryString(chosen, null)).toBe("region=europe&max_dph=0.4&min_down_mbps=300&sort=speed");
+    expect(filterQueryString(chosen, 42)).toBe("region=europe&max_dph=0.4&min_down_mbps=300&sort=speed&offer_id=42");
+    expect(filterBodyMembers(chosen, 42)).toEqual({ region: "europe", max_dph: 0.4, min_down_mbps: 300, sort: "speed", offer_id: 42 });
+    expect(filterBodyMembers(f({ sort: "price" }), null)).toEqual({}); // price is the default order
+    expect(filterBodyMembers(f({ maxDph: " 0.5 " }), null)).toEqual({ max_dph: 0.5 });
+  });
+
+  it("checks the inputs before anything is sent", () => {
+    expect(startFilterProblem(f())).toBeNull();
+    expect(startFilterProblem(f({ maxDph: "0.4", minDown: "300" }))).toBeNull();
+    for (const bad of [f({ maxDph: "abc" }), f({ maxDph: "0" }), f({ maxDph: "-1" }), f({ maxDph: "1e3" }), f({ minDown: "1.5" }), f({ minDown: "-3" }), f({ minDown: "x" }), f({ region: "mars" }), f({ sort: "random" })]) {
+      expect(startFilterProblem(bad), JSON.stringify(bad)).toEqual(expect.any(String));
+    }
+  });
+
+  it("reads the remembered choice only when every member is valid, else the defaults", () => {
+    const ok = JSON.stringify({ region: "asia", maxDph: "0.3", minDown: "100", sort: "reliability" });
+    expect(parseStoredFilters(ok)).toEqual({ region: "asia", maxDph: "0.3", minDown: "100", sort: "reliability" });
+    for (const bad of [null, "", "{", "[]", "5", JSON.stringify({ region: "mars" }), JSON.stringify({ maxDph: 5 }), JSON.stringify({ sort: "<b>" }), JSON.stringify({ region: "asia", extra: 1 })]) {
+      expect(parseStoredFilters(bad), String(bad)).toEqual(DEFAULT_START_FILTERS);
+    }
+    expect(START_FILTERS_STORAGE_KEY).toBe("vast-comfy.start-filters");
+  });
+
+  it("parses the offer list and drops entries it cannot trust", () => {
+    const good = { id: 7, gpu_name: "RTX 3090", dph: 0.31, vram_gb: 24, location: "Quebec, CA", region: "north_america", down_mbps: 812, reliability: 0.99 };
+    const list = parseOffers({ offers: [good, { ...good, id: 0 }, { ...good, id: "8" }, { ...good, dph: "x" }, null, { ...good, id: 9, location: 5, down_mbps: -4, reliability: 7 }] });
+    expect(list!.map((o) => o.id)).toEqual([7, 9]);
+    expect(list![1]).toMatchObject({ location: null, down_mbps: null, reliability: null });
+    expect(parseOffers({})).toBeNull();
+    expect(parseOffers("x")).toBeNull();
+  });
+
+  it("labels an offer with price, place, speed and reliability, leaving out what is unknown", () => {
+    expect(offerLabel({ id: 7, gpu_name: "RTX 3090", dph: 0.31, vram_gb: 24, location: "Quebec, CA", region: "north_america", down_mbps: 812, reliability: 0.991 })).toBe(
+      "RTX 3090 - $0.31/h - Quebec, CA - 812 Mbps down - reliability 99%",
+    );
+    expect(offerLabel({ id: 8, gpu_name: null, dph: 0.2, vram_gb: null, location: null, region: null, down_mbps: null, reliability: null })).toBe("$0.20/h");
   });
 });

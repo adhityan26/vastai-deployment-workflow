@@ -26,6 +26,7 @@ export const API = {
   edit: "/api/edit",
   upscale: "/api/upscale",
   credit: "/api/credit",
+  offers: "/api/offers",
   history: "/api/history",
   gallery: "/api/gallery",
   galleryDelete: "/api/gallery/delete",
@@ -52,6 +53,10 @@ const MAX_GPU_NAME = 64; // the API refuses longer names
 export const GPU_STORAGE_KEY = "vast-comfy.gpu"; // config-lint: ok (browser storage key, not configuration)
 export const CONSOLE_COLLAPSED_KEY = "vast-comfy.console-collapsed"; // config-lint: ok (browser storage key, not configuration)
 export const HISTORY_COLLAPSED_KEY = "vast-comfy.history-collapsed"; // config-lint: ok (browser storage key, not configuration)
+// The menu entry the user chose last (an entry id only; checked against the current menu before use).
+export const TOOL_STORAGE_KEY = "vast-comfy.tool"; // config-lint: ok (browser storage key, not configuration)
+// Layout rule (the same breakpoint as style.css): from this width the menu is a fixed sidebar, below it a drawer.
+export const WIDE_SCREEN_QUERY = "(min-width: 900px)";
 // Speed/ETA: a moving window over the last few polls. A gap longer than this drops the window.
 export const SPEED_WINDOW_SAMPLES = 6;
 export const SPEED_MAX_GAP_MS = 120_000;
@@ -141,6 +146,8 @@ export interface ApiState {
   guidance: GuidanceInfo | null;
   /** The Advanced section per mode (negative prompt, guidance). */
   advanced: AdvancedInfo;
+  /** The tool menu as the server lists it; null when it sends none (the page then builds one: usableMenu). */
+  menu: MenuInfo | null;
 }
 
 export interface Estimate {
@@ -395,6 +402,7 @@ export function parseState(json: unknown): ApiState | null {
     upscale: parseUpscale(json["upscale"]),
     guidance: parseGuidance(json["guidance"]),
     advanced: parseAdvanced(json["advanced"]),
+    menu: parseMenu(json["menu"]),
   };
 }
 
@@ -464,9 +472,143 @@ export function chooseGpu(remembered: string | null, list: readonly GpuOption[])
   return best === null ? null : best.name;
 }
 
-/** GET /api/estimate path for a model name (encoded); the bare path when no model is chosen. */
-export function estimatePath(gpu: string | null): string {
-  return gpu === null ? API.estimate : `${API.estimate}?gpu=${encodeURIComponent(gpu)}`;
+/** GET /api/estimate path for a model name (encoded); the bare path when no model is chosen. `extra` is a ready query part. */
+export function estimatePath(gpu: string | null, extra = ""): string {
+  const query = [gpu === null ? "" : `gpu=${encodeURIComponent(gpu)}`, extra].filter((p) => p !== "").join("&");
+  return query === "" ? API.estimate : `${API.estimate}?${query}`;
+}
+
+// ---- advanced server choice (Start dialog) ----
+
+// Where the dialog's filter choice is remembered in this browser (a preference, no secret).
+export const START_FILTERS_STORAGE_KEY = "vast-comfy.start-filters"; // config-lint: ok (browser storage key, not configuration)
+export const REGION_CHOICES: readonly { value: string; label: string }[] = [
+  { value: "any", label: "Anywhere" },
+  { value: "north_america", label: "North America" },
+  { value: "south_america", label: "South America" },
+  { value: "europe", label: "Europe" },
+  { value: "asia", label: "Asia" },
+  { value: "oceania", label: "Oceania" },
+  { value: "africa", label: "Africa" },
+];
+export const SORT_CHOICES: readonly { value: string; label: string }[] = [
+  { value: "price", label: "Cheapest first" },
+  { value: "speed", label: "Fastest download first" },
+  { value: "reliability", label: "Most reliable first" },
+];
+const MAX_PRICE_TEXT = /^[0-9]{1,6}(\.[0-9]{1,6})?$/;
+const WHOLE_TEXT = /^[0-9]{1,9}$/;
+
+/** What the filter inputs hold, as text; the defaults mean "no filter". */
+export interface StartFilterState { region: string; maxDph: string; minDown: string; sort: string }
+export const DEFAULT_START_FILTERS: StartFilterState = { region: "any", maxDph: "", minDown: "", sort: "price" };
+
+export function startFiltersAreDefault(f: StartFilterState): boolean {
+  return f.region === "any" && f.maxDph.trim() === "" && f.minDown.trim() === "" && f.sort === "price";
+}
+
+/** Why the inputs cannot be sent, or null. The server checks again against its own limits. */
+export function startFilterProblem(f: StartFilterState): string | null {
+  if (!REGION_CHOICES.some((r) => r.value === f.region)) return "Choose a region from the list.";
+  if (!SORT_CHOICES.some((r) => r.value === f.sort)) return "Choose an order from the list.";
+  const price = f.maxDph.trim();
+  if (price !== "" && (!MAX_PRICE_TEXT.test(price) || Number(price) <= 0)) return "Maximum price must be a number above 0, for example 0.40.";
+  const speed = f.minDown.trim();
+  if (speed !== "" && !WHOLE_TEXT.test(speed)) return "Minimum download speed must be a whole number of Mbps.";
+  return null;
+}
+
+/** The query part for /api/estimate, /api/gpus and /api/offers: only the members that are set. */
+export function filterQueryString(f: StartFilterState, offerId: number | null): string {
+  const parts: string[] = [];
+  if (f.region !== "any") parts.push(`region=${encodeURIComponent(f.region)}`);
+  if (f.maxDph.trim() !== "") parts.push(`max_dph=${encodeURIComponent(f.maxDph.trim())}`);
+  if (f.minDown.trim() !== "") parts.push(`min_down_mbps=${encodeURIComponent(f.minDown.trim())}`);
+  if (f.sort !== "price") parts.push(`sort=${encodeURIComponent(f.sort)}`);
+  if (offerId !== null) parts.push(`offer_id=${offerId}`);
+  return parts.join("&");
+}
+
+/** The members added to the Start body: only what is set, so a plain Start sends exactly what it always did. */
+export function filterBodyMembers(f: StartFilterState, offerId: number | null): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (f.region !== "any") out["region"] = f.region;
+  if (f.maxDph.trim() !== "") out["max_dph"] = Number(f.maxDph.trim());
+  if (f.minDown.trim() !== "") out["min_down_mbps"] = Number(f.minDown.trim());
+  if (f.sort !== "price") out["sort"] = f.sort;
+  if (offerId !== null) out["offer_id"] = offerId;
+  return out;
+}
+
+/** The remembered choice when it parses and every member is valid; otherwise the defaults. */
+export function parseStoredFilters(text: string | null): StartFilterState {
+  if (text === null) return DEFAULT_START_FILTERS;
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!isObj(v)) return DEFAULT_START_FILTERS;
+    const keys = Object.keys(v);
+    if (keys.some((k) => !["region", "maxDph", "minDown", "sort"].includes(k))) return DEFAULT_START_FILTERS;
+    const state = { ...DEFAULT_START_FILTERS };
+    for (const k of ["region", "maxDph", "minDown", "sort"] as const) {
+      if (v[k] === undefined) continue;
+      if (typeof v[k] !== "string") return DEFAULT_START_FILTERS;
+      state[k] = v[k];
+    }
+    return startFilterProblem(state) === null ? state : DEFAULT_START_FILTERS;
+  } catch {
+    return DEFAULT_START_FILTERS;
+  }
+}
+
+/** One offer of GET /api/offers. Never a machine or host id (the server does not send one). */
+export interface OfferView {
+  id: number;
+  gpu_name: string | null;
+  dph: number;
+  vram_gb: number | null;
+  location: string | null;
+  region: string | null;
+  down_mbps: number | null;
+  reliability: number | null;
+}
+
+/** Check GET /api/offers; entries that fail validation are dropped. Null when the payload is unusable. */
+export function parseOffers(json: unknown): OfferView[] | null {
+  if (!isObj(json) || !Array.isArray(json["offers"])) return null;
+  return json["offers"].flatMap((o): OfferView[] => {
+    if (!isObj(o) || !posInt(o["id"])) return [];
+    const dph = num(o["dph"]);
+    if (dph === null || dph <= 0) return [];
+    const down = num(o["down_mbps"]);
+    const rel = num(o["reliability"]);
+    const place = typeof o["location"] === "string" && o["location"] !== "" && o["location"].length <= MAX_LOCATION ? o["location"] : null;
+    return [{
+      id: o["id"],
+      gpu_name: typeof o["gpu_name"] === "string" && o["gpu_name"].length <= MAX_GPU_NAME ? o["gpu_name"] : null,
+      dph,
+      vram_gb: posInt(o["vram_gb"]) ? o["vram_gb"] : null,
+      location: place,
+      region: typeof o["region"] === "string" ? o["region"] : null,
+      down_mbps: down !== null && down >= 0 ? down : null,
+      reliability: rel !== null && rel >= 0 && rel <= 1 ? rel : null,
+    }];
+  });
+}
+
+/** "RTX 3090 - $0.31/h - Quebec, CA - 812 Mbps down - reliability 99%" (unknown parts left out). */
+export function offerLabel(o: OfferView): string {
+  const parts = [o.gpu_name, formatPrice(o.dph).replace(/\/hour$/, "/h")];
+  if (o.location !== null) parts.push(o.location);
+  if (o.down_mbps !== null) parts.push(`${o.down_mbps} Mbps down`);
+  if (o.reliability !== null) parts.push(`reliability ${Math.round(o.reliability * 100)}%`);
+  return parts.filter((p): p is string => p !== null).join(" - ");
+}
+
+/** The `code` of an API error body, only when it is a short plain identifier. */
+export function errorCode(body: unknown): string | null {
+  if (!isObj(body) || !isObj(body["error"])) return null;
+  const c = body["error"]["code"];
+  return typeof c === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(c) ? c : null;
 }
 
 /** The `reason` of an API error body, only when it is a short plain string. */
@@ -840,6 +982,113 @@ export function isChainableUrl(url: string): boolean {
   if (/^\/api\/image\/[A-Za-z0-9_-]+\/\d+$/.test(url)) return true;
   const saved = /^\/api\/gallery\/([^/]+)\/image$/.exec(url);
   return saved !== null && isGalleryId(saved[1]);
+}
+
+// ---- the tool menu ----
+
+export interface MenuCategory { id: string; title: string }
+/** One entry of the tool menu: which request it sends (tool) and with which style. */
+export interface MenuEntry {
+  id: string;
+  title: string;
+  description: string | null;
+  /** A name of the page's built-in icon set (icons.ts draws an unknown one as the default icon). */
+  icon: string;
+  category: string;
+  tool: PageMode;
+  style: string | null;
+  available: boolean;
+}
+export interface MenuInfo { categories: MenuCategory[]; items: MenuEntry[] }
+
+const MENU_ID = /^[a-z][a-z0-9_-]{0,63}$/;
+const MENU_TOOLS: readonly PageMode[] = ["generate", "edit", "upscale"];
+const MENU_TEXT_MAX = 200; // the server sends at most 60 (title) and 120 (description) characters
+const nonBlank = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.length <= MENU_TEXT_MAX;
+
+/** The menu of GET /api/state; null when it is missing or unusable. Entries that cannot be drawn faithfully are left out. */
+function parseMenu(v: unknown): MenuInfo | null {
+  if (!isObj(v) || !Array.isArray(v["categories"]) || !Array.isArray(v["items"])) return null;
+  const categories: MenuCategory[] = [];
+  for (const c of v["categories"]) {
+    if (!isObj(c) || typeof c["id"] !== "string" || !MENU_ID.test(c["id"]) || !nonBlank(c["title"])) continue;
+    if (!categories.some((k) => k.id === c["id"])) categories.push({ id: c["id"], title: c["title"] });
+  }
+  const items: MenuEntry[] = [];
+  for (const i of v["items"]) {
+    if (!isObj(i) || typeof i["id"] !== "string" || !MENU_ID.test(i["id"]) || !nonBlank(i["title"])) continue;
+    const tool = i["tool"] as PageMode;
+    const style = i["style"];
+    if (!MENU_TOOLS.includes(tool) || !categories.some((c) => c.id === i["category"]) || items.some((k) => k.id === i["id"])) continue;
+    if (style !== null && (typeof style !== "string" || !MENU_ID.test(style) || tool === "upscale")) continue;
+    items.push({
+      id: i["id"],
+      title: i["title"],
+      description: nonBlank(i["description"]) ? i["description"] : null,
+      icon: typeof i["icon"] === "string" ? i["icon"] : "",
+      category: i["category"] as string,
+      tool,
+      style: style as string | null,
+      available: i["available"] === true,
+    });
+  }
+  return { categories, items };
+}
+
+/** The category of the menu the page builds when the server sends none. */
+const FALLBACK_CATEGORY: MenuCategory = { id: "tools", title: "Tools" };
+
+/** A menu from what the state offers (the server's menu is missing): the plain tools, then each style per mode. */
+function fallbackMenu(s: ApiState): MenuInfo {
+  const plain = (id: string, title: string, icon: string, tool: PageMode): MenuEntry => ({ id, title, description: null, icon, category: FALLBACK_CATEGORY.id, tool, style: null, available: true });
+  const items = [plain("generate", "Generate", "image", "generate"), plain("edit", "Edit images", "wand", "edit"), plain("upscale", "Upscale", "expand", "upscale")];
+  for (const st of s.styles) {
+    for (const m of st.modes) {
+      items.push({ id: st.modes.length === 1 ? st.id : `${st.id}-${m}`, title: st.title, description: null, icon: m === "edit" ? "wand" : "image", category: FALLBACK_CATEGORY.id, tool: m, style: st.id, available: true });
+    }
+  }
+  return { categories: [FALLBACK_CATEGORY], items };
+}
+
+/**
+ * The entries the page offers now, in menu order: available on the server, their mode offered in this state
+ * (edit and upscale can be off), and their style listed for that mode. Categories without an entry are left out.
+ */
+export function usableMenu(s: ApiState): MenuInfo {
+  const menu = s.menu ?? fallbackMenu(s);
+  const items = menu.items.filter((i) => {
+    if (!i.available) return false;
+    if ((i.tool === "edit" && s.edit === null) || (i.tool === "upscale" && s.upscale === null)) return false;
+    return i.style === null || (i.tool !== "upscale" && s.styles.some((st) => st.id === i.style && st.modes.includes(i.tool as Mode)));
+  });
+  return { categories: menu.categories.filter((c) => items.some((i) => i.category === c.id)), items };
+}
+
+/** The wanted entry when the menu has it, else the first one; null for an empty menu. */
+export function chooseEntry(wanted: string | null, items: readonly MenuEntry[]): MenuEntry | null {
+  return items.find((i) => i.id === wanted) ?? items[0] ?? null;
+}
+
+/** True when an entry matches the search text (title or description, ignoring case); empty text matches all. */
+export function matchesQuery(entry: MenuEntry, query: string): boolean {
+  const q = query.trim().toLocaleLowerCase();
+  if (q === "") return true;
+  return entry.title.toLocaleLowerCase().includes(q) || (entry.description ?? "").toLocaleLowerCase().includes(q);
+}
+
+/** The entries that match the search, under their category in menu order; categories without a match are left out. */
+export function menuGroups(menu: MenuInfo, query: string): { category: MenuCategory; items: MenuEntry[] }[] {
+  return menu.categories.flatMap((category) => {
+    const items = menu.items.filter((i) => i.category === category.id && matchesQuery(i, query));
+    return items.length === 0 ? [] : [{ category, items }];
+  });
+}
+
+/** The ways to continue from a result: every edit entry ("Use as reference", with the style's title), then upscale. */
+export function chainTargets(items: readonly MenuEntry[]): { id: string; title: string }[] {
+  const edits = items.filter((i) => i.tool === "edit").map((i) => ({ id: i.id, title: i.style === null ? "Use as reference" : `Use as reference: ${i.title}` }));
+  const ups = items.filter((i) => i.tool === "upscale").map((i) => ({ id: i.id, title: "Upscale" }));
+  return [...edits, ...ups];
 }
 
 // ---- Advanced: negative prompt and guidance, and the defaults a style pre-fills ----

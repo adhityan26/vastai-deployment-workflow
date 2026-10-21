@@ -176,7 +176,7 @@ describe("a running job", () => {
       "POST /api/upscale": { status: 202, body: { id: "job-u" } },
       "GET /api/generate/job-u": { body: { status: "pending", progress: { step: 3, max: 9 }, preview_seq: 0 } },
     });
-    q("#mode-upscale")!.click();
+    document.querySelector<HTMLButtonElement>('.menu-item[data-tool-id="upscale"]')!.click();
     const input = q<HTMLInputElement>("#ref-input")!;
     const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "x.png", { type: "image/png" });
     Object.defineProperty(input, "files", { value: [file], configurable: true });

@@ -423,10 +423,55 @@ Limits to keep in mind:
 - Reference images stay in ComfyUI's `input/` directory on the instance until the instance is
   destroyed; the web service does not delete them after the job.
 
+## Menu
+
+The page lists every tool in a menu: a fixed sidebar of about 250 px from 900 px wide, below that an off-canvas
+drawer opened by the "Menu" button of a sticky top bar (Esc, the backdrop and the close button close it; the focus
+stays inside while it is open and returns to the Menu button). A search box on top filters the entries by title and
+description, ignoring case. Each entry is one tool with its own panel (title, description, the style's labelled
+image slots and hint, notes or prompt, quality/size/resolution, Advanced, the action button); the Status, Results,
+Gallery, History and Boot console cards follow it. Arrow keys, Home and End move through the entries; the chosen
+entry is marked (`aria-current`) and remembered in this browser (`localStorage` key `vast-comfy.tool`, an entry id
+only; an id the current menu does not have falls back to the first entry). "Use as reference" and "Upscale" on a
+result or a saved image select the matching entry. Requests are the same as before the menu: an entry only picks
+the mode and the style (`/api/generate`, `/api/edit` or `/api/upscale`, with `style: {id, params}` for a style entry).
+
+The menu comes from the profile (`instance/profiles/image.yaml`) and is listed in `GET /api/state` under `menu`
+(categories and entries in display order: id, title, description, icon, category, tool, style, available; never
+templates, node ids or file names):
+
+```yaml
+menu:
+  categories:                    # display order; ids are lower-case identifiers, titles at most 40 characters
+    - {id: create, title: Create}
+    - {id: edit, title: "Edit & combine"}
+    - {id: enhance, title: Enhance}
+  tools:                         # the built-in tools, at most one per mode (generate, edit, upscale)
+    - {id: text_to_image, title: Text to image, description: "Describe a picture and generate it.", icon: image, mode: generate, category: create, order: 10}
+    - {id: free_edit, title: Free edit, icon: wand, mode: edit, category: edit, order: 10}
+    - {id: upscale, title: Upscale, icon: expand, mode: upscale, category: enhance, order: 20}
+```
+
+Every enabled style is an entry of its own (one per mode it lists; a style in two modes gets the ids
+`<style>-generate` and `<style>-edit`). A style may set `category` (one of the menu's category ids; checked at load,
+also for a disabled style), `description` (one line, at most 120 characters), `icon` and `order`; without a category
+or icon it takes those of its mode's tool. Inside a category entries sort by `order` (lower first; entries without
+one come last, tools before styles, in profile order). A profile without `menu:` gets one category "Tools" with the
+three plain tools. Edit and upscale entries are left out while that mode is off on the server.
+
+To add a tool: add a style under `styles:` (see the next section) with `enabled: true`, and give it `category`,
+`description`, `icon` and `order`; restart the web service. No page change is needed. A new category is a new
+`menu.categories` item.
+
+Icons are a closed set drawn by the page itself (inline SVG built in `apps/web/public/icons.ts`, nothing loaded from
+outside): `image`, `wand`, `user`, `users`, `swap`, `shirt`, `restore`, `sparkles`, `expand`, `camera`, `brush`. The
+profile loader refuses any other name (the icon list in `apps/core/src/menu.ts`); the page draws an unknown name as
+`sparkles`. A new icon needs both lists changed (a test checks that they match).
+
 ## Styles and "Use as reference"
 
-Styles come from the `styles:` section of `instance/profiles/image.yaml`. The page shows them as a sub-menu per mode
-(`Standard` plus the enabled styles) with a panel built from the style's parameters. The browser sends only
+Styles come from the `styles:` section of `instance/profiles/image.yaml`. The page shows each enabled style as its own
+entry of the tool menu ("Menu" above) with a panel built from the style's parameters. The browser sends only
 `style: {id, params}`; the server validates every value against the profile and takes the LoRA file, nodes and targets
 from the profile, never from the request. A style with `enabled: false` is not listed and is refused.
 
@@ -584,13 +629,34 @@ change each. Leaving the style (or the mode) puts back what the fields held befo
 changed. The server never applies defaults by itself: a job runs with what the request sends, so the request, the
 label and what a user saw are the same thing.
 
-The sample recipes are now sample preset styles, ALL OFF (`enabled: false`): Portrait photo, Family photo and Anime
+The sample recipes are now sample preset styles, ON since commit 035d4f2 for the live test (each is a menu entry): Portrait photo, Family photo and Anime
 illustration (generate; negative prompt and guidance 3.0 as defaults), Outfit swap (2 images), Restore old photo and
 Photo to anime (1 image; a negative prompt default). Their wording is a first draft never compared on real output;
 the generate templates were reordered so `{prompt}` is at the end (an empty note then leaves no stray punctuation).
 The recipe "Face swap" was not ported: the live `faceswap` style (the owner's tested instruction) replaces it.
-`anything2real` and `faceswap` are unchanged and have no defaults. To offer a sample: set `enabled: true`, try it on a
-real instance, and adjust its `defaults`.
+`anything2real` and `faceswap` are unchanged and have no defaults. Try each sample on a real instance and adjust its
+`defaults` (or set `enabled: false` to withdraw it).
+
+## Advanced server choice (Start dialog)
+
+The location of the machine decides how fast a boot is (see "Slow boots"), so the Start dialog has a closed
+"Advanced server choice" section (admins only, like Start itself):
+
+- **Filters:** region (North/South America, Europe, Asia, Oceania, Africa; read from the country code at the end of
+  Vast's location text such as "Quebec, CA", so an offer with an unknown place never matches a region), highest price
+  per hour, lowest reported download speed and an order (cheapest, fastest download, most reliable). A filter can only
+  NARROW the configured limits: a price above `VAST_MAX_DPH` is refused (`400 invalid_filter`), and the Vast query itself
+  keeps `VAST_MAX_DPH`, `VAST_MIN_DOWNLOAD_MBPS` and the reliability minimum. An offer that reports no speed does not
+  pass a minimum speed. The filter choice is remembered per device (localStorage `vast-comfy.start-filters`, validated on read).
+- **Pick a server:** "Show matching servers" lists at most `START_OFFER_LIST_MAX` offers (price, place, speed,
+  reliability) from `GET /api/offers`; "Automatic" (the default) rents the first of the order, a radio rents exactly that offer
+  (`offer_id`). Offer ids are Vast offer ids; machine ids, host ids and addresses never leave the server.
+- **Safety:** the bad-machine list (stuck or slow starts) is applied first, so a machine on it is neither listed nor
+  rentable even by id. If the chosen offer vanished between the list and Start, or no longer passes the filters, the answer is
+  `409 offer_gone`: no instance is created, nothing is billed, and the dialog reads the list again. Malformed filters are
+  `400` and do not use the hourly Start limit.
+- **Not verified live:** Vast's real `geolocation` text (the region parser expects a trailing two-letter country code), that every
+  offer carries `inet_down` and `reliability2`, and the look of the section on a phone.
 
 ## Vast credit (admin)
 
