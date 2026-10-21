@@ -1676,6 +1676,176 @@ describe("upscale", () => {
   });
 });
 
+describe("video", () => {
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }, { name: "Portrait, faster", width: 480, height: 832 }],
+    durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
+    max_bytes: 1000,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+  };
+  const menu = {
+    categories: [{ id: "create", title: "Create" }],
+    items: [
+      { id: "text_to_image", title: "Text to image", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true },
+      { id: "video", title: "Video", description: "Make a short video.", icon: "film", category: "create", tool: "video", style: null, available: true },
+    ],
+  };
+  const pickOne = (name = "a.png", content = "STARTBYTES") => {
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File([content], name, { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+  };
+  const submit = async () => {
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+  };
+  const doneVideo = { body: { status: "done", images: [], videos: [{ index: 0, url: "/api/video/v-1/0" }], seconds: 312, queued_seconds: null } };
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake-video") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("has no entry while the server does not offer video", async () => {
+    await mount({ menu: { ...menu, items: menu.items.map((i) => (i.id === "video" ? { ...i, available: false } : i)) } });
+    expect(menuItem("video")).toBeNull();
+    await mount({ menu });
+    expect(menuItem("video")).toBeNull(); // available, but the state has no video offer
+  });
+
+  it("shows the prompt, one optional start image, size, length and seed, and none of the image controls", async () => {
+    await mount({ menu, video });
+    chooseTool("video");
+    expect(currentTool()).toBe("video");
+    expect(q("#prompt-box")!.hidden).toBe(false);
+    expect(q("#edit-box")!.hidden).toBe(false);
+    expect(q("#ref-label")!.textContent).toBe("Start image (optional)");
+    expect(q<HTMLInputElement>("#ref-input")!.multiple).toBe(false);
+    expect(q("#ref-hint")!.textContent).toContain("Optional: one start image");
+    expect(q("#video-box")!.hidden).toBe(false);
+    expect([...document.querySelectorAll("#video-size option")].map((o) => o.textContent)).toEqual(["Landscape (1280×704)", "Portrait, faster (480×832)"]);
+    expect([...document.querySelectorAll("#video-duration option")].map((o) => o.textContent)).toEqual(["About 3 s", "About 5 s"]);
+    expect(q("#sampling-box")!.hidden).toBe(false);
+    expect(q("#quality-box")!.hidden).toBe(true);
+    expect(q("#size-box")!.hidden).toBe(true);
+    expect(q("#resolution-box")!.hidden).toBe(true);
+    expect(q("#scale-box")!.hidden).toBe(true);
+    expect(q("#advanced-box")!.hidden).toBe(true);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Make video");
+    expect(q("#gen-hint")!.textContent).toContain("several minutes");
+    chooseTool("text_to_image");
+    expect(q("#video-box")!.hidden).toBe(true);
+    expect(q("#quality-box")!.hidden).toBe(false);
+    expect(q("#ref-label")!.textContent).toBe("Reference images");
+  });
+
+  it("text to video: posts exactly the prompt, size and length (and a seed when given), then polls and plays the file", async () => {
+    await mount({ menu, video, gallery: true }, {
+      "POST /api/video": { status: 202, body: { id: "v-1" } },
+      "GET /api/generate/v-1": doneVideo,
+      "GET /api/video/v-1/0": { body: null, raw: "MP4BYTES", type: "video/mp4" },
+    });
+    q<HTMLInputElement>("#autosave")!.checked = true;
+    chooseTool("video");
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox runs";
+    q<HTMLSelectElement>("#video-duration")!.value = "About 5 s";
+    q<HTMLInputElement>("#seed")!.value = "77";
+    await submit();
+    await flush();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "a fox runs", size: "Landscape", duration: "About 5 s", seed: 77 });
+    expect(q(".job .muted")!.textContent).toBe("Video: Landscape, About 5 s");
+    const player = q<HTMLVideoElement>(".job video")!;
+    expect(player).not.toBeNull();
+    expect(player.controls).toBe(true);
+    expect(player.hasAttribute("playsinline")).toBe(true);
+    expect(player.getAttribute("src")).toBe("blob:fake-video");
+    const dl = q<HTMLAnchorElement>(".job a.dl")!;
+    expect(dl.getAttribute("href")).toBe("blob:fake-video");
+    expect(dl.getAttribute("download")).toBe("video-v-1-0.mp4");
+    expect(q(".job-time")!.textContent).toBe("Made in 5 min 12 s");
+    // No Save, no auto-save, no "continue" buttons for a video.
+    expect(q(".job button.save")).toBeNull();
+    expect(q(".job .chain")).toBeNull();
+    expect(posts("/api/gallery")).toHaveLength(0);
+    expect(q(".job")!.textContent).toContain("Videos are not saved to the gallery");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("image to video: sends the one attached image as base64, and the label says so", async () => {
+    await mount({ menu, video }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": { body: { status: "pending", progress: { step: 3, max: 20 }, preview_seq: 0 } } });
+    chooseTool("video");
+    pickOne("a.png", "STARTBYTES");
+    pickOne("b.png");
+    expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    expect(q("#ref-list .ref-tag")!.textContent).toBe("Start image");
+    q<HTMLTextAreaElement>("#prompt")!.value = "it moves";
+    await submit();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "it moves", size: "Landscape", duration: "About 3 s", image: Buffer.from("STARTBYTES").toString("base64") });
+    expect(q(".job .muted")!.textContent).toBe("Video: Landscape, About 3 s, from an image");
+    // While it runs: the step counter and the long-wait note.
+    expect(q(".job-step")!.textContent).toBe("Step 3 of 20");
+    expect(q(".job-wait")!.textContent).toContain("several minutes");
+  });
+
+  it("needs a prompt, and shows the api refusal and frees the form", async () => {
+    await mount({ menu, video }, { "POST /api/video": { status: 400, body: { error: { code: "unknown_duration", message: "duration is not offered for video" } } } });
+    chooseTool("video");
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("Describe the video first.");
+    expect(posts("/api/video")).toHaveLength(0);
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("duration is not offered for video");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("says so when the file cannot be loaded, or is not a video", async () => {
+    for (const reply of [{ status: 502, body: { error: { code: "video_rejected", message: "ComfyUI did not return a video" } } }, { body: null, raw: "<html>", type: "text/html" }]) {
+      await mount({ menu, video }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": doneVideo, "GET /api/video/v-1/0": reply });
+      chooseTool("video");
+      q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+      await submit();
+      await flush();
+      expect(q(".job video")).toBeNull();
+      expect(q(".job [role=alert]")!.textContent).toMatch(/^The video could not be loaded: /);
+      app?.stop();
+    }
+  });
+
+  it("refuses two images carried over from edit: a video takes one start image at most", async () => {
+    const edit = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png"], resolutions: [{ name: "r", value: 1024 }] };
+    const items = [...menu.items, { id: "free_edit", title: "Free edit", description: null, icon: "wand", category: "create", tool: "edit", style: null, available: true }];
+    await mount({ menu: { ...menu, items }, video, edit });
+    chooseTool("free_edit");
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["A"], "a.png", { type: "image/png" }), new File(["B"], "b.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+    chooseTool("video");
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("Attach at most one start image for a video.");
+    expect(posts("/api/video")).toHaveLength(0);
+  });
+
+  it("continues an image result into video: Make a video switches the tool and attaches it as the start image", async () => {
+    await mount({ menu, video }, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": { body: { status: "done", images: [{ index: 0, url: "/api/image/g-1/0" }] } },
+      "GET /api/image/g-1/0": { body: null, raw: "RESULT", type: "image/png" },
+    });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    await submit();
+    await flush();
+    const make = [...document.querySelectorAll<HTMLButtonElement>(".chain button")].find((b) => b.textContent === "Make a video")!;
+    make.click();
+    await flush();
+    expect(currentTool()).toBe("video");
+    expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
+  });
+});
+
 describe("Advanced: negative prompt and guidance", () => {
   const guidance = { min: 1, max: 6, step: 0.5, default: 1 };
   const both = { negative_prompt: true, cfg: true };

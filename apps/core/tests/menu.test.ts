@@ -44,10 +44,10 @@ describe("parseMenu", () => {
     expect(menu.tools[1]).toMatchObject({ description: null, order: null });
   });
 
-  it("a profile without a menu section gets one category with the three plain tools", () => {
+  it("a profile without a menu section gets one category with the four plain tools", () => {
     expect(parseMenu(undefined)).toBe(DEFAULT_MENU);
     expect(parseMenu(null)).toBe(DEFAULT_MENU);
-    expect(DEFAULT_MENU.tools.map((t) => t.mode)).toEqual(["generate", "edit", "upscale"]);
+    expect(DEFAULT_MENU.tools.map((t) => t.mode)).toEqual(["generate", "edit", "upscale", "video"]);
     expect(DEFAULT_MENU.categories).toHaveLength(1);
   });
 
@@ -62,7 +62,7 @@ describe("parseMenu", () => {
     ["a tool with an unknown key", (m) => (m.tools[0].workflow = "x.json"), /menu tool text_to_image has unknown keys: workflow/],
     ["a duplicate tool id", (m) => m.tools.push({ ...m.tools[0], mode: "edit" }), /tool ids must be unique/],
     ["two tools for one mode", (m) => m.tools.push({ ...m.tools[0], id: "again" }), /only one menu tool per mode: generate/],
-    ["an unknown mode", (m) => (m.tools[0].mode = "video"), /mode must be one of generate, edit, upscale/],
+    ["an unknown mode", (m) => (m.tools[0].mode = "audio"), /mode must be one of generate, edit, upscale, video/],
     ["an unknown category", (m) => (m.tools[0].category = "nope"), /category 'nope' is not one of the menu categories/],
     ["an icon outside the built-in set", (m) => (m.tools[0].icon = "https-logo"), /icon must be one of/],
     ["a description on two lines", (m) => (m.tools[0].description = "one\ntwo"), /description must be one line/],
@@ -78,7 +78,7 @@ describe("parseMenu", () => {
   });
 
   it("the icon set is closed and small", () => {
-    expect(MENU_ICONS).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush"]);
+    expect(MENU_ICONS).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush", "film"]);
   });
 });
 
@@ -135,6 +135,7 @@ describe("the menu in a profile", () => {
       ["create", "Portrait photo", "generate", "portrait_photo"],
       ["create", "Family photo", "generate", "family_photo"],
       ["create", "Anime illustration", "generate", "anime"],
+      ["create", "Video", "video", null],
       ["edit", "Free edit", "edit", null],
       ["edit", "Anime / cartoon to real", "edit", "anything2real"],
       ["edit", "Face swap", "edit", "faceswap"],

@@ -18,6 +18,7 @@ export const ICONS: Readonly<Record<string, readonly string[]>> = {
   expand: ["M14 4h6v6", "M20 4l-7 7", "M10 20H4v-6", "M4 20l7-7"],
   camera: ["M3 8h4l2-3h6l2 3h4v12H3z", "M12 17a4 4 0 1 0 0-8a4 4 0 1 0 0 8"],
   brush: ["M19 3l2 2-9 9-2-2z", "M10 12c-3 0-4.5 1.8-4.5 4.2S4.3 19.6 3 20c2.8 1.6 8.4 1.3 9-4.6"],
+  film: ["M4 4h16v16H4z", "M8 4v16M16 4v16", "M4 8h4M4 12h4M4 16h4M16 8h4M16 12h4M16 16h4", "M10.5 9.5l4 2.5-4 2.5z"],
 };
 
 /**

@@ -78,7 +78,7 @@
       </div>
 
       <div id="edit-box" hidden>
-        <label for="ref-input">Reference images</label>
+        <label id="ref-label" for="ref-input">Reference images</label>
         <p id="ref-hint" class="muted"></p>
         <input id="ref-input" name="references" type="file" multiple>
         <p id="ref-error" class="alert bad" role="alert" hidden></p>
@@ -96,6 +96,13 @@
           <label for="scale">Scale</label>
           <select id="scale" name="scale"></select>
         </div>
+      </div>
+
+      <div id="video-box" hidden>
+        <label for="video-size">Size</label>
+        <select id="video-size" name="video_size"></select>
+        <label for="video-duration">Length</label>
+        <select id="video-duration" name="duration"></select>
       </div>
 
       <fieldset id="style-box" hidden>
@@ -119,7 +126,7 @@
       </details>
 
       <div id="sampling-box">
-      <fieldset>
+      <fieldset id="quality-box">
         <legend>Quality</legend>
         <div id="presets" class="seg"></div>
       </fieldset>

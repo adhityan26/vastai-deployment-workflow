@@ -110,6 +110,7 @@ menu:
     - {id: text_to_image, title: Text to image, description: "Describe a picture and generate it.", icon: image, mode: generate, category: create, order: 10}
     - {id: free_edit, title: Free edit, description: "Change or combine your images with an instruction.", icon: wand, mode: edit, category: edit, order: 10}
     - {id: upscale, title: Upscale, description: "Make an image two or four times bigger.", icon: expand, mode: upscale, category: enhance, order: 20}
+    - {id: video, title: Video, description: "Make a short video from a description, or bring a picture to life.", icon: film, mode: video, category: create, order: 50}
 
 # Styles: a LoRA (kind: lora, the default) or a preset prompt (kind: preset) with its own parameters, each offered
 # as its own entry of the tool menu (menu: above) in the mode(s) it lists. This is the ONLY preset mechanism (the "recipes" of branch feat/recipes-negative-prompt were

@@ -43,6 +43,7 @@ const profile = loadProfile(repo("instance/profiles/image.yaml"));
 const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.generate.workflow}`), "utf8"));
 const upscaleTemplate = JSON.parse(readFileSync(repo("instance/workflows/image-upscale.json"), "utf8"));
 const editTemplate = JSON.parse(readFileSync(repo(`instance/workflows/${profile.edit!.workflow}`), "utf8"));
+const videoTemplate = JSON.parse(readFileSync(repo("instance/workflows/video-ti2v.json"), "utf8"));
 
 const PUBLIC_ORIGIN = "https://comfy.example.test"; // config-lint: ok (test fixture)
 const SESSION_SECRET = "test-session-secret-0123456789abcdef";
@@ -246,6 +247,8 @@ async function harness(
     gallery?: Gallery | null;
     /** How the fake ComfyUI answers websocket upgrades. */
     ws?: WsOptions;
+    /** undefined: the shipped video workflow when the profile enables video; null turns video off. */
+    videoTemplate?: unknown;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -331,6 +334,9 @@ async function harness(
     editReferenceTypes: ["png", "jpeg", "webp"],
     upscaleMaxOutputPixels: 100_000,
     upscaleMaxIntermediatePixels: 1_600_000,
+    videoTimeoutS: 1800,
+    videoMaxBytes: 65536,
+    videoViewTimeoutS: 30,
     bootLogMaxLines: 500,
     bootLogMaxLineChars: 400,
     bootLogPollMinS: 5,
@@ -381,6 +387,7 @@ async function harness(
     profile: opts.profile ?? profile,
     template,
     upscaleTemplate: opts.profile?.upscale ? upscaleTemplate : null,
+    videoTemplate: opts.videoTemplate !== undefined ? opts.videoTemplate : opts.profile?.video ? videoTemplate : null,
     editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     credit,
     gallery,
@@ -2583,6 +2590,226 @@ describe("upscale", () => {
   });
 });
 
+describe("video", () => {
+  /** The shipped profile with video on and its three model files pinned (made-up pins, a test fixture). */
+  function videoProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
+    for (const m of doc.video.models) doc.models.push({ file: `split_files/x/${m.file}`, repo: "org/video", revision: "a".repeat(40), dest: m.dest, size_bytes: 1000 });
+    doc.video.enabled = true;
+    mutate?.(doc);
+    const dir = mkdtempSync(join(tmpdir(), "video-profile-"));
+    tempDirs.push(dir);
+    writeFileSync(join(dir, "image.yaml"), stringifyYaml(doc));
+    return loadProfile(join(dir, "image.yaml"));
+  }
+  /** An mp4 file start: a ftyp box of brand isom, then a marker. */
+  const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom\0\0\x02\0isomiso2avc1mp41", "latin1"), Buffer.from("UNIQUE-VIDEO-MARKER")]);
+  const FILE = { filename: "vastcomfy_00001_.mp4", subfolder: "video", type: "output" };
+  /** A ComfyUI that stores uploads, accepts prompts, reports the SaveVideo file (node 11) and serves `body` from /view. */
+  const comfyVideo = (done = true, body: Buffer = MP4, type = "video/mp4"): Handler => (s, res) => {
+    if (s.url === "/upload/image") return json(res, 200, { name: /filename="([^"]+)"/.exec(s.body)![1], subfolder: "", type: "input" });
+    if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-vid" });
+    if (s.url.startsWith("/history/")) {
+      return json(res, 200, done ? { "p-vid": { outputs: { "11": { images: [FILE], animated: [true] } }, status: { completed: true, status_str: "success" } } } : {});
+    }
+    if (s.url.startsWith("/view")) {
+      res.writeHead(200, { "Content-Type": type });
+      return res.end(body);
+    }
+    json(res, 404, {});
+  };
+  const ok = { prompt: "a fox runs through snow", size: "Landscape", duration: "About 3 s" };
+  const sentPrompt = () => JSON.parse(h.comfySeen.find((x) => x.url === "/prompt")!.body).prompt;
+
+  it("is off with the shipped profile: state.video is null, the entry is unavailable and POST /api/video is 404 with nothing sent", async () => {
+    const m = await member();
+    const body = (await call("GET", "/api/state", m)).json();
+    expect(body.video).toBeNull();
+    expect(body.menu.items.find((i: { id: string }) => i.id === "video")).toMatchObject({ tool: "video", available: false });
+    h.setComfy(comfyVideo());
+    const res = await post("/api/video", m, ok);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("video_unavailable");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("lists sizes, durations in seconds and the start image limits only, when enabled", async () => {
+    h = await harness({ profile: videoProfile() });
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.video).toEqual({
+      sizes: [
+        { name: "Landscape", width: 1280, height: 704 },
+        { name: "Portrait", width: 704, height: 1280 },
+        { name: "Landscape, faster", width: 832, height: 480 },
+        { name: "Portrait, faster", width: 480, height: 832 },
+      ],
+      durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
+      max_bytes: 4096,
+      max_pixels: 1_000_000,
+      types: ["png", "jpeg", "webp"],
+    });
+    expect(body.menu.items.find((i: { id: string }) => i.id === "video")).toMatchObject({ available: true, icon: "film", category: "create" });
+    const text = JSON.stringify(body.video);
+    for (const secret of ["safetensors", "frames", "\"node\"", "workflow", "73"]) expect(text).not.toContain(secret);
+  });
+
+  it("text to video: submits the filled workflow, polls to done and serves the mp4 checked by its first bytes", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const m = await member();
+    const res = await post("/api/video", m, { ...ok, seed: 9 });
+    expect(res.statusCode).toBe(202);
+    expect(h.comfySeen.map((x) => x.url)).toEqual(["/prompt"]);
+    const prompt = sentPrompt();
+    expect(prompt["5"].inputs.text).toBe(ok.prompt);
+    expect(prompt["8"].inputs.seed).toBe(9);
+    expect(prompt["7"].inputs).toMatchObject({ width: 1280, height: 704, length: 73 });
+    expect(prompt["video_start"]).toBeUndefined();
+    const id = res.json().id as string;
+    const poll = (await call("GET", `/api/generate/${id}`, m)).json();
+    expect(poll).toEqual({ status: "done", images: [], videos: [{ index: 0, url: `/api/video/${id}/0` }], seconds: expect.any(Number), queued_seconds: null });
+    const file = await call("GET", `/api/video/${id}/0`, m);
+    expect(file.statusCode).toBe(200);
+    expect(file.headers["content-type"]).toBe("video/mp4");
+    expect(file.headers["x-content-type-options"]).toBe("nosniff");
+    expect(file.headers["cache-control"]).toBe("no-store");
+    expect(file.headers["content-disposition"]).toBe('inline; filename="video-0.mp4"');
+    expect(file.rawPayload.equals(MP4)).toBe(true);
+    expect(file.body).not.toContain("vastcomfy_00001_");
+    const view = h.comfySeen.find((x) => x.url.startsWith("/view"))!;
+    expect(view.url).toContain("filename=vastcomfy_00001_.mp4");
+  });
+
+  it("image to video: uploads the one start image and wires a LoadImage node; the label says so", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const m = await member("ayu");
+    const res = await post("/api/video", m, { ...ok, size: "Portrait, faster", duration: "About 5 s", image: REF_A.toString("base64") });
+    expect(res.statusCode).toBe(202);
+    expect(h.comfySeen.map((x) => x.url)).toEqual(["/upload/image", "/prompt"]);
+    const prompt = sentPrompt();
+    expect(prompt["video_start"]).toEqual({ class_type: "LoadImage", inputs: { image: expect.stringMatching(/^video-[0-9a-f]+\.png$/) } });
+    expect(prompt["7"].inputs).toMatchObject({ start_image: ["video_start", 0], width: 480, height: 832, length: 121 });
+  });
+
+  const bad: [string, unknown, string][] = [
+    ["an unknown size", { ...ok, size: "8K" }, "unknown_size"],
+    ["an unknown duration", { ...ok, duration: "1 h" }, "unknown_duration"],
+    ["a blank prompt", { ...ok, prompt: " " }, "invalid_prompt"],
+    ["a long prompt", { ...ok, prompt: "x".repeat(51) }, "prompt_too_long"],
+    ["a bad seed", { ...ok, seed: "1" }, "invalid_seed"],
+    ["two start images", { ...ok, image: [REF_A.toString("base64"), REF_B.toString("base64")] }, "invalid_reference"],
+    ["text that is not an image", { ...ok, image: Buffer.from("<html>").toString("base64") }, "invalid_reference"],
+    ["an image over the size limit", { ...ok, image: pngOf(64, 64, "x".repeat(4100)).toString("base64") }, "reference_too_large"],
+    ["a missing duration", { prompt: "x", size: "Landscape" }, "invalid_body"],
+    ["an extra key", { ...ok, frames: 999 }, "invalid_body"],
+  ];
+  it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_n, body, code) => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const res = await post("/api/video", await member(), body);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("refuses a result that is not an mp4 or WebM by its first bytes, whatever its content type says", async () => {
+    for (const [body, type] of [[Buffer.from("<!doctype html><script>alert(1)</script>"), "video/mp4"], [pngOf(8, 8), "video/mp4"], [MP4.subarray(0, 8), "video/mp4"]] as const) {
+      h = await harness({ profile: videoProfile() });
+      h.setComfy(comfyVideo(true, body, type));
+      const m = await member();
+      const id = (await post("/api/video", m, ok)).json().id as string;
+      expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
+      const file = await call("GET", `/api/video/${id}/0`, m);
+      expect(file.statusCode).toBe(502);
+      expect(file.json().error.code).toBe("video_rejected");
+      expect(file.body).not.toContain("script");
+    }
+  });
+
+  it("refuses a result over VIDEO_MAX_BYTES; images keep their own limit", async () => {
+    h = await harness({ profile: videoProfile(), cfg: { videoMaxBytes: 1024 } });
+    h.setComfy(comfyVideo(true, Buffer.concat([MP4, Buffer.alloc(2000)])));
+    const m = await member();
+    const id = (await post("/api/video", m, ok)).json().id as string;
+    await call("GET", `/api/generate/${id}`, m);
+    const file = await call("GET", `/api/video/${id}/0`, m);
+    expect(file.statusCode).toBe(502);
+    expect(file.json().error.code).toBe("video_too_large");
+  });
+
+  it("a video job's file is never served as an image and cannot be saved to the gallery; an image job is no video", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const m = await member();
+    const id = (await post("/api/video", m, ok)).json().id as string;
+    await call("GET", `/api/generate/${id}`, m);
+    expect((await call("GET", `/api/image/${id}/0`, m)).statusCode).toBe(404);
+    const saved = await post("/api/gallery", m, { job: id, index: 0 });
+    expect(saved.statusCode).toBe(400);
+    expect(saved.json().error.code).toBe("video_not_saveable");
+    expect(h.galleryStore.keys()).toHaveLength(0);
+    expect((await call("GET", `/api/video/${id}/1`, m)).statusCode).toBe(404);
+    h.setComfy(comfyDone([{ filename: "a.png", subfolder: "", type: "output" }]));
+    const img = (await post("/api/generate", m, okGen)).json().id as string;
+    expect((await call("GET", `/api/generate/${img}`, m)).json().status).toBe("done");
+    expect((await call("GET", `/api/video/${img}/0`, m)).statusCode).toBe(404);
+  });
+
+  it("only the owner (or an admin) can read a video job and its file", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const id = (await post("/api/video", await member("ayu"), ok)).json().id as string;
+    const other = await member("bob");
+    expect((await call("GET", `/api/generate/${id}`, other)).statusCode).toBe(404);
+    expect((await call("GET", `/api/video/${id}/0`, other)).statusCode).toBe(404);
+    expect((await call("GET", `/api/generate/${id}`, await admin())).json().status).toBe("done");
+    expect((await call("GET", `/api/video/${id}/0`, await admin())).statusCode).toBe(200);
+  });
+
+  it("410 for the file once the instance that made it is gone, and nothing is fetched", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    const m = await member();
+    const id = (await post("/api/video", m, ok)).json().id as string;
+    expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
+    await h.registry.update(HOST, { status: "gone" });
+    const res = await call("GET", `/api/video/${id}/0`, m);
+    expect(res.statusCode).toBe(410);
+    expect(h.comfySeen.some((x) => x.url.startsWith("/view"))).toBe(false);
+  });
+
+  it("a video job runs until VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S", async () => {
+    h = await harness({ profile: videoProfile(), cfg: { generateTimeoutS: 600, videoTimeoutS: 1800 } });
+    h.setComfy(comfyVideo(false));
+    const m = await member();
+    const id = (await post("/api/video", m, ok)).json().id as string;
+    h.clock.ms += 1000 * 1000;
+    expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("pending");
+    h.clock.ms += 800 * 1000;
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "failed", message: "generation timed out" });
+  });
+
+  it("refuses to start with a video timeout not shorter than the job memory, or a workflow that does not match", async () => {
+    await expect(harness({ profile: videoProfile(), cfg: { videoTimeoutS: 3600, webJobTtlS: 3600 } })).rejects.toThrow("VIDEO_TIMEOUT_S must be shorter than WEB_JOB_TTL_S");
+    await expect(harness({ profile: videoProfile(), cfg: { videoMaxBytes: 0 } })).rejects.toThrow("VIDEO_MAX_BYTES");
+    const broken = structuredClone(videoTemplate);
+    broken["11"].class_type = "SaveImage";
+    await expect(harness({ profile: videoProfile(), videoTemplate: broken })).rejects.toThrow(/SaveVideo/);
+    // With video off nothing of it is read.
+    await expect(harness({ cfg: { videoTimeoutS: 0, videoMaxBytes: "x" } })).resolves.toBeDefined();
+  });
+
+  it("needs a session and a ready instance; the page may play blob videos (CSP media-src)", async () => {
+    h = await harness({ profile: videoProfile() });
+    expect((await post("/api/video", {}, ok)).statusCode).toBe(401);
+    const page = await call("GET", "/api/state", await member());
+    expect(String(page.headers["content-security-policy"])).toContain("media-src 'self' blob:");
+    h = await harness({ profile: videoProfile(), ready: false });
+    expect((await post("/api/video", await member(), ok)).statusCode).toBe(409);
+  });
+});
+
 describe("live progress and previews", () => {
   const PROGRESS_CFG = { webProgressEnabled: true, webPreviewMaxBytes: 1024, webProgressMessageMaxBytes: 4096 };
   const step = (value: number, max: number, promptId = "p-1", node = "8") => textFrame({ type: "progress", data: { value, max, prompt_id: promptId, node } });
@@ -2981,6 +3208,7 @@ describe("menu", () => {
     expect(body.menu.categories).toEqual([{ id: "create", title: "Create" }, { id: "edit", title: "Edit & combine" }, { id: "enhance", title: "Enhance" }]);
     expect(ids(body)).toEqual([
       "text_to_image", "portrait_photo", "family_photo", "anime",
+      "video",
       "free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime",
       "photo_restore", "upscale",
     ]);
@@ -2995,7 +3223,7 @@ describe("menu", () => {
     h = await harness({ editTemplate: null }); // edit off, and no upscale template (upscale off)
     const body = (await call("GET", "/api/state", await member())).json();
     const off = items(body).filter((i) => !i.available).map((i) => i.id);
-    expect(off).toEqual(["free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime", "photo_restore", "upscale"]);
+    expect(off).toEqual(["video", "free_edit", "anything2real", "faceswap", "outfit_swap", "to_anime", "photo_restore", "upscale"]);
     expect(items(body).filter((i) => i.available).map((i) => i.id)).toEqual(["text_to_image", "portrait_photo", "family_photo", "anime"]);
     const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
     doc.styles.find((s: { id: string }) => s.id === "anime").enabled = false;
@@ -3030,8 +3258,8 @@ describe("menu", () => {
     expect(item.additionalProperties).toBe(false);
     expect([...item.required].sort()).toEqual(ITEM_KEYS);
     expect(Object.keys(item.properties).sort()).toEqual(ITEM_KEYS);
-    expect(item.properties.tool.enum).toEqual(["generate", "edit", "upscale"]);
-    expect(item.properties.icon.enum).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush"]);
+    expect(item.properties.tool.enum).toEqual(["generate", "edit", "upscale", "video"]);
+    expect(item.properties.icon.enum).toEqual(["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush", "film"]);
     // What the server sends fits the document: the same keys, and every icon in the enum.
     h = await harness({ profile });
     const body = (await call("GET", "/api/state", await member())).json();

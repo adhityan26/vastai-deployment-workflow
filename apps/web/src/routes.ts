@@ -24,6 +24,11 @@ import {
   Unreachable,
   edit as runEdit,
   upscale as runUpscale,
+  video as runVideo,
+  checkVideoTemplate,
+  sniffVideo,
+  type VideoDeps,
+  type VideoRequest,
   type UpscaleDeps,
   type UpscaleLimits,
   type UpscaleRequest,
@@ -288,6 +293,8 @@ const ID_PARAMS = {
   required: ["id"],
   properties: { id: { type: "string", pattern: PROMPT_ID.source } },
 } as const;
+// The file name a downloaded video gets, per type (the type comes from the file's magic bytes).
+const VIDEO_EXT: Record<string, string> = { "video/mp4": "mp4", "video/webm": "webm" };
 const IMAGE_PARAMS = {
   type: "object",
   additionalProperties: false,
@@ -345,6 +352,14 @@ const UPSCALE_BODY = {
   required: ["image", "scale"],
   properties: { image: {}, scale: {} },
 } as const;
+// Video: a prompt, a size and a duration name, an optional seed and an optional base64 start image; the
+// service validates each and has the error codes.
+const VIDEO_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["prompt", "size", "duration"],
+  properties: { prompt: {}, size: {}, duration: {}, seed: {}, image: {} },
+} as const;
 // JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
 const EDIT_JSON_OVERHEAD = 8;
 const PROMPT_ESCAPE_FACTOR = 6;
@@ -387,11 +402,29 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     now,
   );
   const generateTimeoutMs = intCfg(cfg, "generateTimeoutS", "GENERATE_TIMEOUT_S") * 1000;
+  // Video is on only when the profile has an enabled video section AND its workflow template was loaded. The
+  // template is checked against the section now: a mismatch stops the server instead of failing a job.
+  const videoSpec = deps.profile.video;
+  const videoTemplate = deps.videoTemplate ?? null;
+  const videoLimits: ReferenceLimits | null = videoSpec !== null && videoTemplate !== null ? referenceLimits(cfg) : null;
+  if (videoSpec !== null && videoLimits !== null) checkVideoTemplate(videoSpec, videoTemplate);
+  // A clip takes many minutes: it has its own job timeout and its own size and time bounds for the result file.
+  const videoTimeoutMs = videoLimits === null ? null : intCfg(cfg, "videoTimeoutS", "VIDEO_TIMEOUT_S") * 1000;
+  const videoView =
+    videoLimits === null
+      ? null
+      : { maxBytes: intCfg(cfg, "videoMaxBytes", "VIDEO_MAX_BYTES"), timeoutMs: intCfg(cfg, "videoViewTimeoutS", "VIDEO_VIEW_TIMEOUT_S") * 1000 };
+  // A job is forgotten after WEB_JOB_TTL_S: a video job must time out (and be readable) before that.
+  if (videoTimeoutMs !== null && videoTimeoutMs >= intCfg(cfg, "webJobTtlS", "WEB_JOB_TTL_S") * 1000) {
+    throw new Error("VIDEO_TIMEOUT_S must be shorter than WEB_JOB_TTL_S");
+  }
+  /** How long a job of this kind may run before it is given up. */
+  const timeoutOf = (kind: JobKind): number => (kind === "video" && videoTimeoutMs !== null ? videoTimeoutMs : generateTimeoutMs);
   // Live progress and previews: one ComfyUI websocket per job, open at most as long as a job may run.
   const progressLimits: ProgressLimits | null =
     cfg["webProgressEnabled"] === true
       ? {
-          lifetimeMs: generateTimeoutMs,
+          lifetimeMs: Math.max(generateTimeoutMs, videoTimeoutMs ?? 0),
           maxTextBytes: intCfg(cfg, "webProgressMessageMaxBytes", "WEB_PROGRESS_MESSAGE_MAX_BYTES"),
           maxPreviewBytes: intCfg(cfg, "webPreviewMaxBytes", "WEB_PREVIEW_MAX_BYTES"),
         }
@@ -457,7 +490,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   // names and ids, never templates, node ids or file names.
   const menuItemsOn = menuItems(deps.profile.menu, deps.profile.styles).map((item) => ({
     ...item,
-    available: item.tool === "generate" || (item.tool === "edit" ? limits !== null && editSpec !== null : upscaleLimits !== null),
+    available:
+      item.tool === "generate" ||
+      (item.tool === "edit" ? limits !== null && editSpec !== null : item.tool === "video" ? videoLimits !== null : upscaleLimits !== null),
   }));
   const menuView = {
     categories: deps.profile.menu.categories.filter((c) => menuItemsOn.some((i) => i.category === c.id)).map((c) => ({ id: c.id, title: c.title })),
@@ -467,7 +502,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
-    template: kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : deps.template,
+    template: kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : kind === "video" ? videoTemplate : deps.template,
     cfg,
   });
   const upscaleDeps = (hostname: string, limits: UpscaleLimits): UpscaleDeps => ({
@@ -476,6 +511,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     template: upscaleTemplate,
     cfg,
     limits,
+  });
+  const videoDeps = (hostname: string): VideoDeps => ({
+    comfy: deps.comfyFor(hostname),
+    profile: deps.profile,
+    template: videoTemplate,
+    cfg,
   });
   const editDeps = (hostname: string): EditDeps => ({
     comfy: deps.comfyFor(hostname),
@@ -486,7 +527,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
 
   /** The node whose progress is a sampler step, per kind of job (upscale has none: any progress counts). */
   const samplerNode = (kind: JobKind): string | null =>
-    kind === "generate" ? deps.profile.generate.params.steps.node : kind === "edit" ? (deps.profile.edit?.params.steps.node ?? null) : null;
+    kind === "generate"
+      ? deps.profile.generate.params.steps.node
+      : kind === "edit"
+        ? (deps.profile.edit?.params.steps.node ?? null)
+        : kind === "video"
+          ? (videoSpec?.params.seed.node ?? null)
+          : null;
 
   /**
    * Open the progress socket of a job about to be submitted and wait briefly for it. Null when progress
@@ -529,6 +576,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       if (err.code === "upscale_unavailable") return sendError(reply, 404, "upscale_unavailable", "upscale is not available on this server");
       if (err.code === "edit_unavailable") return sendError(reply, 404, "edit_unavailable", "image edit is not available on this server");
+      if (err.code === "video_unavailable") return sendError(reply, 404, "video_unavailable", "video is not available on this server");
       return sendError(reply, 400, err.code, err.message);
     }
     log("warn", `${what} submit failed: ${errorName(err)}`);
@@ -626,6 +674,18 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
             },
       // The tool menu: categories and entries in display order; `available` is false while the entry's mode is off.
       menu: menuView,
+      // Video for the page: size and duration names (seconds, never frames or nodes) and the start image limits;
+      // null when video is off here.
+      video:
+        videoLimits === null || videoSpec === null
+          ? null
+          : {
+              sizes: videoSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
+              durations: videoSpec.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+              max_bytes: videoLimits.maxBytes,
+              max_pixels: videoLimits.maxPixels,
+              types: [...videoLimits.types],
+            },
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null
@@ -989,12 +1049,59 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     },
   );
 
+  app.post(
+    "/api/video",
+    // Own body limit: one optional start image plus the prompt; every other route keeps WEB_BODY_LIMIT_BYTES.
+    {
+      ...member,
+      schema: { body: VIDEO_BODY },
+      ...(videoLimits === null ? {} : { bodyLimit: editBodyLimit({ ...videoLimits, maxCount: 1 }, intCfg(cfg, "generateMaxPromptChars", "GENERATE_MAX_PROMPT_CHARS")) }),
+    },
+    async (req, reply) => {
+      const identity = req.identity!;
+      if (videoLimits === null) return sendError(reply, 404, "video_unavailable", "video is not available on this server");
+      const view = await deps.lifecycle.view();
+      const hostname = view.record?.tailnet_hostname;
+      if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
+        return sendError(reply, 409, "not_ready", "the instance is not ready");
+      }
+      if (!generateLimiter.take(identity.subject)) {
+        return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
+      }
+      let submitted: Awaited<ReturnType<typeof runVideo>>;
+      const started = await startLive(hostname, "video");
+      try {
+        submitted = await runVideo({ ...videoDeps(hostname), ...(started ? { clientId: started.clientId } : {}) }, req.body as VideoRequest);
+      } catch (err) {
+        started?.live.end();
+        return submitFailure(reply, err, "video");
+      }
+      const { promptId, startImage } = submitted;
+      if (!PROMPT_ID.test(promptId)) {
+        started?.live.end();
+        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      }
+      started?.live.socket?.setPromptId(promptId);
+      const asked = req.body as VideoRequest;
+      jobs.add({
+        id: promptId,
+        owner: identity.subject,
+        hostname,
+        live: started?.live ?? null,
+        kind: "video",
+        prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
+        label: `Video: ${String(asked.size)}, ${String(asked.duration)}${startImage ? ", from an image" : ""}`.slice(0, JOB_LABEL_KEPT),
+      });
+      return reply.code(202).send({ id: promptId });
+    },
+  );
+
   app.get("/api/generate/:id", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const job = ownJob(req, id);
     if (job === null) return sendError(reply, 404, "not_found", "no such job");
     if (job.state.kind === "pending") {
-      if (now() - job.createdAt >= generateTimeoutMs) {
+      if (now() - job.createdAt >= timeoutOf(job.kind)) {
         job.state = { kind: "failed", message: "generation timed out" };
       } else if (!(await sameInstance(job))) {
         job.state = { kind: "failed", message: "the instance that ran this job is gone" };
@@ -1029,9 +1136,12 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     // A finished or failed job needs no socket and no preview any more.
     if (state.kind !== "pending") job.live?.end();
     if (state.kind === "done") {
+      // A video job's files are served by /api/video (checked as video), never by /api/image.
+      const files = state.images.map((_img, index) => ({ index, url: `/api/${job.kind === "video" ? "video" : "image"}/${encodeURIComponent(job.id)}/${index}` }));
       return {
         status: "done",
-        images: state.images.map((_img, index) => ({ index, url: `/api/image/${encodeURIComponent(job.id)}/${index}` })),
+        images: job.kind === "video" ? [] : files,
+        ...(job.kind === "video" ? { videos: files } : {}),
         seconds: state.seconds,
         queued_seconds: state.queuedSeconds,
       };
@@ -1070,6 +1180,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   ): Promise<JobImage | Failure> => {
     const job = ownJob(req, id);
     if (job === null) return failure(404, "not_found", "no such job");
+    // A video job has no image (its file is served by /api/video, checked as video).
+    if (job.kind === "video") return failure(404, "not_found", "no such image");
     if (job.state.kind !== "done") return { fail: notDone };
     const image = job.state.images[index];
     if (image === undefined) return failure(404, "not_found", "no such image");
@@ -1105,6 +1217,45 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       .header("content-disposition", `inline; filename="image-${Number(index)}.${loaded.ext}"`)
       .type(loaded.type)
       .send(loaded.bytes);
+  });
+
+  // One result video of one of the caller's finished video jobs. Served only when its first bytes say mp4 or WebM
+  // (never ComfyUI's content type), bounded by VIDEO_MAX_BYTES and VIDEO_VIEW_TIMEOUT_S, with nosniff (every
+  // response) and a fixed file name; nothing about the instance or ComfyUI's file name leaves.
+  app.get("/api/video/:id/:index", { ...member, schema: { params: IMAGE_PARAMS } }, async (req, reply) => {
+    const { id, index } = req.params as { id: string; index: string };
+    const job = ownJob(req, id);
+    if (job === null || job.kind !== "video" || videoView === null) return sendError(reply, 404, "not_found", "no such video");
+    if (job.state.kind !== "done") return sendError(reply, 404, "not_found", "no such video");
+    const file = job.state.images[Number(index)];
+    if (file === undefined) return sendError(reply, 404, "not_found", "no such video");
+    if (!(await sameInstance(job))) return sendError(reply, 410, "gone", "the instance that made this video is gone");
+    let fetched: { bytes: Buffer; contentType: string };
+    try {
+      fetched = await deps.comfyFor(job.hostname).view(file.filename, file.subfolder, file.type, videoView);
+    } catch (err) {
+      if (err instanceof ComfyError && err.status === 0) {
+        log("warn", "ComfyUI history named an unsafe video path; refused");
+        return sendError(reply, 502, "video_rejected", "the video reference was refused");
+      }
+      if (err instanceof ResponseTooLarge) {
+        log("warn", "video larger than VIDEO_MAX_BYTES; refused");
+        return sendError(reply, 502, "video_too_large", "the instance sent a response larger than allowed");
+      }
+      if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
+      return sendError(reply, 502, "video_unavailable", "the video could not be fetched");
+    }
+    const type = sniffVideo(fetched.bytes);
+    if (type === null) {
+      log("warn", "ComfyUI returned a file that is not an mp4 or WebM video; refused");
+      return sendError(reply, 502, "video_rejected", "ComfyUI did not return a video");
+    }
+    return reply
+      .code(200)
+      .header("cache-control", "no-store")
+      .header("content-disposition", `inline; filename="video-${Number(index)}.${VIDEO_EXT[type]}"`)
+      .type(type)
+      .send(fetched.bytes);
   });
 
   // ---- gallery: images saved to the object store (MinIO) ----
@@ -1152,6 +1303,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
 
   const saveToGallery = async (req: FastifyRequest, reply: FastifyReply, gallery: NonNullable<ServerDeps["gallery"]>) => {
     const { job: jobId, index } = req.body as { job: string; index: number };
+    // Phase 1 keeps the gallery to images (its types, sizes and quotas are image ones): a video is downloaded instead.
+    if (ownJob(req, jobId)?.kind === "video") return sendError(reply, 400, "video_not_saveable", "videos cannot be saved to the gallery; use Download");
     const loaded = await loadJobImage(req, jobId, index, { status: 409, code: "job_not_done", message: "the job has not finished yet" });
     if ("fail" in loaded) return sendError(reply, loaded.fail.status, loaded.fail.code, loaded.fail.message);
     const identity = req.identity!;
@@ -1164,7 +1317,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         createdMs: loaded.job.createdAt,
         bytes: loaded.bytes,
         contentType: loaded.type,
-        kind: loaded.job.kind,
+        kind: loaded.job.kind === "video" ? "generate" : loaded.job.kind, // never video: loadJobImage refuses those
         prompt: loaded.job.prompt,
         label: loaded.job.label,
         seconds: loaded.job.state.kind === "done" ? loaded.job.state.seconds : null,

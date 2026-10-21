@@ -1,15 +1,15 @@
 import { ProfileError } from "./profile-errors.js";
 import type { StyleSpec } from "./styles.js";
 
-// The tool menu of the page: ordered categories, the built-in tools (plain generate, plain edit, upscale) and one
+// The tool menu of the page: ordered categories, the built-in tools (plain generate, plain edit, upscale, video) and one
 // entry per enabled style. The profile's `menu:` section declares the categories and the tools; a style may name
 // its own category, description, icon and order. Everything is checked at load, and the page only ever receives
 // titles, descriptions, icon names and ids (never templates, node ids or file names).
 
-export type ToolMode = "generate" | "edit" | "upscale";
+export type ToolMode = "generate" | "edit" | "upscale" | "video";
 
 /** The built-in inline SVG icons the page bundle draws (apps/web/public/icons.ts); nothing is loaded from outside. */
-export const MENU_ICONS = ["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush"] as const;
+export const MENU_ICONS = ["image", "wand", "user", "users", "swap", "shirt", "restore", "sparkles", "expand", "camera", "brush", "film"] as const;
 export type MenuIcon = (typeof MENU_ICONS)[number];
 
 export interface MenuCategory {
@@ -48,7 +48,7 @@ export interface MenuItem {
   readonly description: string | null;
   readonly icon: MenuIcon;
   readonly category: string;
-  /** Which request the entry sends: /api/generate, /api/edit or /api/upscale. */
+  /** Which request the entry sends: /api/generate, /api/edit, /api/upscale or /api/video. */
   readonly tool: ToolMode;
   /** The style the entry selects; null for a built-in tool. */
   readonly style: string | null;
@@ -56,7 +56,7 @@ export interface MenuItem {
 
 // Protocol/safety rules, not configuration.
 const ID = /^[a-z][a-z0-9_]{0,31}$/;
-const MODES: readonly ToolMode[] = ["generate", "edit", "upscale"];
+const MODES: readonly ToolMode[] = ["generate", "edit", "upscale", "video"];
 const CATEGORY_TITLE_MAX = 40;
 const TITLE_MAX = 60;
 const DESCRIPTION_MAX = 120;
@@ -66,13 +66,14 @@ const TOOL_KEYS = new Set(["id", "title", "description", "icon", "mode", "catego
 /** The icon of a style whose mode has no tool to borrow one from. */
 const FALLBACK_ICON: MenuIcon = "sparkles";
 
-/** The menu of a profile without a `menu:` section: one category and the three plain tools. */
+/** The menu of a profile without a `menu:` section: one category and the four plain tools. */
 export const DEFAULT_MENU: MenuSpec = Object.freeze({
   categories: Object.freeze([{ id: "tools", title: "Tools" }]),
   tools: Object.freeze([
     { id: "generate", title: "Generate", description: null, icon: "image", mode: "generate", category: "tools", order: null },
     { id: "edit", title: "Edit images", description: null, icon: "wand", mode: "edit", category: "tools", order: null },
     { id: "upscale", title: "Upscale", description: null, icon: "expand", mode: "upscale", category: "tools", order: null },
+    { id: "video", title: "Video", description: null, icon: "film", mode: "video", category: "tools", order: null },
   ] as MenuTool[]),
 });
 
