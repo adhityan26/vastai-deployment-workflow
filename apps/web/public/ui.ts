@@ -1168,6 +1168,8 @@ export function mountApp(doc: Document, env: Env): App {
   const promptRow = $("prompt-box");
   const samplingBox = $("sampling-box");
   const resolutionBox = $("resolution-box");
+  const editSizeBox = $("edit-size-box");
+  const editSizeSelect = $<HTMLSelectElement>("edit-size");
   const scaleBox = $("scale-box");
   const scaleSelect = $<HTMLSelectElement>("scale");
   const sizeBox = $("size-box");
@@ -1224,6 +1226,19 @@ export function mountApp(doc: Document, env: Env): App {
         }),
       );
       if (s.edit?.resolutions.some((r) => r.name === keepResolution)) resolutionSelect.value = keepResolution;
+      // Edit output sizes: the first option keeps the result following the first image (nothing is sent).
+      const keepEditSize = editSizeSelect.value;
+      const same = make("option", "Same as the first image");
+      same.value = "";
+      editSizeSelect.replaceChildren(
+        same,
+        ...(s.edit?.sizes ?? []).map((z) => {
+          const o = make("option", sizeLabel(z));
+          o.value = z.name;
+          return o;
+        }),
+      );
+      editSizeSelect.value = s.edit?.sizes.some((z) => z.name === keepEditSize) ? keepEditSize : "";
       const keepScale = scaleSelect.value;
       scaleSelect.replaceChildren(
         ...(s.upscale?.scales ?? []).map((name) => {
@@ -1251,6 +1266,7 @@ export function mountApp(doc: Document, env: Env): App {
     const upscaling = mode === "upscale";
     editBox.hidden = !editing && !upscaling;
     resolutionBox.hidden = upscaling;
+    editSizeBox.hidden = !editing || (s.edit?.sizes.length ?? 0) === 0;
     scaleBox.hidden = !upscaling;
     promptRow.hidden = upscaling;
     samplingBox.hidden = upscaling;
@@ -1942,6 +1958,7 @@ export function mountApp(doc: Document, env: Env): App {
       const images: string[] = [];
       for (const file of files) images.push(await readBase64(file));
       const body: Record<string, unknown> = { prompt, preset: selectedPreset, resolution: resolutionSelect.value, images };
+      if (editSizeSelect.value !== "") body["size"] = editSizeSelect.value;
       if (seed.value !== undefined) body["seed"] = seed.value;
       if (state) Object.assign(body, advancedRequest({ knobs: knobsFor(state, "edit"), negative: negativeBox.value, guidance: state.guidance, guidanceValue }));
       if (styleBody) body["style"] = styleBody;
@@ -1949,7 +1966,7 @@ export function mountApp(doc: Document, env: Env): App {
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
       const preset = state?.presets.find((p) => p.name === selectedPreset);
-      const entry = addEntry(id, "edit", prompt.trim() === "" && style ? style.title : prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (style ? `, ${style.title}` : "") + advancedLabel(body));
+      const entry = addEntry(id, "edit", prompt.trim() === "" && style ? style.title : prompt, editLabel(preset ? presetLabel(preset) : selectedPreset, resolutionSelect.value, files.length) + (editSizeSelect.value !== "" ? `, ${editSizeSelect.value}` : "") + (style ? `, ${style.title}` : "") + advancedLabel(body));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;

@@ -1472,6 +1472,12 @@ describe("edit with reference images", () => {
         max_pixels: 1_000_000,
         types: ["png", "jpeg", "webp"],
         resolutions: [{ name: "1024", value: 1024 }],
+        sizes: [
+          { name: "1:1", width: 1024, height: 1024 },
+          { name: "3:4", width: 896, height: 1152 },
+          { name: "16:9", width: 1344, height: 768 },
+          { name: "9:16", width: 768, height: 1344 },
+        ],
       });
     }
   });
@@ -3145,5 +3151,54 @@ describe("advanced server choice (offers, filters, explicit offer)", () => {
     expect(doc.paths["/api/offers"].get).toBeDefined();
     const start = doc.paths["/api/start"].post.requestBody.content["application/json"].schema.properties;
     expect(Object.keys(start)).toEqual(expect.arrayContaining(["region", "max_dph", "min_down_mbps", "sort", "offer_id"]));
+  });
+});
+
+describe("edit output size", () => {
+  const sentPrompt = () => JSON.parse(h.comfySeen[h.comfySeen.length - 1]!.body).prompt;
+
+  it("/api/state lists the sizes an edit may ask for, and nothing about the workflow node they feed", async () => {
+    const body = (await call("GET", "/api/state", await member())).json();
+    expect(body.edit.sizes).toEqual([
+      { name: "1:1", width: 1024, height: 1024 },
+      { name: "3:4", width: 896, height: 1152 },
+      { name: "16:9", width: 1344, height: 768 },
+      { name: "9:16", width: 768, height: 1344 },
+    ]);
+    expect(JSON.stringify(body.edit)).not.toContain("size_latent");
+    expect(JSON.stringify(body.edit)).not.toContain("latent_image");
+  });
+
+  it("an edit with a size feeds the sampler an empty latent of that size, and the label names it", async () => {
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, size: "9:16" });
+    expect(res.statusCode).toBe(202);
+    expect(sentPrompt()["edit_size_latent"].inputs).toEqual({ width: 768, height: 1344, batch_size: 1 });
+    expect(sentPrompt()["7"].inputs.latent_image).toEqual(["edit_size_latent", 0]);
+  });
+
+  it("an edit without a size (or with null) is exactly the workflow as shipped", async () => {
+    h.setComfy(comfyEdit());
+    for (const extra of [{}, { size: null }]) {
+      expect((await post("/api/edit", await member(), { ...okEdit, ...extra })).statusCode).toBe(202);
+      expect(sentPrompt()["edit_size_latent"]).toBeUndefined();
+      expect(sentPrompt()["7"].inputs.latent_image).toEqual(["6", 2]);
+    }
+  });
+
+  it.each([["5:4"], [5], [""], [["1:1"]]])("400 unknown_size for %j, and nothing reaches ComfyUI", async (size) => {
+    h.setComfy(comfyEdit());
+    const res = await post("/api/edit", await member(), { ...okEdit, size });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("unknown_size");
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("the shipped OpenAPI document knows the size member and the sizes of the state", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const props = doc.paths["/api/edit"].post.requestBody.content["application/json"].schema.properties;
+    expect(Object.keys(props)).toContain("size");
+    const edit = doc.components.schemas.State.properties.edit;
+    expect(JSON.stringify(edit)).toContain("sizes");
   });
 });

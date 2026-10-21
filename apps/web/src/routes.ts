@@ -336,7 +336,7 @@ const EDIT_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "preset", "resolution", "images"],
-  properties: { prompt: {}, preset: {}, resolution: {}, seed: {}, images: { type: "array" }, style: {}, negative_prompt: {}, cfg: {} },
+  properties: { prompt: {}, preset: {}, resolution: {}, size: {}, seed: {}, images: { type: "array" }, style: {}, negative_prompt: {}, cfg: {} },
 } as const;
 // Upscale: one base64 image and a scale name; the service validates both and has the error codes.
 const UPSCALE_BODY = {
@@ -636,6 +636,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               max_pixels: limits.maxPixels,
               types: [...limits.types],
               resolutions: editSpec.resolutions.map((r) => ({ name: r.name, value: r.value })),
+              // Output sizes an edit may ask for; empty when the profile offers none (never the node they feed).
+              sizes: editSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
             },
     };
   });
@@ -937,7 +939,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         live: started?.live ?? null,
         kind: "edit",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-        label: `${asked.preset}, ${asked.resolution}, ${refs} reference${refs === 1 ? "" : "s"}${styleSuffix(asked.style)}${tuningSuffix(asked as { negative_prompt?: unknown; cfg?: unknown })}`.slice(0, JOB_LABEL_KEPT),
+        label: `${asked.preset}, ${asked.resolution}${typeof asked.size === "string" ? `, ${asked.size}` : ""}, ${refs} reference${refs === 1 ? "" : "s"}${styleSuffix(asked.style)}${tuningSuffix(asked as { negative_prompt?: unknown; cfg?: unknown })}`.slice(0, JOB_LABEL_KEPT),
       });
       return reply.code(202).send({ id: promptId });
     },

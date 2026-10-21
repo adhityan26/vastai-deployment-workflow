@@ -445,6 +445,12 @@ the clipboard, for example a screenshot, under the same limits as the file picke
 really holds an image is taken over: a text paste, a paste in a tool without images, or a paste while a dialog or drawer is open is left alone. Pasted
 images are named `pasted-1.png`, `pasted-2.png`... NOT verified in real browsers (only jsdom): some browsers expose a copied file or image differently.
 
+**Output size (UNVERIFIED on this model).** The Edit panel has a Size choice: "Same as the first image" (the default, the workflow
+exactly as it ships, nothing extra is sent) or 1:1 / 3:4 / 16:9 / 9:16 (`edit.sizes` in the profile). A chosen size makes the web app add an
+`EmptySD3LatentImage` node (`edit_size_latent`) and feed it to the sampler input named by `edit.size_latent` instead of the encoder's latent, which
+follows the first reference. Nobody has checked that this model keeps the references' content when the latent has another aspect ratio: compare
+the same edit with and without a size on a real instance. To remove the choice, delete `sizes` and `size_latent` from the profile's `edit:` section.
+
 ## Menu
 
 The page lists every tool in a menu: a fixed sidebar of about 250 px from 900 px wide, below that an off-canvas

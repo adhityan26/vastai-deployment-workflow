@@ -2077,3 +2077,90 @@ describe("paste images from the clipboard", () => {
     q<HTMLButtonElement>("#ref-list li button")!.click();
   }
 });
+
+describe("edit output size", () => {
+  const SIZES = [
+    { name: "1:1", width: 1024, height: 1024 },
+    { name: "16:9", width: 1344, height: 768 },
+    { name: "9:16", width: 768, height: 1344 },
+  ];
+  const editInfo = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [{ name: "zz-res", value: 1024 }], sizes: SIZES };
+  const sizeSel = () => q<HTMLSelectElement>("#edit-size")!;
+  const attach = () => {
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["PNGDATA"], "a.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+  };
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("is not offered when the server lists no sizes", async () => {
+    await mount({ edit: { ...editInfo, sizes: [] } });
+    chooseTool("edit");
+    expect(q("#edit-size-box")!.hidden).toBe(true);
+  });
+
+  it("is offered in Edit only when the server lists sizes, starting at 'same as the first image'", async () => {
+    await mount({ edit: editInfo });
+    expect(q("#edit-size-box")!.hidden).toBe(true); // Generate has its own Size
+    chooseTool("edit");
+    expect(q("#edit-size-box")!.hidden).toBe(false);
+    expect(document.querySelector('label[for="edit-size"]')!.textContent).toBe("Size");
+    expect([...sizeSel().options].map((o) => [o.value, o.textContent])).toEqual([
+      ["", "Same as the first image"],
+      ["1:1", "1:1 (1024×1024)"],
+      ["16:9", "16:9 (1344×768)"],
+      ["9:16", "9:16 (768×1344)"],
+    ]);
+    expect(sizeSel().value).toBe("");
+  });
+
+  it("a plain edit sends no size member at all", async () => {
+    await mount({ edit: editInfo }, { "POST /api/edit": { status: 202, body: { id: "e-1" } }, "GET /api/generate/e-1": { body: { status: "pending" } } });
+    chooseTool("edit");
+    attach();
+    q<HTMLTextAreaElement>("#prompt")!.value = "make it real";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/edit")[0]!.body).not.toHaveProperty("size");
+  });
+
+  it("a chosen size is sent, named in the history line, and kept across polls", async () => {
+    await mount({ edit: editInfo }, { "POST /api/edit": { status: 202, body: { id: "e-1" } }, "GET /api/generate/e-1": { body: { status: "pending" } } });
+    chooseTool("edit");
+    attach();
+    sizeSel().value = "16:9";
+    await app!.refresh();
+    expect(sizeSel().value).toBe("16:9");
+    q<HTMLTextAreaElement>("#prompt")!.value = "make it real";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/edit")[0]!.body).toMatchObject({ size: "16:9" });
+    expect(q(".job .muted")!.textContent).toContain("16:9");
+  });
+
+  it("a size the server stopped listing is dropped from the select instead of being sent", async () => {
+    await mount({ edit: editInfo });
+    chooseTool("edit");
+    sizeSel().value = "9:16";
+    routes["GET /api/state"] = { body: apiState({ edit: { ...editInfo, sizes: [SIZES[0]] } }) };
+    await app!.refresh();
+    expect(sizeSel().value).toBe("");
+  });
+
+  it("is not shown in Upscale", async () => {
+    await mount({ edit: editInfo, upscale: { scales: ["2x"], max_bytes: 1000, max_pixels: 1_000_000, types: ["png"] } });
+    chooseTool("upscale");
+    expect(q("#edit-size-box")!.hidden).toBe(true);
+  });
+
+  it("renders a hostile size name as text only", async () => {
+    await mount({ edit: { ...editInfo, sizes: [{ name: '<img src=x onerror="alert(1)">', width: 1024, height: 1024 }] } });
+    chooseTool("edit");
+    expect(q("#edit-size-box img")).toBeNull();
+    expect(sizeSel().options[1]!.textContent).toContain('<img src=x onerror="alert(1)">');
+  });
+});

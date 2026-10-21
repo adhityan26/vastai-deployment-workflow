@@ -148,6 +148,8 @@ export interface EditRequest {
   preset: string;
   /** A resolution name from the profile's edit section. */
   resolution: string;
+  /** Optional output size name from the profile's edit section; absent or null keeps the reference's own size. */
+  size?: unknown;
   seed?: number;
   /** Base64 reference images, in order: the first one is image_1 in the prompt. */
   images: unknown;
@@ -182,7 +184,18 @@ export async function edit(deps: EditDeps, input: EditRequest): Promise<{ prompt
   checkStyleReferences(style, references.length);
   // Dry run with placeholder names: preset, resolution, edit section and workflow mismatches
   // surface now, before anything is uploaded.
-  const fields = { prompt: text as string, preset: input.preset, resolution: input.resolution, seed, ...tuning, style };
+  if (input.size !== undefined && input.size !== null && typeof input.size !== "string") {
+    throw new GenerateInputError("unknown_size", "size is not offered by the profile");
+  }
+  const fields = {
+    prompt: text as string,
+    preset: input.preset,
+    resolution: input.resolution,
+    ...(typeof input.size === "string" ? { size: input.size } : {}),
+    seed,
+    ...tuning,
+    style,
+  };
   buildEditPrompt(deps.profile, deps.template, { ...fields, imageNames: references.map((_r, i) => `check-${i}.png`) });
 
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));

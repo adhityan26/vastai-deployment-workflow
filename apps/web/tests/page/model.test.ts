@@ -446,7 +446,7 @@ describe("edit info from the state", () => {
   });
 
   it("is kept when valid", () => {
-    expect(parseState({ ...base, edit })!.edit).toEqual(edit);
+    expect(parseState({ ...base, edit })!.edit).toEqual({ ...edit, sizes: [] });
   });
 
   it("only canEdit when generating is possible and the server offers edit", () => {
@@ -466,6 +466,7 @@ describe("reference helpers", () => {
     max_pixels: 1_000_000,
     types: ["png", "jpeg"],
     resolutions: [{ name: "1024", value: 1024 }],
+    sizes: [],
   };
   const file = (name: string, type = "image/png", size = 1000) => ({ name, type, size });
 
@@ -1176,5 +1177,20 @@ describe("the panel's actions per state (admin)", () => {
       expect(panelActions(s)).toMatchObject({ start: false, extend: false, destroy: true, destroyLabel: "Destroy instance (retry)" });
       expect(panelActions(s).hint).toBe("Destroy it in the danger zone below, then start again.");
     }
+  });
+});
+
+describe("edit sizes from the state", () => {
+  const edit = { max_references: 4, max_bytes: 8_388_608, max_pixels: 16_777_216, types: ["png"], resolutions: [{ name: "1024", value: 1024 }] };
+  it("are an empty list when the server sends none or something unusable", () => {
+    expect(parseState({ ...base, edit })!.edit!.sizes).toEqual([]);
+    expect(parseState({ ...base, edit: { ...edit, sizes: "x" } })!.edit!.sizes).toEqual([]);
+  });
+  it("keep the valid entries and drop the rest", () => {
+    const sizes = [{ name: "1:1", width: 1024, height: 1024 }, { name: "", width: 1, height: 1 }, { name: "x", width: 0, height: 5 }, { name: "y", width: 1.5, height: 5 }, null, { name: "9:16", width: 768, height: 1344 }];
+    expect(parseState({ ...base, edit: { ...edit, sizes } })!.edit!.sizes).toEqual([
+      { name: "1:1", width: 1024, height: 1024 },
+      { name: "9:16", width: 768, height: 1344 },
+    ]);
   });
 });
