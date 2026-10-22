@@ -22,15 +22,12 @@ models:
   # pickle). License BSD-3-Clause (repo card; upstream xinntao/Real-ESRGAN is BSD-3-Clause), checked 2026-10-18.
   # HF LFS sha256 37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb.
   - {file: "RealESRGAN_x4plus.safetensors", repo: "Comfy-Org/Real-ESRGAN_repackaged", revision: "5fd49b7b278836f48af63ecd314d0f98ab336105", dest: "models/upscale_models/", size_bytes: 66857836}
-  # Video (video: below) needs three more files, about 18 GB. They are NOT listed yet because a cloud session cannot
-  # reach Hugging Face to read their commit and size, and an entry is never written from memory. Before setting
-  # `video.enabled: true` the owner runs, on the laptop (licence check first: the model card of each repo):
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors models/diffusion_models/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/vae/wan2.2_vae.safetensors models/vae/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.1_ComfyUI_repackaged split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors models/text_encoders/
-  # and pastes the three printed lines here. (If a file is not in that repo, pin_model.py says so: look for it in the
-  # other repackaged repo instead.) With video enabled and any of the three missing here, both the web app and the
-  # instance refuse the profile at startup with "video model ... is not listed in models".
+  # Video (video: below): its three model files, about 18 GB, pinned with scripts/pin_model.py by the owner on
+  # 2026-10-22 (licences checked by the owner). They are downloaded only when VIDEO_ENABLED=true and the Start
+  # dialog's "Include video models" is ticked (or later on demand); an image-only boot never fetches them.
+  - {file: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 9999658848}
+  - {file: "split_files/vae/wan2.2_vae.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/vae/", size_bytes: 1409400960}
+  - {file: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged", revision: "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", dest: "models/text_encoders/", size_bytes: 6735906897}
 workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
@@ -270,22 +267,22 @@ upscale:
     - {name: "4x", value: 1.0, factor: 4}
 
 # Video mode (deploy/web/README.md "Video"): text to video, or image to video when the user attaches exactly one start
-# image, with ONE model through native ComfyUI nodes only (workflows/video-ti2v.json; no custom node). OFF until the
-# owner has pinned the three model files (see the comment under `models:`) and set `enabled: true`. Everything here
-# is validated even while it is off; with `enabled: true` each file of `models` below must be listed in the
+# image, with ONE model through native ComfyUI nodes only (workflows/video-ti2v.json; no custom node). Its three
+# model files are pinned under `models:`; it is OFF until VIDEO_ENABLED=true in .env (the web app passes it to the
+# instance). There is no `enabled:` here: the loaders refuse a video section that has one.
+# Everything here is validated even while video is off; with VIDEO_ENABLED=true each file of `models` below must be listed in the
 # profile's `models:` with this dest. They are downloaded at boot only when the Start dialog's "Include video models" is
 # ticked (INCLUDE_VIDEO_MODELS on the instance); such a boot also requires `node_classes` from ComfyUI's /object_info
 # before it reports ready (an image whose ComfyUI is too old for these nodes fails the boot loudly). Without it an
 # admin can download them later from the Video tool; the agent then checks the same node classes first.
 # An admin may also give a Hugging Face link (.safetensors or .gguf) that replaces the diffusion model entry below
 # (dest models/diffusion_models/) for that boot or download; NOT integrity-pinned or licence-checked, and it does not
-# replace the pins: `enabled: true` still needs all three files pinned (deploy/web/README.md "A model link ...").
+# replace the pins: VIDEO_ENABLED=true still needs all three files pinned (deploy/web/README.md "A model link ...").
 # The web app copies the workflow, sets the mapped inputs and, with a start image, adds one LoadImage node (id
 # `video_start`) wired to `start_image`. UNVERIFIED (never run on a real instance): the graph and its node and input
 # names, the h264 mp4 output of SaveVideo, VRAM use at these sizes on a 24 GB card, the time a clip takes, and that
 # phones play the result. Sizes are multiples of 32; frames are 4n+1 (the latent packs 4 frames per step).
 video:
-  enabled: false
   workflow: video-ti2v.json
   models:
     - {file: wan2.2_ti2v_5B_fp16.safetensors, dest: models/diffusion_models/}

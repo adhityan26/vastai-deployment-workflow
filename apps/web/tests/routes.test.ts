@@ -2593,16 +2593,9 @@ describe("upscale", () => {
 });
 
 describe("video", () => {
-  /** The shipped profile with video on and its three model files pinned (made-up pins, a test fixture). */
-  function videoProfile(mutate?: (doc: any) => void): typeof profile { // eslint-disable-line @typescript-eslint/no-explicit-any
-    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
-    for (const m of doc.video.models) doc.models.push({ file: `split_files/x/${m.file}`, repo: "org/video", revision: "a".repeat(40), dest: m.dest, size_bytes: 1000 });
-    doc.video.enabled = true;
-    mutate?.(doc);
-    const dir = mkdtempSync(join(tmpdir(), "video-profile-"));
-    tempDirs.push(dir);
-    writeFileSync(join(dir, "image.yaml"), stringifyYaml(doc));
-    return loadProfile(join(dir, "image.yaml"));
+  /** The shipped profile (its video files are pinned) with VIDEO_ENABLED=true. */
+  function videoProfile(): typeof profile {
+    return loadProfile(repo("instance/profiles/image.yaml"), { videoEnabled: true });
   }
   /** An mp4 file start: a ftyp box of brand isom, then a marker. */
   const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom\0\0\x02\0isomiso2avc1mp41", "latin1"), Buffer.from("UNIQUE-VIDEO-MARKER")]);
@@ -2659,7 +2652,7 @@ describe("video", () => {
         { name: "Portrait, faster", width: 480, height: 832 },
       ],
       durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
-      download_bytes: 3000,
+      download_bytes: 9_999_658_848 + 1_409_400_960 + 6_735_906_897, // the three pinned video files
       models: { state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null },
       model: null,
       max_bytes: 4096,

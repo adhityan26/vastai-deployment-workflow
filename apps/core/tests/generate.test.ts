@@ -18,6 +18,7 @@ const profile: Profile = {
   guidance: null,
   upscale: null,
   video: null,
+  videoFiles: [],
   models: [],
   generate: {
     workflow: "qwen-image-t2i.json",

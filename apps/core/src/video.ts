@@ -3,7 +3,7 @@ import { isLinkedModelName, loaderFor } from "./model-link.js";
 import { isPlainFileName, landsIn, parseSizeList, type ComfyPrompt, type ModelEntry, type ParamRef, type SizeSpec } from "./profile.js";
 
 // Video mode: text to video, or image to video with exactly one start image, through one model and native
-// ComfyUI nodes. Declared in the profile's `video:` section; OFF until `enabled: true` (its model files must be
+// ComfyUI nodes. Declared in the profile's `video:` section; OFF until VIDEO_ENABLED=true (its model files must be
 // pinned first). The section is validated even while it is off; the workflow template is checked against it at
 // startup (checkVideoTemplate), so a mismatch stops the web app instead of failing a job.
 
@@ -70,7 +70,7 @@ const NODE_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const MODEL_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MODEL_DEST = /^models\/[a-z0-9_]+\/?$/;
 const NAME_MAX = 40;
-const KEYS = new Set(["enabled", "workflow", "models", "node_classes", "params", "start_image", "output_node", "fps", "sizes", "durations"]);
+const KEYS = new Set(["workflow", "models", "node_classes", "params", "start_image", "output_node", "fps", "sizes", "durations"]);
 const DURATION_KEYS = new Set(["name", "frames"]);
 const MAX_MODELS = 8;
 const MAX_FPS = 60;
@@ -102,13 +102,16 @@ function plainName(v: unknown, what: string): string {
   return v;
 }
 
-/** The video section when it is enabled, else null. Everything is validated even when disabled. */
-export function parseVideo(raw: unknown, models: readonly ModelEntry[]): VideoSpec | null {
+/**
+ * The video section when video is on (`enabled`: VIDEO_ENABLED), else null. Everything is validated either way. The
+ * profile itself has no switch: a section with `enabled:` is refused, so nobody believes it does something.
+ */
+export function parseVideo(raw: unknown, models: readonly ModelEntry[], enabled = false): VideoSpec | null {
   if (raw === undefined || raw === null) return null;
   const m = mapping(raw, "video");
+  if ("enabled" in m) throw new ProfileError("video `enabled:` is not read from the profile any more: remove it and set VIDEO_ENABLED=true in .env");
   const unknown = Object.keys(m).filter((k) => !KEYS.has(k));
   if (unknown.length > 0) throw new ProfileError(`video has unknown keys: ${unknown.sort().join(", ")}`);
-  if (typeof m["enabled"] !== "boolean") throw new ProfileError("video enabled must be true or false");
   const workflow = m["workflow"];
   if (typeof workflow !== "string" || !WORKFLOW_NAME.test(workflow)) throw new ProfileError("video workflow is not a valid workflow name");
 
@@ -175,7 +178,7 @@ export function parseVideo(raw: unknown, models: readonly ModelEntry[]): VideoSp
   if (new Set(durations.map((d) => d.name)).size !== durations.length) throw new ProfileError("video duration names must be unique");
 
   const spec: VideoSpec = { workflow, models: files, params, startImage, outputNode, fps, sizes, durations };
-  if (!m["enabled"]) return null;
+  if (!enabled) return null;
   for (const f of files) {
     const entry = models.find((e) => e.file.split("/").pop() === f.file);
     if (entry === undefined) throw new ProfileError(`video model ${f.file} is not listed in models (pin it with scripts/pin_model.py)`);

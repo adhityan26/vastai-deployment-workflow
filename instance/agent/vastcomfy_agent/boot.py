@@ -100,7 +100,8 @@ class Boot:
         return guarded_client(self.cfg.video_model_link_hosts, self.cfg.video_model_link_redirect_domains, self.cfg.http_timeout_s)
 
     def profile(self):
-        return load_profile(Path(self.cfg.repo_dir) / "instance" / "profiles" / f"{self.cfg.profile}.yaml")
+        return load_profile(Path(self.cfg.repo_dir) / "instance" / "profiles" / f"{self.cfg.profile}.yaml",
+                            video_enabled=self.cfg.video_enabled)
 
 
 def cmd_write_env(environ, now, schema_path=None) -> int:

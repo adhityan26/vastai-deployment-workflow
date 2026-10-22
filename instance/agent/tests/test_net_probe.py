@@ -14,9 +14,41 @@ MIB = 1024 * 1024
 
 def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
     text = (PROFILES / "image.yaml").read_text()
-    from_yaml = [{k: str(v) for k, v in m.items()} for m in yaml.safe_load(text)["models"]]
+    raw = yaml.safe_load(text)
+    from_yaml = [{k: str(v) for k, v in m.items()} for m in raw["models"]]
     assert net_probe._flow_models(text) == from_yaml
-    assert len(from_yaml) == 5
+    assert len(from_yaml) == 8  # five image files, three video files
+    assert net_probe._flow_video_files(text) == {m["file"] for m in raw["video"]["models"]}
+
+
+def test_the_video_files_are_left_out_with_and_without_pyyaml(monkeypatch):
+    """Optional downloads: the probe and the 'all present' check see only what every boot downloads."""
+    import builtins
+
+    with_yaml = net_probe.read_models(PROFILES / "image.yaml")
+    real_import = builtins.__import__
+
+    def no_yaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_yaml)
+    without_yaml = net_probe.read_models(PROFILES / "image.yaml")
+    for found in (with_yaml, without_yaml):
+        assert [m["file"].rsplit("/", 1)[-1] for m in found] == [
+            "qwen-image-2.1-UC-Q4_K_M.gguf", "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors",
+            "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors",
+        ]
+
+
+def test_all_present_ignores_the_video_files(tmp_path):
+    for m in net_probe.read_models(PROFILES / "image.yaml"):
+        target = tmp_path / m["dest"] / m["file"].rsplit("/", 1)[-1]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as f:
+            f.truncate(int(m["size_bytes"]))
+    assert net_probe.all_present(PROFILES / "image.yaml", tmp_path)
 
 
 def test_the_largest_pinned_file_is_probed_the_repo_and_cdn_path_of_the_big_downloads():

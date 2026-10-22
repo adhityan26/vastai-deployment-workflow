@@ -774,8 +774,9 @@ export class Lifecycle {
       ...(choice.videoModels === true ? { INCLUDE_VIDEO_MODELS: "true" } : {}),
       // A link that replaces the pinned diffusion model (already checked by the route; the instance checks again).
       ...(choice.videoModels === true && choice.videoModelUrl !== undefined ? { VIDEO_MODEL_URL: choice.videoModelUrl } : {}),
-      // The link rules travel with every start of a profile with video, so an on-demand link is checked the same way.
-      ...((this.deps.videoModelFiles ?? []).length > 0 ? this.linkRules() : {}),
+      // Video on (VIDEO_ENABLED): the instance gets the switch and the link rules, so an on-demand link is checked the
+      // same way. Off: nothing is sent and an image-only instance env is unchanged.
+      ...(cfg["videoEnabled"] === true ? { VIDEO_ENABLED: "true", ...this.linkRules() } : {}),
     };
   }
 

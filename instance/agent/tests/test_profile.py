@@ -245,9 +245,18 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
     assert profile.name == "image" and profile.requires_vram_gb == 24
     assert [m.dest for m in profile.models] == [
         "models/diffusion_models/", "models/text_encoders/", "models/vae/", "models/loras/", "models/upscale_models/",
+        # the video files (pinned 2026-10-22): diffusion model, VAE, text encoder
+        "models/diffusion_models/", "models/vae/", "models/text_encoders/",
     ]
-    # The boot disk check counts these; the style LoRA and the upscale model add about 0.39 GB to the 14.6 GB base.
-    assert sum(m.size_bytes for m in profile.models) == 4604558112 + 9350798360 + 675509688 + 318820200 + 66857836
+    # An image-only boot (the default) downloads and disk-checks only these; the style LoRA and the upscale model add
+    # about 0.39 GB to the 14.6 GB base.
+    image_only = 4604558112 + 9350798360 + 675509688 + 318820200 + 66857836
+    assert sum(m.size_bytes for m in boot_models(profile, False)) == image_only
+    assert sum(m.size_bytes for m in boot_models(profile, True)) == image_only  # VIDEO_ENABLED is off here
+    # With video on and included, the boot adds the three video files (about 18.1 GB).
+    on = load_profile(instance / "profiles" / "image.yaml", video_enabled=True)
+    assert sum(m.size_bytes for m in boot_models(on, True)) == image_only + 9999658848 + 1409400960 + 6735906897
+    assert sum(m.size_bytes for m in profile.models) == image_only + 9999658848 + 1409400960 + 6735906897
     assert sum(m.size_bytes for m in profile.models) < profile.requires_disk_gb * 1024**3 // 2
     assert all(len(m.revision) == 40 for m in profile.models) and all(len(n.commit) == 40 for n in profile.nodes)
     for name in profile.workflows:
@@ -534,9 +543,9 @@ def test_the_shipped_profile_has_one_preset_mechanism_and_its_samples_download_n
     assert all(s["kind"] == "preset" and "lora" not in s for s in samples)
     profile = load_profile(shipped)
     assert profile.generate is not None
-    # Nothing in models belongs to a sample: the boot downloads exactly the base model, the one LoRA and the
-    # upscale model.
-    assert [PurePosixPath(m.file).name for m in profile.models] == [
+    # Nothing in models belongs to a sample: an image-only boot downloads exactly the base model, the one LoRA and
+    # the upscale model (the video files follow them and are left out).
+    assert [PurePosixPath(m.file).name for m in boot_models(profile, False)] == [
         "qwen-image-2.1-UC-Q4_K_M.gguf", "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors",
         "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors"]
     # Both workflows keep their own cfg 1.0, the guidance default (the web app checks this at startup too).
@@ -553,14 +562,17 @@ def _video_raw():
     return raw
 
 
-VIDEO_PINS = [
-    {"file": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "repo": "org/video", "revision": "a" * 40,
-     "dest": "models/diffusion_models/", "size_bytes": 10},
-    {"file": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "repo": "org/video", "revision": "a" * 40,
-     "dest": "models/text_encoders/", "size_bytes": 10},
-    {"file": "split_files/vae/wan2.2_vae.safetensors", "repo": "org/video", "revision": "a" * 40,
-     "dest": "models/vae/", "size_bytes": 10},
-]
+def _video_pins(raw):
+    """The shipped `models` entries of the video section's files (pinned 2026-10-22)."""
+    names = {m["file"] for m in raw["video"]["models"]}
+    return [m for m in raw["models"] if m["file"].rsplit("/", 1)[-1] in names]
+
+
+def _unpinned(raw):
+    """The shipped profile without the video pins (as before the owner pinned them)."""
+    pins = _video_pins(raw)
+    raw["models"] = [m for m in raw["models"] if m not in pins]
+    return raw
 
 
 def _write_raw(tmp_path, raw):
@@ -579,7 +591,7 @@ def test_the_shipped_video_section_is_off_and_adds_no_boot_requirement():
     instance = Path(__file__).resolve().parents[2]
     raw = _video_raw()
     video = raw["video"]
-    assert video["enabled"] is False
+    assert "enabled" not in video  # switched by VIDEO_ENABLED, never by the profile
     assert video["workflow"] in raw["workflows"] and (instance / "workflows" / video["workflow"]).is_file()
     profile = load_profile(instance / "profiles" / "image.yaml")
     assert profile.video_enabled is False
@@ -594,9 +606,7 @@ def test_the_shipped_video_section_is_off_and_adds_no_boot_requirement():
 
 def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only_when_asked(tmp_path):
     raw = _video_raw()
-    raw["models"] += VIDEO_PINS
-    raw["video"]["enabled"] = True
-    profile = load_profile(_write_raw(tmp_path, raw))
+    profile = load_profile(_write_raw(tmp_path, raw), video_enabled=True)
     assert profile.video_enabled is True
     assert profile.video_models == tuple(m["file"] for m in raw["video"]["models"])
     assert profile.video_node_classes == tuple(raw["video"]["node_classes"])
@@ -606,7 +616,8 @@ def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only
     assert boot_node_classes(profile, False) == image_classes
     image_only = boot_models(profile, False)
     assert [m.file for m in image_only] == [m.file for m in profile.models[:-3]]
-    assert [m.file for m in video_model_specs(profile)] == [p["file"] for p in VIDEO_PINS]
+    assert [m.file for m in video_model_specs(profile)] == [p["file"] for p in _video_pins(raw)]
+    assert len(video_model_specs(profile)) == 3
     # A boot that includes video downloads every file and also requires the video classes, once each.
     assert boot_models(profile, True) == profile.models
     with_video = boot_node_classes(profile, True)
@@ -614,13 +625,14 @@ def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only
     assert "SaveVideo" in with_video and len(set(with_video)) == len(with_video)
 
 
-def test_video_off_means_nothing_is_skipped_or_added(tmp_path):
+def test_with_video_off_its_pinned_files_are_never_downloaded_and_no_video_class_is_required(tmp_path):
     raw = _video_raw()
-    raw["models"] += VIDEO_PINS  # pinned, but the section is off: they are ordinary models
+    # pinned, but VIDEO_ENABLED is false: no boot downloads them
     profile = load_profile(_write_raw(tmp_path, raw))
-    assert profile.video_models == () and video_model_specs(profile) == ()
-    assert boot_models(profile, False) == profile.models
-    assert boot_node_classes(profile, True) == profile.provides_node_classes
+    assert profile.video_enabled is False
+    for include in (False, True):
+        assert boot_models(profile, include) == profile.models[:-3]
+        assert boot_node_classes(profile, include) == profile.provides_node_classes
 
 
 def test_missing_models_and_the_disk_check_can_be_limited_to_some_models(tmp_path):
@@ -634,24 +646,21 @@ def test_missing_models_and_the_disk_check_can_be_limited_to_some_models(tmp_pat
 
 
 def test_enabled_video_without_its_pinned_models_fails_loudly(tmp_path):
-    raw = _video_raw()
-    raw["video"]["enabled"] = True
+    raw = _unpinned(_video_raw())
     with pytest.raises(ProfileError, match="video model wan2.2_ti2v_5B_fp16.safetensors is not listed in models"):
-        load_profile(_write_raw(tmp_path, raw))
+        load_profile(_write_raw(tmp_path, raw), video_enabled=True)
 
 
 def test_enabled_video_with_a_model_in_the_wrong_folder_fails(tmp_path):
     raw = _video_raw()
-    pins = [dict(p) for p in VIDEO_PINS]
-    pins[2]["dest"] = "models/loras/"
-    raw["models"] += pins
-    raw["video"]["enabled"] = True
+    next(p for p in _video_pins(raw) if p["file"].endswith("wan2.2_vae.safetensors"))["dest"] = "models/loras/"
     with pytest.raises(ProfileError, match="wan2.2_vae.safetensors must have dest models/vae/"):
-        load_profile(_write_raw(tmp_path, raw))
+        load_profile(_write_raw(tmp_path, raw), video_enabled=True)
 
 
 @pytest.mark.parametrize("change, message", [
-    (lambda v, r: v.update(enabled="yes"), "video enabled must be true or false"),
+    (lambda v, r: v.update(enabled=True), "set VIDEO_ENABLED=true in .env"),
+    (lambda v, r: v.update(enabled=False), "set VIDEO_ENABLED=true in .env"),
     (lambda v, r: v.update(workflow="../x.json"), "video workflow"),
     (lambda v, r: r.update(workflows=[w for w in r["workflows"] if w != v["workflow"]]), "video workflow .* is not listed in workflows"),
     (lambda v, r: v.update(models="x"), "video models must be a non-empty list"),
@@ -664,8 +673,20 @@ def test_enabled_video_with_a_model_in_the_wrong_folder_fails(tmp_path):
 def test_a_malformed_video_section_fails_the_profile_even_while_off(tmp_path, change, message):
     raw = _video_raw()
     change(raw["video"], raw)
-    with pytest.raises(ProfileError, match=message):
-        load_profile(_write_raw(tmp_path, raw))
+    for enabled in (False, True):
+        with pytest.raises(ProfileError, match=message):
+            load_profile(_write_raw(tmp_path, raw), video_enabled=enabled)
+
+
+def test_the_shipped_profile_loads_with_video_off_and_on():
+    """VIDEO_ENABLED decides; the shipped video files are pinned, so both load (and without the pins, on is refused)."""
+    from pathlib import Path
+
+    shipped = Path(__file__).resolve().parents[2] / "profiles" / "image.yaml"
+    assert load_profile(shipped).video_enabled is False
+    on = load_profile(shipped, video_enabled=True)
+    assert on.video_enabled is True and len(video_model_specs(on)) == 3
+    assert all(len(m.revision) == 40 and m.size_bytes > 10**9 for m in video_model_specs(on))
 
 
 def test_a_profile_without_a_video_section_still_loads(tmp_path):

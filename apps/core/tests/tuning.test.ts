@@ -250,6 +250,8 @@ describe("style defaults", () => {
     expect(shipped.models.map((m) => m.file.split("/").pop())).toEqual([
       "qwen-image-2.1-UC-Q4_K_M.gguf", "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors",
       "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors",
+      // The video files: never downloaded by an image-only boot (VIDEO_ENABLED off or Include video models unticked).
+      "wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_vae.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     ]);
     // The three generate samples pre-fill guidance 3 and a negative prompt (UNVERIFIED on this model); the edit
     // samples only a negative prompt.

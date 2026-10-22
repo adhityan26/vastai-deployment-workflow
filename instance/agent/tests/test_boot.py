@@ -686,7 +686,6 @@ models:
   - {file: sub/v.bin, repo: org/v, revision: r1, dest: models/v/, size_bytes: 10}
 workflows: [flow.json, video.json]
 video:
-  enabled: true
   workflow: video.json
   models: [{file: v.bin, dest: models/v/}]
   node_classes: [SaveVideo]
@@ -709,7 +708,7 @@ def counting_client(seen):
 
 @pytest.mark.parametrize("include, files", [(None, ["m.bin"]), ("false", ["m.bin"]), ("true", ["m.bin", "v.bin"])])
 def test_install_models_downloads_the_video_files_only_when_the_boot_includes_them(tmp_path, include, files):
-    environ = prepared(tmp_path, **({} if include is None else {"INCLUDE_VIDEO_MODELS": include}))
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", **({} if include is None else {"INCLUDE_VIDEO_MODELS": include}))
     with_video_profile(tmp_path)
     ef = env_file(tmp_path)
     run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
@@ -722,14 +721,14 @@ def test_install_models_downloads_the_video_files_only_when_the_boot_includes_th
 
 
 def test_an_image_only_boot_does_not_need_disk_for_the_video_files(tmp_path):
-    environ = prepared(tmp_path, DISK_MARGIN_MB="0")
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", DISK_MARGIN_MB="0")
     with_video_profile(tmp_path)
     ef = env_file(tmp_path)
     run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
     code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=ok_client(),
                        free_bytes_fn=lambda p: 15)  # room for the image file, not for both
     assert code == 0
-    environ = prepared(tmp_path, DISK_MARGIN_MB="0", INCLUDE_VIDEO_MODELS="true")
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", DISK_MARGIN_MB="0", INCLUDE_VIDEO_MODELS="true")
     code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=ok_client(),
                        free_bytes_fn=lambda p: 5)
     assert code == 12 and states(tmp_path).get().reason == "disk_insufficient"
@@ -737,7 +736,7 @@ def test_an_image_only_boot_does_not_need_disk_for_the_video_files(tmp_path):
 
 @pytest.mark.parametrize("include, asked", [("false", ["UnetLoaderGGUF"]), ("true", ["UnetLoaderGGUF", "SaveVideo"])])
 def test_verify_nodes_checks_the_video_classes_only_when_the_boot_includes_video(tmp_path, include, asked):
-    environ = prepared(tmp_path, INCLUDE_VIDEO_MODELS=include)
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", INCLUDE_VIDEO_MODELS=include)
     ef = env_file(tmp_path)
     run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
     states(tmp_path).set(State.DOWNLOADING)
@@ -761,7 +760,6 @@ models:
   - {file: sub/vae.safetensors, repo: org/v, revision: r1, dest: models/vae/, size_bytes: 10}
 workflows: [video.json]
 video:
-  enabled: true
   workflow: video.json
   models: [{file: unet.safetensors, dest: models/diffusion_models/}, {file: vae.safetensors, dest: models/vae/}]
   node_classes: [SaveVideo]
@@ -786,7 +784,7 @@ def link_client(seen, *, size="10", redirect=None):
 
 
 def link_boot(tmp_path, url=LINK, **extra):
-    environ = prepared(tmp_path, INCLUDE_VIDEO_MODELS="true", VIDEO_MODEL_URL=url, **extra)
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", INCLUDE_VIDEO_MODELS="true", VIDEO_MODEL_URL=url, **extra)
     prof = tmp_path / "repo" / "instance" / "profiles"
     prof.mkdir(parents=True, exist_ok=True)
     (prof / "image.yaml").write_text(LINK_PROFILE)
@@ -833,7 +831,7 @@ def test_a_refused_link_fails_the_boot_before_any_model_is_downloaded(tmp_path, 
 
 
 def test_the_link_is_ignored_without_include_video_models(tmp_path):
-    environ = prepared(tmp_path, VIDEO_MODEL_URL=LINK)
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", VIDEO_MODEL_URL=LINK)
     prof = tmp_path / "repo" / "instance" / "profiles"
     prof.mkdir(parents=True)
     (prof / "image.yaml").write_text(LINK_PROFILE)
@@ -866,3 +864,40 @@ def test_verify_nodes_requires_the_gguf_loader_for_a_linked_gguf_model(tmp_path,
     assert got == code and "/object_info/UnetLoaderGGUF" in seen
     if code:
         assert "video_gguf_loader_missing" in capsys.readouterr().err
+
+
+
+@pytest.mark.parametrize("enabled", [None, "false"])
+def test_with_video_off_a_boot_is_image_only_even_when_it_asks_for_video(tmp_path, enabled):
+    environ = prepared(tmp_path, INCLUDE_VIDEO_MODELS="true", **({} if enabled is None else {"VIDEO_ENABLED": enabled}))
+    with_video_profile(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    seen = []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(seen),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 0 and [p.rsplit("/", 1)[-1] for p in seen] == ["m.bin"]
+
+
+def test_a_profile_that_still_says_enabled_stops_the_boot_with_a_pointer_to_video_enabled(tmp_path, capsys):
+    environ = prepared(tmp_path)
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(VIDEO_PROFILE.replace("video:\n", "video:\n  enabled: true\n"))
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client([]),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and "VIDEO_ENABLED=true" in capsys.readouterr().err
+
+
+def test_video_enabled_without_its_pins_stops_the_boot(tmp_path, capsys):
+    environ = prepared(tmp_path, VIDEO_ENABLED="true")
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(VIDEO_PROFILE.replace("  - {file: sub/v.bin, repo: org/v, revision: r1, dest: models/v/, size_bytes: 10}\n", ""))
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client([]),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and "is not listed in models" in capsys.readouterr().err
