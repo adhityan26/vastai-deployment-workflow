@@ -2,7 +2,8 @@
 # Source: mirror 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, byte-identical to the author's repo
 # abenzerps/Qwen-Image-2.1-Uncensored-GGUF (renamed ...-Uncensored-Quantized); SHA256 of all three files match.
 name: image
-# disk_gb counts the video model files (about 18 GB) too: with video enabled set VAST_DISK_GB to at least this.
+# disk_gb counts the video model files (about 18 GB) too. Only a boot that includes them (Start dialog "Include video
+# models") needs it: the web app then rents VAST_VIDEO_DISK_GB; an image-only boot keeps VAST_DISK_GB.
 requires: {vram_gb: 24, disk_gb: 80}
 nodes:
   # leejet fork: native Qwen-Image 2.1 GGUF support (city96/ComfyUI-GGUF fails with "Unknown model architecture").
@@ -272,8 +273,10 @@ upscale:
 # image, with ONE model through native ComfyUI nodes only (workflows/video-ti2v.json; no custom node). OFF until the
 # owner has pinned the three model files (see the comment under `models:`) and set `enabled: true`. Everything here
 # is validated even while it is off; with `enabled: true` each file of `models` below must be listed in the
-# profile's `models:` with this dest, and the instance's boot then also requires `node_classes` from ComfyUI's
-# /object_info before it reports ready (an image whose ComfyUI is too old for these nodes fails the boot loudly).
+# profile's `models:` with this dest. They are downloaded at boot only when the Start dialog's "Include video models" is
+# ticked (INCLUDE_VIDEO_MODELS on the instance); such a boot also requires `node_classes` from ComfyUI's /object_info
+# before it reports ready (an image whose ComfyUI is too old for these nodes fails the boot loudly). Without it an
+# admin can download them later from the Video tool; the agent then checks the same node classes first.
 # The web app copies the workflow, sets the mapped inputs and, with a start image, adds one LoadImage node (id
 # `video_start`) wired to `start_image`. UNVERIFIED (never run on a real instance): the graph and its node and input
 # names, the h264 mp4 output of SaveVideo, VRAM use at these sizes on a 24 GB card, the time a clip takes, and that

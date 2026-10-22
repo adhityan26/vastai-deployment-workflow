@@ -615,21 +615,63 @@ and a `models:` line is never written from memory. To switch it on (laptop):
 3. Set `video.enabled: true`. Both loaders now refuse the profile while a listed video file is missing from
    `models:` or has another dest ("video model ... is not listed in models"), so a forgotten pin stops the web app
    at startup and the instance at boot, never a job.
-4. Set `VAST_DISK_GB` in `.env` to at least `requires.disk_gb` (80): about 33 GB of models plus the image. The
-   instance's own disk check refuses a disk that is too small at boot.
-5. Optional: `VIDEO_TIMEOUT_S` (default 2400, must stay below `WEB_JOB_TTL_S`, 3600, or the web app refuses to
-   start), `VIDEO_MAX_BYTES` (largest result read from the instance, default 100 MiB) and `VIDEO_VIEW_TIMEOUT_S`
-   (one result download, default 300 s). Images keep `GENERATE_TIMEOUT_S`, `WEB_IMAGE_MAX_BYTES` and
-   `WEB_IMAGE_TIMEOUT_S`. These keys are read only while video is on.
-6. Push, bump `REPO_COMMIT`, deploy, Start. The boot downloads the extra files (minutes more on a fast host, far
-   longer on a slow one: the slow-download guard may release such a machine) and, with video on, also requires the
-   section's `node_classes` from ComfyUI's `/object_info` before it reports ready: an image whose ComfyUI is too old
-   for these native nodes fails the boot loudly with the missing class names (then a newer `VAST_IMAGE` is needed).
+4. Optional: `VAST_VIDEO_DISK_GB` (default 80, the disk rented for a start with the video models),
+   `VIDEO_TIMEOUT_S` (default 2400, must stay below `WEB_JOB_TTL_S`, 3600, or the web app refuses to start),
+   `VIDEO_MAX_BYTES` (largest result read from the instance, default 100 MiB) and `VIDEO_VIEW_TIMEOUT_S` (one result
+   download, default 300 s). Images keep `GENERATE_TIMEOUT_S`, `WEB_IMAGE_MAX_BYTES` and `WEB_IMAGE_TIMEOUT_S`.
+5. Push, bump `REPO_COMMIT`, deploy.
 
-What the web app enforces: the body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start
-image is checked like an edit reference (magic bytes, size, pixels, side, one frame) and uploaded under a name the
-server chooses; the workflow is checked against the section at startup (every mapped input exists, the output node
-is `SaveVideo`, the start image input is free, the graph loads every listed model file). The result is read from
+### Video models at Start, or later on demand
+
+The video files are **not** downloaded at every boot. The admin's Start dialog has **Include video models** (shown
+only where the server offers video; unticked by default; the last choice is remembered in this browser, key
+`vast-comfy.start-video`):
+
+- **Unticked (default): exactly the boot of before.** Same disk (`VAST_DISK_GB`), same offer search and price, no
+  `INCLUDE_VIDEO_MODELS` in the instance env; the agent downloads only the image models, its disk check counts only
+  them, boot requires only `provides_node_classes`, and the overall download progress and slow-download ETA leave
+  the video files out.
+- **Ticked:** the GPU list, the offers and the estimate are searched and priced for the larger disk (the larger of
+  `VAST_DISK_GB` and `VAST_VIDEO_DISK_GB`), the Start body carries `video_models: true`, the instance gets
+  `INCLUDE_VIDEO_MODELS=true` and downloads the video files at boot like every other model (pinned size, ranged
+  download, disk check) and also requires the section's `node_classes` before ready. The boot takes longer
+  (about 18 GB more): on a slow host the slow-download guard may release the machine; raise
+  `BOOT_MAX_DOWNLOAD_ETA_MIN` if that happens too often.
+
+**On demand** (changed your mind after the start): in the Video tool an admin sees "This instance was started without
+the video models" and a **Download video models (about N GB, several minutes)** button (`POST /api/video-models`,
+admin only: it uses the instance's disk and network for minutes). Members see "Ask an admin to download them" and no
+button. The agent (`POST /video-models`) first checks, before a single byte: the instance is ready (not booting or
+stopping), ComfyUI has the section's node classes (`video_nodes_missing` otherwise: the instance image is too old),
+and the disk holds the missing files plus `DISK_MARGIN_MB` (`disk_insufficient` with the GB needed and free
+otherwise: an instance started with the default 50 GB disk may well be too small; start the next one with the box
+ticked). It then downloads only the missing files in the background with the boot's own code (pinned size, ranged
+download into a `.part` file, atomic rename), single-flight (a second press changes nothing). `/api/state`
+`video.models` shows `not_installed`, `downloading` (bytes, percent; the page shows "Downloading the video models:
+4.5 GB of 18.0 GB (25%)"), `ready` or `failed` (with the reason and a retry button for admins). Image jobs keep
+running meanwhile. A running download counts as activity: the idle shutdown does not stop the instance under it (the
+failsafe deadline and the hard cap still apply). Cut off (agent or instance restart): nothing half-written is ever
+used; pressing the button again fetches only what is missing.
+
+**Video jobs are never queued while the files are missing:** `POST /api/video` answers 409
+`video_models_not_ready` (not installed, still downloading, failed, or not reported) and Make video stays disabled
+until `video.models.state` is `ready`.
+
+**ComfyUI and the new files:** ComfyUI's loader lists are read from its model folders, and recent ComfyUI versions
+cache them per folder and re-read a folder when its modification time changes, so a running ComfyUI should offer the
+new files without a restart. This is from reading ComfyUI's code behaviour as remembered, NOT verified on the
+instance image. The agent therefore checks instead of assuming: after the download it asks
+`/object_info/<class>` of every video node class and requires each new file name to be listed; if one is not, the
+state is `failed` with "ComfyUI does not list ... yet; it needs a restart". It never restarts ComfyUI itself (that
+would cut off running image jobs). The node classes are native, so they exist from ComfyUI's start; only the files
+are new.
+
+### What the web app enforces
+
+The body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start image is checked like an
+edit reference (magic bytes, size, pixels, side, one frame) and uploaded under a name the server chooses; the
+workflow is checked against the section at startup (every mapped input exists, the output node is `SaveVideo`, the
+start image input is free, the graph loads every listed model file). The result is read from
 `GET /api/video/{id}/{index}` (owner or admin, the instance that made it only), at most `VIDEO_MAX_BYTES`, and served
 only when its first bytes are an mp4 (`ftyp` box of a video brand) or WebM (EBML DocType `webm`): the type comes from
 those bytes, never from ComfyUI, with `nosniff`, `no-store` and a fixed file name. The page fetches it once and plays
@@ -639,7 +681,7 @@ never served by `/api/image`.
 Not in phase 1, on purpose: **saving a video to the gallery.** The gallery's types, size limit and quotas are image
 ones (`POST /api/gallery` answers `video_not_saveable` for a video job, the page shows no Save button and auto-save
 skips videos); use Download. Also left out: a negative prompt or guidance for video, more than one start image, an
-end frame, sound.
+end frame, sound, cancelling an on-demand download (it ends with the instance).
 
 Waiting: ComfyUI runs one job at a time. While a clip renders (many minutes), image jobs of other people wait in
 ComfyUI's queue, and their own `GENERATE_TIMEOUT_S` clock (600 s) runs from their submit: a long video can make a
@@ -647,11 +689,14 @@ queued image job time out on the page although ComfyUI still runs it later. The 
 several minutes and keeps the form busy until it is done (like every job). Idle shutdown does not hit a running
 video (a busy queue resets the idle timer); the failsafe and the hard cap still do.
 
-UNVERIFIED (nothing here has run against ComfyUI): the workflow graph and its node and input names (written from
-the native nodes as documented, not exported from a running ComfyUI), whether `SaveVideo` with format mp4 / codec
-h264 writes a browser-playable file and lists it under `images` in its history output, VRAM at 1280x704 x 121
-frames on a 24 GB card, how long a clip takes on an A5000/3090/4090, the quality of the smaller sizes and of the
-shipped negative prompt, playback on iPhone and Android, the real file sizes, and the longer boot.
+UNVERIFIED (nothing here has run against ComfyUI or a real instance): the workflow graph and its node and input
+names (written from the native nodes as documented, not exported from a running ComfyUI), whether `SaveVideo` with
+format mp4 / codec h264 writes a browser-playable file and lists it under `images` in its history output, VRAM at
+1280x704 x 121 frames on a 24 GB card, how long a clip takes on an A5000/3090/4090, the quality of the smaller sizes
+and of the shipped negative prompt, playback on iPhone and Android, the real file sizes, the longer boot with the
+box ticked, the on-demand download on a real instance (its speed beside running image jobs, the disk left on a
+default 50 GB instance, and whether ComfyUI lists the new files without a restart), and the price difference of
+the larger disk.
 
 ## Live progress and preview
 
@@ -917,7 +962,8 @@ The Vast create/destroy request shapes and the instance label were verified in t
 ## NOT verified yet
 
 - Video ("Video"): off and unpinned; never run. The workflow, the node classes, the mp4 output, VRAM, time per clip,
-  phone playback, file sizes, disk and boot time are all unchecked.
+  phone playback, file sizes, disk and boot time, the on-demand download and whether ComfyUI lists new model files
+  without a restart are all unchecked.
 
 - The custom instance image ("Custom instance image"): never built, pushed, pulled by Vast or booted.
 

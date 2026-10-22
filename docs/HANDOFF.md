@@ -92,8 +92,21 @@ scope for phase 1 (`video_not_saveable`); the image gallery is unchanged.
 
 **It ships OFF (`video.enabled: false`) because the three model files are not pinned:** the cloud session could not
 reach Hugging Face, so no revision, size or sha256 was written. The owner runs the three `scripts/pin_model.py`
-commands from the comment under `models:` in `instance/profiles/image.yaml` (licence check first), pastes the lines,
-sets `enabled: true` and `VAST_DISK_GB` >= 80. A missing pin then stops the web app and the boot with a clear error.
+commands from the comment under `models:` in `instance/profiles/image.yaml` (licence check first), pastes the lines
+and sets `enabled: true`. A missing pin then stops the web app and the boot with a clear error.
+
+**The video files are not downloaded at every boot (owner decision 2026-10-22).** The Start dialog has "Include video
+models" (admin, unticked by default, remembered per browser): unticked, the boot is exactly the image-only boot of
+before (disk, offer search, price, instance env, downloads, node check, progress/ETA); ticked, the web app rents
+`VAST_VIDEO_DISK_GB` (80) and sets `INCLUDE_VIDEO_MODELS=true`, and the boot downloads the video files and checks the
+video node classes. Later, an admin can press "Download video models" in the Video tool (`POST /api/video-models` ->
+agent `POST /video-models`): node classes and disk checked first, then a single-flight background download with the
+boot's code; progress in `/api/state` `video.models`; image jobs keep running; the download counts as idle
+activity. Members only see "ask an admin". Video jobs are refused (`video_models_not_ready`) until the files are
+there. Decision: the trigger is admin-only (disk, network and minutes of the paid instance). After the download the
+agent checks that ComfyUI's loaders list the new files rather than restarting ComfyUI; ComfyUI is expected to re-read
+its model folders by modification time (from memory of its code, UNVERIFIED); if it does not, the state is `failed`
+with "needs a restart". Runbook: README "Video", "Video models at Start, or later on demand".
 
 UNVERIFIED, nothing ran against ComfyUI: the workflow graph and node/input names (the video latent node, `CreateVideo`,
 `SaveVideo` and their inputs were written from memory of the native nodes, not exported from a running ComfyUI); whether the instance image's ComfyUI is new enough to have these nodes (boot checks them via
@@ -103,6 +116,9 @@ in the history and the file plays in browsers; whether the repo paths in the pin
 (iOS/Android), result file sizes, disk use on the instance and the longer boot (more download, slow-download guard).
 Known limit: image jobs queued behind a running video keep their own 600 s timeout and may fail on the page while
 ComfyUI still runs them later.
+Also UNVERIFIED: the on-demand download on a real instance (speed beside running jobs, room on a default 50 GB disk:
+it may well be refused as `disk_insufficient`), ComfyUI listing the new files without a restart, the price of the
+larger disk, and the slow-download guard on a boot with the video files (about 18 GB more).
 
 ## Next work, in order
 
