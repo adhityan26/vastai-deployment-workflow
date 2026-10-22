@@ -79,6 +79,58 @@ while open, again when the state turns none or ready; never while closed. `#usag
 "Usage history" and "Menu". Checked in jsdom and in headless Chromium at 1280 and 375 px against a fake state; never on
 a real phone, with a screen reader, or against a real instance.
 
+## Video (2026-10-21, branch `feat/video`, pushed, NOT merged or deployed)
+
+Text to video and image to video (exactly one optional start image) with one model through native ComfyUI nodes,
+on the same instance and profile as images. Runbook: `deploy/web/README.md` "Video". Built: the profile's `video:`
+section and `instance/workflows/video-ti2v.json`; both profile loaders validate the section (also while it is off);
+`POST /api/video`, `GET /api/video/{id}/{index}` (mp4/WebM by magic bytes, `VIDEO_MAX_BYTES`), `video` in
+`/api/state`, the `video` menu mode and `film` icon; the page's Video entry (prompt, start image by picker, paste or
+"Make a video", size, length, seed; `<video controls playsinline>` from a blob URL, Download, a long-wait note);
+config keys `VIDEO_TIMEOUT_S`, `VIDEO_MAX_BYTES`, `VIDEO_VIEW_TIMEOUT_S`. Saving videos to the gallery is out of
+scope for phase 1 (`video_not_saveable`); the image gallery is unchanged.
+
+**It ships OFF (`video.enabled: false`) because the three model files are not pinned:** the cloud session could not
+reach Hugging Face, so no revision, size or sha256 was written. The owner runs the three `scripts/pin_model.py`
+commands from the comment under `models:` in `instance/profiles/image.yaml` (licence check first), pastes the lines
+and sets `enabled: true`. A missing pin then stops the web app and the boot with a clear error.
+
+**The video files are not downloaded at every boot (owner decision 2026-10-22).** The Start dialog has "Include video
+models" (admin, unticked by default, remembered per browser): unticked, the boot is exactly the image-only boot of
+before (disk, offer search, price, instance env, downloads, node check, progress/ETA); ticked, the web app rents
+`VAST_VIDEO_DISK_GB` (80) and sets `INCLUDE_VIDEO_MODELS=true`, and the boot downloads the video files and checks the
+video node classes. Later, an admin can press "Download video models" in the Video tool (`POST /api/video-models` ->
+agent `POST /video-models`): node classes and disk checked first, then a single-flight background download with the
+boot's code; progress in `/api/state` `video.models`; image jobs keep running; the download counts as idle
+activity. Members only see "ask an admin". Video jobs are refused (`video_models_not_ready`) until the files are
+there. Decision: the trigger is admin-only (disk, network and minutes of the paid instance). After the download the
+agent checks that ComfyUI's loaders list the new files rather than restarting ComfyUI; ComfyUI is expected to re-read
+its model folders by modification time (from memory of its code, UNVERIFIED); if it does not, the state is `failed`
+with "needs a restart". Runbook: README "Video", "Video models at Start, or later on demand".
+
+UNVERIFIED, nothing ran against ComfyUI: the workflow graph and node/input names (the video latent node, `CreateVideo`,
+`SaveVideo` and their inputs were written from memory of the native nodes, not exported from a running ComfyUI); whether the instance image's ComfyUI is new enough to have these nodes (boot checks them via
+`/object_info` once video is on and fails loudly if not); that `SaveVideo` (mp4, h264) lists its file under `images`
+in the history and the file plays in browsers; whether the repo paths in the pin commands are right; model sizes
+(about 18 GB assumed), VRAM at 1280x704 x 121 frames on 24 GB, time per clip (assumed 5-20 min), phone playback
+(iOS/Android), result file sizes, disk use on the instance and the longer boot (more download, slow-download guard).
+Known limit: image jobs queued behind a running video keep their own 600 s timeout and may fail on the page while
+ComfyUI still runs them later.
+**Model links (owner request 2026-10-22):** an admin may give a Hugging Face link (`.safetensors` or `.gguf`) that
+replaces the video diffusion model, in the Start dialog (`video_model_url`, only with Include video models) or with
+"Download video models" (`url`). Checked on the web (shape, host allow-list `VIDEO_MODEL_LINK_HOSTS`, type) and
+again on the instance (every redirect hop: https, 443, allowed domains; HEAD size cap `VIDEO_MODEL_LINK_MAX_BYTES`;
+disk; magic bytes after download). Not integrity-pinned or licence-checked: the sha256 of what arrived is reported
+(admins see it). Text encoder and VAE stay pinned; a link does not lift the pin requirement of `video.enabled`. A
+`.gguf` link swaps the workflow's `UNETLoader` for `UnetLoaderGGUF` and requires that class
+(`video_gguf_loader_missing`); whether the pinned `leejet/ComfyUI-GGUF` fork loads this video model's GGUF files is
+UNVERIFIED (the usual loader for it is `city96/ComfyUI-GGUF`, which failed for the image model); if not, the first job fails with
+"UnetLoaderGGUF: ...". Runbook: README "A model link instead of the pinned diffusion model". Not merged: the owner
+decides after review.
+Also UNVERIFIED: the on-demand download on a real instance (speed beside running jobs, room on a default 50 GB disk:
+it may well be refused as `disk_insufficient`), ComfyUI listing the new files without a restart, the price of the
+larger disk, and the slow-download guard on a boot with the video files (about 18 GB more).
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)
@@ -122,7 +174,7 @@ Do this AFTER Task A (both touch `apps/web/public/ui.ts`).
 - Deferred minors listed in the review notes of the plans under `docs/superpowers/plans/`.
 
 ### Later
-Discord bot (reuse the gallery `save` idea), video/3D, `docs/superpowers/plans/2026-10-17-web-interface-followups.md`,
+Discord bot (reuse the gallery `save` idea), 3D, video phase 2 (gallery save, after the live test of "Video"), `docs/superpowers/plans/2026-10-17-web-interface-followups.md`,
 Camera angle (AnyAngle LoRA + extra 3D models; licences unchecked, see the styles design doc).
 
 ## What a cloud session can and cannot do

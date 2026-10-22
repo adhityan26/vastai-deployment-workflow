@@ -18,9 +18,14 @@ from .config import ConfigError, KeySpec, _coerce, default_text, load_config, lo
 from .deadlines import DeadlineStore
 from .files import atomic_write
 from .profile import (
-    DiskInsufficient, DownloadError, Downloader, NodeInstallError, ProfileError, ProgressWriter, check_disk,
-    free_bytes_of, install_nodes, load_profile, missing_models,
+    DiskInsufficient, DownloadError, Downloader, NodeInstallError, ProfileError, ProgressWriter, boot_models,
+    boot_node_classes, check_disk, free_bytes_of, install_nodes, load_profile, missing_models,
 )
+from .model_link import (
+    ActiveLink, LinkError, check_model_file, clear_active, diffusion_slot, guarded_client, linked_spec, read_active,
+    required_loader, sha256_of, write_active,
+)
+from .profile import target_path
 from .state import InvalidTransition, State, StateStore
 from .comfy_args import image_env_file, render_args, write_image_env
 from .supervisor_conf import render as render_supervisor_programs
@@ -71,11 +76,12 @@ def _safe_set(states: StateStore, state: State, reason: str | None = None) -> No
 
 
 class Boot:
-    def __init__(self, env_file: Path, *, now, run, http_client, free_bytes_fn, sleep):
+    def __init__(self, env_file: Path, *, now, run, http_client, free_bytes_fn, sleep, link_client=None):
         self.cfg = load_config(env_file, "instance")
         self.env_file = env_file
         self.now, self.run, self.sleep, self.free_bytes_fn = now, run, sleep, free_bytes_fn
         self.http = http_client or httpx.Client(timeout=self.cfg.http_timeout_s)
+        self.http_link: httpx.Client | None = link_client
         self.wired = build(self.cfg, now=now, run=run, http_client=self.http)
 
     def fail(self, reason: str, destroy: bool = True) -> int:
@@ -86,6 +92,12 @@ class Boot:
         if destroy and not self.cfg.keep_on_failure:
             self.wired.flow.run(reason)
         return EXIT_FAILED
+
+    def link_client(self) -> httpx.Client:
+        """The client of a linked download (redirect guard on every request); a test injects its own transport."""
+        if self.http_link is not None:
+            return self.http_link
+        return guarded_client(self.cfg.video_model_link_hosts, self.cfg.video_model_link_redirect_domains, self.cfg.http_timeout_s)
 
     def profile(self):
         return load_profile(Path(self.cfg.repo_dir) / "instance" / "profiles" / f"{self.cfg.profile}.yaml")
@@ -141,10 +153,25 @@ def cmd_install_models(b: Boot) -> int:
     comfy_dir = Path(b.cfg.comfy_dir)
     try:
         profile = b.profile()
-        check_disk(profile, comfy_dir, b.free_bytes_fn(comfy_dir), b.cfg.disk_margin_mb)
+        # An image-only boot (INCLUDE_VIDEO_MODELS false) neither downloads nor counts the video files.
+        wanted = boot_models(profile, b.cfg.include_video_models)
+        link = None
+        if b.cfg.include_video_models and b.cfg.video_model_url:
+            # A linked diffusion model replaces the pinned one for this boot (validated again here, size from a HEAD).
+            link_client = b.link_client()
+            spec, link = linked_spec(b.cfg.video_model_url, profile, hosts=b.cfg.video_model_link_hosts, client=link_client,
+                                     max_bytes=b.cfg.video_model_link_max_bytes)
+            slot = diffusion_slot(profile)
+            wanted = tuple(spec if m == slot else m for m in wanted)
+        else:
+            clear_active(Path(b.cfg.state_dir))
+        check_disk(profile, comfy_dir, b.free_bytes_fn(comfy_dir), b.cfg.disk_margin_mb, wanted)
     except DiskInsufficient as exc:
         print(f"boot: {exc}", file=sys.stderr)
         return b.fail("disk_insufficient")
+    except LinkError as exc:
+        print(f"boot: video model link refused ({exc.code}): {exc.message}", file=sys.stderr)
+        return b.fail("download_failed")
     except ProfileError as exc:
         print(f"boot: {exc}", file=sys.stderr)
         return b.fail("download_failed")
@@ -154,8 +181,30 @@ def cmd_install_models(b: Boot) -> int:
         on_progress=ProgressWriter(Path(b.cfg.state_dir), "models"), connections=b.cfg.download_connections,
     )
     try:
-        for model in missing_models(profile, comfy_dir):
-            downloader.fetch(model, comfy_dir)
+        for model in missing_models(profile, comfy_dir, wanted):
+            if link is not None and model is spec:
+                Downloader(
+                    hf_base=f"https://{link.host}", token="", client=link_client, retries=b.cfg.download_retries,  # config-lint: ok (link host, checked)
+                    backoff_s=b.cfg.download_backoff_s, chunk_bytes=b.cfg.download_chunk_bytes, sleep=b.sleep,
+                    on_progress=ProgressWriter(Path(b.cfg.state_dir), "models"), connections=b.cfg.download_connections,
+                ).fetch(model, comfy_dir)
+            else:
+                downloader.fetch(model, comfy_dir)
+        if link is not None:
+            target = target_path(spec, comfy_dir)
+            try:
+                check_model_file(target)  # GGUF magic bytes, or a sane safetensors header
+            except LinkError:
+                target.unlink(missing_ok=True)
+                raise
+            # Not integrity-pinned: what arrived is hashed and reported, never checked against a pin.
+            sha = sha256_of(target)
+            write_active(Path(b.cfg.state_dir), ActiveLink(url=link.url, repo=link.repo, revision=link.revision, file=link.file,
+                                                           name=link.name, dest=spec.dest, size_bytes=spec.size_bytes, sha256=sha))
+            print(f"boot: linked video model {link.name} from {link.repo}@{link.revision}: sha256 {sha} (not pinned)", file=sys.stderr)
+    except LinkError as exc:
+        print(f"boot: video model link refused ({exc.code}): {exc.message}", file=sys.stderr)
+        return b.fail("download_failed")
     except DownloadError as exc:
         print(f"boot: {exc}", file=sys.stderr)
         return b.fail("download_failed")
@@ -220,8 +269,14 @@ def cmd_verify_nodes(b: Boot) -> int:
     """After the ComfyUI restart answers: every node class the profile provides must be registered, so a node
     whose import failed (e.g. a missing Python dependency) never ends in a healthy-looking `ready`."""
     try:
-        names = b.profile().provides_node_classes
+        names = boot_node_classes(b.profile(), b.cfg.include_video_models)
+        active = read_active(Path(b.cfg.state_dir)) if b.cfg.include_video_models else None
+        loader = None if active is None else required_loader(active.name)
+        if loader is not None and loader not in names:
+            names = names + (loader,)
         missing = [name for name in names if not b.wired.comfy.node_class_registered(name)]
+        if loader is not None and loader in missing:
+            print(f"boot: video_gguf_loader_missing: the linked .gguf video model needs the node class {loader}", file=sys.stderr)
     except (ProfileError, ComfyUnavailable) as exc:
         print(f"boot: node verification failed: {exc}", file=sys.stderr)
         return b.fail("node_import_failed")
@@ -301,6 +356,7 @@ def main(
     http_client: httpx.Client | None = None,
     free_bytes_fn: Callable[[Path], int] = free_bytes_of,
     sleep: Callable[[float], None] = time.sleep,
+    link_client: httpx.Client | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="vastcomfy_agent.boot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -340,7 +396,8 @@ def main(
 
 
     try:
-        b = Boot(args.env_file, now=now, run=run, http_client=http_client, free_bytes_fn=free_bytes_fn, sleep=sleep)
+        b = Boot(args.env_file, now=now, run=run, http_client=http_client, free_bytes_fn=free_bytes_fn, sleep=sleep,
+                 link_client=link_client)
     except ConfigError as exc:
         # No valid config means no destroy is possible here; the watchdog covers this case.
         try:

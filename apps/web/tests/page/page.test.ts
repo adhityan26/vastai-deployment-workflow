@@ -1676,6 +1676,260 @@ describe("upscale", () => {
   });
 });
 
+describe("video", () => {
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }, { name: "Portrait, faster", width: 480, height: 832 }],
+    durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
+    max_bytes: 1000,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+    download_bytes: 18_000_000_000,
+    models: { state: "ready", bytes_done: 1, bytes_total: 1, percent: 100, reason: null },
+  };
+  const menu = {
+    categories: [{ id: "create", title: "Create" }],
+    items: [
+      { id: "text_to_image", title: "Text to image", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true },
+      { id: "video", title: "Video", description: "Make a short video.", icon: "film", category: "create", tool: "video", style: null, available: true },
+    ],
+  };
+  const pickOne = (name = "a.png", content = "STARTBYTES") => {
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File([content], name, { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+  };
+  const submit = async () => {
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+  };
+  const doneVideo = { body: { status: "done", images: [], videos: [{ index: 0, url: "/api/video/v-1/0" }], seconds: 312, queued_seconds: null } };
+
+  beforeEach(() => {
+    window.URL.createObjectURL = (() => "blob:fake-video") as typeof URL.createObjectURL;
+    window.URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  });
+
+  it("has no entry while the server does not offer video", async () => {
+    await mount({ menu: { ...menu, items: menu.items.map((i) => (i.id === "video" ? { ...i, available: false } : i)) } });
+    expect(menuItem("video")).toBeNull();
+    await mount({ menu });
+    expect(menuItem("video")).toBeNull(); // available, but the state has no video offer
+  });
+
+  it("shows the prompt, one optional start image, size, length and seed, and none of the image controls", async () => {
+    await mount({ menu, video });
+    chooseTool("video");
+    expect(currentTool()).toBe("video");
+    expect(q("#prompt-box")!.hidden).toBe(false);
+    expect(q("#edit-box")!.hidden).toBe(false);
+    expect(q("#ref-label")!.textContent).toBe("Start image (optional)");
+    expect(q<HTMLInputElement>("#ref-input")!.multiple).toBe(false);
+    expect(q("#ref-hint")!.textContent).toContain("Optional: one start image");
+    expect(q("#video-box")!.hidden).toBe(false);
+    expect([...document.querySelectorAll("#video-size option")].map((o) => o.textContent)).toEqual(["Landscape (1280×704)", "Portrait, faster (480×832)"]);
+    expect([...document.querySelectorAll("#video-duration option")].map((o) => o.textContent)).toEqual(["About 3 s", "About 5 s"]);
+    expect(q("#sampling-box")!.hidden).toBe(false);
+    expect(q("#quality-box")!.hidden).toBe(true);
+    expect(q("#size-box")!.hidden).toBe(true);
+    expect(q("#resolution-box")!.hidden).toBe(true);
+    expect(q("#scale-box")!.hidden).toBe(true);
+    expect(q("#advanced-box")!.hidden).toBe(true);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Make video");
+    expect(q("#gen-hint")!.textContent).toContain("several minutes");
+    chooseTool("text_to_image");
+    expect(q("#video-box")!.hidden).toBe(true);
+    expect(q("#quality-box")!.hidden).toBe(false);
+    expect(q("#ref-label")!.textContent).toBe("Reference images");
+  });
+
+  it("text to video: posts exactly the prompt, size and length (and a seed when given), then polls and plays the file", async () => {
+    await mount({ menu, video, gallery: true }, {
+      "POST /api/video": { status: 202, body: { id: "v-1" } },
+      "GET /api/generate/v-1": doneVideo,
+      "GET /api/video/v-1/0": { body: null, raw: "MP4BYTES", type: "video/mp4" },
+    });
+    q<HTMLInputElement>("#autosave")!.checked = true;
+    chooseTool("video");
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox runs";
+    q<HTMLSelectElement>("#video-duration")!.value = "About 5 s";
+    q<HTMLInputElement>("#seed")!.value = "77";
+    await submit();
+    await flush();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "a fox runs", size: "Landscape", duration: "About 5 s", seed: 77 });
+    expect(q(".job .muted")!.textContent).toBe("Video: Landscape, About 5 s");
+    const player = q<HTMLVideoElement>(".job video")!;
+    expect(player).not.toBeNull();
+    expect(player.controls).toBe(true);
+    expect(player.hasAttribute("playsinline")).toBe(true);
+    expect(player.getAttribute("src")).toBe("blob:fake-video");
+    const dl = q<HTMLAnchorElement>(".job a.dl")!;
+    expect(dl.getAttribute("href")).toBe("blob:fake-video");
+    expect(dl.getAttribute("download")).toBe("video-v-1-0.mp4");
+    expect(q(".job-time")!.textContent).toBe("Made in 5 min 12 s");
+    // No Save, no auto-save, no "continue" buttons for a video.
+    expect(q(".job button.save")).toBeNull();
+    expect(q(".job .chain")).toBeNull();
+    expect(posts("/api/gallery")).toHaveLength(0);
+    expect(q(".job")!.textContent).toContain("Videos are not saved to the gallery");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("image to video: sends the one attached image as base64, and the label says so", async () => {
+    await mount({ menu, video }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": { body: { status: "pending", progress: { step: 3, max: 20 }, preview_seq: 0 } } });
+    chooseTool("video");
+    pickOne("a.png", "STARTBYTES");
+    pickOne("b.png");
+    expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    expect(q("#ref-list .ref-tag")!.textContent).toBe("Start image");
+    q<HTMLTextAreaElement>("#prompt")!.value = "it moves";
+    await submit();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "it moves", size: "Landscape", duration: "About 3 s", image: Buffer.from("STARTBYTES").toString("base64") });
+    expect(q(".job .muted")!.textContent).toBe("Video: Landscape, About 3 s, from an image");
+    // While it runs: the step counter and the long-wait note.
+    expect(q(".job-step")!.textContent).toBe("Step 3 of 20");
+    expect(q(".job-wait")!.textContent).toContain("several minutes");
+  });
+
+  it("needs a prompt, and shows the api refusal and frees the form", async () => {
+    await mount({ menu, video }, { "POST /api/video": { status: 400, body: { error: { code: "unknown_duration", message: "duration is not offered for video" } } } });
+    chooseTool("video");
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("Describe the video first.");
+    expect(posts("/api/video")).toHaveLength(0);
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("duration is not offered for video");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("says so when the file cannot be loaded, or is not a video", async () => {
+    for (const reply of [{ status: 502, body: { error: { code: "video_rejected", message: "ComfyUI did not return a video" } } }, { body: null, raw: "<html>", type: "text/html" }]) {
+      await mount({ menu, video }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": doneVideo, "GET /api/video/v-1/0": reply });
+      chooseTool("video");
+      q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+      await submit();
+      await flush();
+      expect(q(".job video")).toBeNull();
+      expect(q(".job [role=alert]")!.textContent).toMatch(/^The video could not be loaded: /);
+      app?.stop();
+    }
+  });
+
+  it("refuses two images carried over from edit: a video takes one start image at most", async () => {
+    const edit = { max_references: 3, max_bytes: 1000, max_pixels: 1_000_000, types: ["png"], resolutions: [{ name: "r", value: 1024 }] };
+    const items = [...menu.items, { id: "free_edit", title: "Free edit", description: null, icon: "wand", category: "create", tool: "edit", style: null, available: true }];
+    await mount({ menu: { ...menu, items }, video, edit });
+    chooseTool("free_edit");
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["A"], "a.png", { type: "image/png" }), new File(["B"], "b.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+    chooseTool("video");
+    q<HTMLTextAreaElement>("#prompt")!.value = "x";
+    await submit();
+    expect(q("#form-error")!.textContent).toBe("Attach at most one start image for a video.");
+    expect(posts("/api/video")).toHaveLength(0);
+  });
+
+  describe("video models on the instance", () => {
+    const at = (models: unknown) => ({ ...video, models });
+    const missing = { state: "not_installed", bytes_done: 0, bytes_total: 18_000_000_000, percent: 0, reason: null };
+
+    it("an admin gets the download button while they are missing; it asks the server and follows the state", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 202, body: { models: { ...missing, state: "downloading" } } },
+      });
+      chooseTool("video");
+      expect(q("#video-models")!.hidden).toBe(false);
+      expect(q("#video-models-text")!.textContent).toBe("This instance was started without the video models.");
+      const btn = q<HTMLButtonElement>("#video-models-download")!;
+      expect(btn.hidden).toBe(false);
+      expect(btn.textContent).toBe("Download video models (about 18.0 GB, several minutes)");
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      expect(q("#gen-hint")!.textContent).toContain("unlocks when the video models are on the instance");
+      routes["GET /api/state"] = { body: apiState({ role: "admin", menu, video: at({ state: "downloading", bytes_done: 9_000_000_000, bytes_total: 18_000_000_000, percent: 50, reason: null }) }) };
+      btn.click();
+      await flush();
+      expect(posts("/api/video-models")).toHaveLength(1);
+      expect(posts("/api/video-models")[0]!.body).toEqual({});
+      expect(q("#video-models-text")!.textContent).toBe("Downloading the video models: 9.0 GB of 18.0 GB (50%). Images keep working meanwhile; Make video unlocks when it is done.");
+      expect(btn.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      routes["GET /api/state"] = { body: apiState({ role: "admin", menu, video }) };
+      await app!.refresh();
+      expect(q("#video-models")!.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+    });
+
+    it("an admin may give a model link: it is sent once with the download, shown with its notice, never stored", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, { "POST /api/video-models": { status: 202, body: { models: missing } } });
+      chooseTool("video");
+      expect(q("#video-models-link")!.hidden).toBe(false);
+      expect(q("#video-models-link-note")!.textContent).toContain("NOT integrity-pinned or licence-checked");
+      const input = q<HTMLInputElement>("#video-models-url")!;
+      expect(input.type).toBe("url");
+      expect(input.maxLength).toBe(2048);
+      expect(input.autocomplete).toBe("off");
+      input.value = "  https://huggingface.co/o/r/resolve/main/m.gguf  ";
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(posts("/api/video-models")[0]!.body).toEqual({ url: "https://huggingface.co/o/r/resolve/main/m.gguf" });
+      expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+    });
+
+    it("shows the server's refusal of a link as text", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 400, body: { error: { code: "model_link_host_not_allowed", message: "<b>links are only accepted from the allowed model hosts</b>" } } },
+      });
+      chooseTool("video");
+      q<HTMLInputElement>("#video-models-url")!.value = "https://evil.example/o/r/resolve/main/m.gguf";
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(q("#video-models-error")!.textContent).toBe("<b>links are only accepted from the allowed model hosts</b>");
+      expect(q("#video-models-error b")).toBeNull();
+    });
+
+    it("shows the server's refusal of the download, for example a disk that is too small", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 409, body: { error: { code: "disk_insufficient", message: "the instance disk is too small for the video models" } } },
+      });
+      chooseTool("video");
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(q("#video-models-error")!.hidden).toBe(false);
+      expect(q("#video-models-error")!.textContent).toBe("the instance disk is too small for the video models");
+    });
+
+    it("a member is told to ask an admin and gets no button; nothing is shown outside the Video tool", async () => {
+      await mount({ menu, video: at(missing) });
+      expect(q("#video-models")!.hidden).toBe(true);
+      chooseTool("video");
+      expect(q("#video-models-text")!.textContent).toBe("The video models are not installed on this instance. Ask an admin to download them.");
+      expect(q("#video-models-download")!.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      q<HTMLTextAreaElement>("#prompt")!.value = "x";
+      await submit();
+      expect(posts("/api/video")).toHaveLength(0);
+    });
+  });
+
+  it("continues an image result into video: Make a video switches the tool and attaches it as the start image", async () => {
+    await mount({ menu, video }, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": { body: { status: "done", images: [{ index: 0, url: "/api/image/g-1/0" }] } },
+      "GET /api/image/g-1/0": { body: null, raw: "RESULT", type: "image/png" },
+    });
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    await submit();
+    await flush();
+    const make = [...document.querySelectorAll<HTMLButtonElement>(".chain button")].find((b) => b.textContent === "Make a video")!;
+    make.click();
+    await flush();
+    expect(currentTool()).toBe("video");
+    expect(document.querySelectorAll("#ref-list li")).toHaveLength(1);
+    expect(q("#ref-list .ref-name")!.textContent).toBe("result-g-1-0.png");
+  });
+});
+
 describe("Advanced: negative prompt and guidance", () => {
   const guidance = { min: 1, max: 6, step: 0.5, default: 1 };
   const both = { negative_prompt: true, cfg: true };
@@ -2162,5 +2416,82 @@ describe("edit output size", () => {
     chooseTool("edit");
     expect(q("#edit-size-box img")).toBeNull();
     expect(sizeSel().options[1]!.textContent).toContain('<img src=x onerror="alert(1)">');
+  });
+});
+
+
+describe("start dialog: Include video models", () => {
+  const video = { sizes: [{ name: "L", width: 1280, height: 704 }], durations: [{ name: "About 3 s", seconds: 3 }], max_bytes: 1000, max_pixels: 1000, types: ["png"], download_bytes: 18_000_000_000, models: null };
+  const routesWithVideo: Record<string, Handler> = {
+    ...START_ROUTES,
+    "GET /api/gpus?video_models=true": { body: GPUS },
+    "GET /api/estimate?gpu=RTX%20A5000&video_models=true": est("RTX A5000", 0.27),
+  };
+
+  it("is offered only where the server offers video, unticked by default, and an unticked start is unchanged", async () => {
+    await mount({ role: "admin", state: "none" }, START_ROUTES);
+    await openStart();
+    expect(q("#start-video")!.closest("label")!.hidden).toBe(true);
+    app?.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const box = q<HTMLInputElement>("#start-video")!;
+    expect(box.closest("label")!.hidden).toBe(false);
+    expect(box.checked).toBe(false);
+    expect(box.closest("label")!.textContent).toContain("about 18.0 GB more");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).not.toHaveProperty("video_models");
+  });
+
+  it("the model link is enabled only when ticked, sent trimmed with the start, and never stored", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const link = q<HTMLInputElement>("#start-video-url")!;
+    expect(link.disabled).toBe(true);
+    expect(link.closest("div")!.textContent).toContain("NOT integrity-pinned or licence-checked");
+    const box = q<HTMLInputElement>("#start-video")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    await flush();
+    expect(link.disabled).toBe(false);
+    link.value = " https://huggingface.co/o/r/resolve/main/m.safetensors ";
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toMatchObject({ video_models: true, video_model_url: "https://huggingface.co/o/r/resolve/main/m.safetensors" });
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+  });
+
+  it("an empty link sends nothing; a link without the box is not sent", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    q<HTMLInputElement>("#start-video-url")!.value = "https://huggingface.co/o/r/resolve/main/m.safetensors";
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).not.toHaveProperty("video_model_url");
+  });
+
+  it("ticked: the lists and the estimate are for the larger disk, the start asks for the video models, and it is remembered", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const box = q<HTMLInputElement>("#start-video")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    await flush();
+    expect(calls.some((c) => c.path === "/api/gpus?video_models=true")).toBe(true);
+    expect(estimateCalls().at(-1)).toBe("/api/estimate?gpu=RTX%20A5000&video_models=true");
+    expect(q("#modal")!.textContent).toContain("$0.27/hour");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toMatchObject({ confirm: true, gpu: "RTX A5000", video_models: true });
+    expect(window.localStorage.getItem("vast-comfy.start-video")).toBe("1");
+    app?.stop();
+    calls = [];
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    expect(q<HTMLInputElement>("#start-video")!.checked).toBe(true);
+    expect(calls.some((c) => c.path === "/api/gpus?video_models=true")).toBe(true);
   });
 });

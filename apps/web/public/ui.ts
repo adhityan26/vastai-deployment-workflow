@@ -119,6 +119,17 @@ import {
   switchDefaults,
   usableDefaults,
   upscaleAsEdit,
+  VIDEO_WAIT_TEXT,
+  LINK_NOTICE,
+  MODEL_LINK_MAX_CHARS,
+  START_VIDEO_STORAGE_KEY,
+  videoDownloadLabel,
+  videoModelsNote,
+  durationLabel,
+  videoAsEdit,
+  videoHint,
+  videoLabel,
+  videoUrl,
   upscaleHint,
   upscaleLabel,
   type StyleInfo,
@@ -157,6 +168,8 @@ import { iconNode, uiIconNode } from "./icons.js";
 // never innerHTML. Decisions live in model.ts.
 
 const CONSOLE_REVOKE_MS = 1_000; // the browser needs a moment to start the download
+// The instance states in which jobs (and an on-demand video model download) can run.
+const GENERATE_READY = new Set(["ready", "idle-warning"]);
 
 export interface Env {
   fetch: typeof fetch;
@@ -210,6 +223,12 @@ interface HistoryEntry {
   images: string[];
   /** The server's index of each image in `images` (what Save sends). */
   indexes: number[];
+  /** A video job's files: our own /api/video paths (built from the id and index, never the server's text). */
+  videos: string[];
+  /** Per video: an object URL of the fetched file once it loaded (the <video> plays it), else null. */
+  videoSrc: (string | null)[];
+  /** Per video: why it could not be loaded ("" while loading or once loaded). */
+  videoErrors: string[];
   /** Per image: whether it was saved to the gallery. */
   saves: ("idle" | "saving" | "saved" | "failed")[];
   saveMessages: string[];
@@ -541,6 +560,22 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  // "Include video models" in the Start dialog: remembered per browser; only "1" means ticked.
+  function readStartVideo(): boolean {
+    try {
+      return doc.defaultView?.localStorage.getItem(START_VIDEO_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+  function writeStartVideo(on: boolean): void {
+    try {
+      doc.defaultView?.localStorage.setItem(START_VIDEO_STORAGE_KEY, on ? "1" : "0");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+
   function writeRemembered(name: string): void {
     try {
       doc.defaultView?.localStorage.setItem(GPU_STORAGE_KEY, name);
@@ -627,6 +662,35 @@ export function mountApp(doc: Document, env: Env): App {
         offerNote,
         offerList,
       );
+      // Only where the server offers video: the video model files at boot (a larger disk and a longer boot), else
+      // an image-only boot whose video files can still be downloaded later from the Video tool.
+      const offersVideo = state?.video != null;
+      let includeVideo = offersVideo && readStartVideo();
+      const videoRow = make("label", undefined, "check");
+      const videoBox = make("input");
+      videoBox.type = "checkbox";
+      videoBox.id = "start-video";
+      videoBox.checked = includeVideo;
+      const videoSize = state?.video?.download_bytes ?? 0;
+      videoRow.append(videoBox, make("span", ` Include video models (about ${(videoSize / 1e9).toFixed(1)} GB more to download, a larger disk; the boot takes longer)`));
+      videoRow.hidden = !offersVideo;
+      // An optional link that replaces the video diffusion model for this boot (only with the box ticked; never stored).
+      const linkRow = make("div", undefined, "start-field");
+      linkRow.hidden = !offersVideo;
+      const linkLabel = make("label", "Video model link (optional)");
+      linkLabel.htmlFor = "start-video-url";
+      const linkIn = make("input");
+      linkIn.id = "start-video-url";
+      linkIn.type = "url";
+      linkIn.maxLength = MODEL_LINK_MAX_CHARS;
+      linkIn.autocomplete = "off";
+      linkIn.spellcheck = false;
+      linkIn.placeholder = "huggingface.co/<owner>/<repo>/resolve/<revision>/<file>";
+      linkIn.disabled = !includeVideo;
+      linkRow.append(linkLabel, linkIn, make("p", LINK_NOTICE, "muted"));
+      /** The query of the estimate and the lists: the filters, plus the video choice when it is ticked. */
+      const startQuery = (offer: number | null): string =>
+        [filterQueryString(filters, offer), includeVideo ? "video_models=true" : ""].filter((p) => p !== "").join("&");
       const estBox = make("div", undefined, "estimate");
       estBox.setAttribute("aria-live", "polite");
       const errBox = make("div", undefined, "alert bad");
@@ -637,7 +701,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, advanced, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, linkRow, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -682,7 +746,7 @@ export function mountApp(doc: Document, env: Env): App {
         modalOk.disabled = true;
         if (select.value === "") return;
         try {
-          const est = parseEstimate(await call("GET", estimatePath(select.value, filterQueryString(filters, chosenOffer))));
+          const est = parseEstimate(await call("GET", estimatePath(select.value, startQuery(chosenOffer))));
           if (seq !== estimateSeq || token !== dialogToken) return;
           if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
           estimate = est;
@@ -720,7 +784,13 @@ export function mountApp(doc: Document, env: Env): App {
         clearMessages();
         render();
         try {
-          const res = await call("POST", API.start, { confirm: true, gpu: chosen, ...filterBodyMembers(filters, chosenOffer) });
+          const res = await call("POST", API.start, {
+            confirm: true,
+            gpu: chosen,
+            ...filterBodyMembers(filters, chosenOffer),
+            ...(includeVideo ? { video_models: true } : {}),
+            ...(includeVideo && linkIn.value.trim() !== "" ? { video_model_url: linkIn.value.trim() } : {}),
+          });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
           const started = parseEstimate(res !== null && typeof res === "object" ? (res as Record<string, unknown>)["estimate"] : null);
@@ -752,7 +822,7 @@ export function mountApp(doc: Document, env: Env): App {
       modalCancel.focus();
 
       const gpusPath = (): string => {
-        const q = filterQueryString(filters, null);
+        const q = startQuery(null);
         return q === "" ? API.gpus : `${API.gpus}?${q}`;
       };
 
@@ -824,6 +894,13 @@ export function mountApp(doc: Document, env: Env): App {
         if (await populateGpus(select.value === "" ? null : select.value)) await loadEstimate();
       };
       for (const control of [regionSel, sortSel, priceIn, speedIn]) control.addEventListener("change", () => void onFiltersChanged());
+      // The disk (and so the price and the offers) follow the video choice.
+      videoBox.addEventListener("change", () => {
+        includeVideo = videoBox.checked;
+        linkIn.disabled = !includeVideo;
+        writeStartVideo(includeVideo);
+        void onFiltersChanged();
+      });
 
       const loadOffers = async (): Promise<void> => {
         if (!takeFilters() || select.value === "") return;
@@ -831,7 +908,7 @@ export function mountApp(doc: Document, env: Env): App {
         offerNote.textContent = "Loading servers…";
         showOffers.disabled = true;
         try {
-          const query = [`gpu=${encodeURIComponent(select.value)}`, filterQueryString(filters, null)].filter((p) => p !== "").join("&");
+          const query = [`gpu=${encodeURIComponent(select.value)}`, startQuery(null)].filter((p) => p !== "").join("&");
           const list = parseOffers(await call("GET", `${API.offers}?${query}`));
           if (token !== dialogToken) return;
           if (list === null) throw new ApiError("The server list was not understood. Nothing was started.");
@@ -1177,6 +1254,51 @@ export function mountApp(doc: Document, env: Env): App {
   const refList = $("ref-list");
   const refError = $("ref-error");
   const resolutionSelect = $<HTMLSelectElement>("resolution");
+  const videoBox = $("video-box");
+  const videoSizeSelect = $<HTMLSelectElement>("video-size");
+  const videoDurationSelect = $<HTMLSelectElement>("video-duration");
+  const qualityBox = $("quality-box");
+  const videoModelsBox = $("video-models");
+  const videoModelsBtn = $<HTMLButtonElement>("video-models-download");
+  const videoModelsError = $("video-models-error");
+  let videoModelsAsking = false;
+
+  /** The Video panel's line about the instance's video model files, and the admin's download button. */
+  function renderVideoModels(s: ApiState, filming: boolean): void {
+    const note = s.video === null ? { text: "", download: false } : videoModelsNote(s.video, s.role === "admin");
+    $("video-models-text").textContent = note.text;
+    videoModelsBtn.hidden = !note.download;
+    $("video-models-link").hidden = !note.download;
+    $("video-models-link-note").textContent = LINK_NOTICE;
+    videoModelsBtn.textContent = s.video === null ? "" : videoDownloadLabel(s.video);
+    videoModelsBtn.disabled = videoModelsAsking || !GENERATE_READY.has(s.state);
+    videoModelsBox.hidden = !filming || (note.text === "" && videoModelsError.hidden);
+  }
+
+  videoModelsBtn.addEventListener("click", () => void downloadVideoModels());
+  async function downloadVideoModels(): Promise<void> {
+    if (videoModelsAsking || state?.role !== "admin") return;
+    videoModelsAsking = true;
+    videoModelsError.hidden = true;
+    if (state) renderForm(state);
+    // The link is sent once and never stored in the browser.
+    const url = $<HTMLInputElement>("video-models-url").value.trim();
+    try {
+      await call("POST", API.videoModels, url === "" ? {} : { url });
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+      videoModelsError.textContent = err instanceof Error ? err.message : "The download could not be started.";
+      videoModelsError.hidden = false;
+    } finally {
+      videoModelsAsking = false;
+    }
+    if (active) await refresh();
+  }
+  const sizeOption = (z: { name: string; width: number; height: number }): HTMLOptionElement => {
+    const o = make("option", sizeLabel(z));
+    o.value = z.name;
+    return o;
+  };
 
   function markPresets(): void {
     for (const b of Array.from(presetsBox.querySelectorAll("button"))) {
@@ -1191,7 +1313,7 @@ export function mountApp(doc: Document, env: Env): App {
     $("gen-title").textContent = entry?.title ?? "Generate";
     setText("tool-desc", entry?.description ?? "");
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
-    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale]);
+    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale, s.video]);
     if (key !== formKey) {
       formKey = key;
       if (!s.presets.some((p) => p.name === selectedPreset)) selectedPreset = s.presets[0]?.name ?? "";
@@ -1248,42 +1370,67 @@ export function mountApp(doc: Document, env: Env): App {
         }),
       );
       if (s.upscale?.scales.includes(keepScale)) scaleSelect.value = keepScale;
+      const keepVideoSize = videoSizeSelect.value;
+      videoSizeSelect.replaceChildren(...(s.video?.sizes ?? []).map(sizeOption));
+      if (s.video?.sizes.some((z) => z.name === keepVideoSize)) videoSizeSelect.value = keepVideoSize;
+      const keepDuration = videoDurationSelect.value;
+      videoDurationSelect.replaceChildren(
+        ...(s.video?.durations ?? []).map((d) => {
+          const o = make("option", durationLabel(d));
+          o.value = d.name;
+          return o;
+        }),
+      );
+      if (s.video?.durations.some((d) => d.name === keepDuration)) videoDurationSelect.value = keepDuration;
     }
-    // The picker follows the mode: edit takes several images, upscale exactly one.
+    // The picker follows the mode: edit takes several images, upscale exactly one, video one at most.
     const refRules = refLimits(s);
     if (refRules !== null) {
       refInput.accept = acceptTypes(refRules);
-      refInput.multiple = mode !== "upscale";
+      refInput.multiple = mode === "edit";
       const rule = mode === "edit" ? referenceRuleText(currentStyle(s)) : null;
-      $("ref-hint").textContent = mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : rule ?? (s.edit ? referenceHint(s.edit) : "");
+      $("ref-hint").textContent =
+        mode === "upscale" && s.upscale ? upscaleHint(s.upscale) : mode === "video" && s.video ? videoHint(s.video) : rule ?? (s.edit ? referenceHint(s.edit) : "");
     }
+    $("ref-label").textContent = mode === "video" ? "Start image (optional)" : "Reference images";
     renderStyles(s);
     // A style with its own prompt text takes the prompt as optional notes.
-    const notes = mode !== "upscale" && currentStyle(s)?.promptOptional === true;
+    const notes = (mode === "generate" || mode === "edit") && currentStyle(s)?.promptOptional === true;
     $("prompt-label").textContent = notes ? "Notes (optional)" : "Prompt";
     renderAdvanced(s);
     const editing = mode === "edit";
     const upscaling = mode === "upscale";
-    editBox.hidden = !editing && !upscaling;
-    resolutionBox.hidden = upscaling;
+    const filming = mode === "video";
+    editBox.hidden = !editing && !upscaling && !filming;
+    resolutionBox.hidden = upscaling || filming;
     editSizeBox.hidden = !editing || (s.edit?.sizes.length ?? 0) === 0;
     scaleBox.hidden = !upscaling;
+    videoBox.hidden = !filming;
     promptRow.hidden = upscaling;
     samplingBox.hidden = upscaling;
-    sizeBox.hidden = editing || upscaling;
+    // A video has its own size and length; only the seed of the sampling box applies.
+    qualityBox.hidden = filming;
+    renderVideoModels(s, filming);
+    sizeBox.hidden = editing || upscaling || filming;
     promptBox.placeholder = notes
       ? "Optional notes for this style"
       : editing
         ? "Describe the change, e.g. make the girl in <image1> wear the jacket from <image2>"
-        : "";
+        : filming
+          ? "Describe what happens, e.g. a red fox trots through fresh snow, the camera follows it slowly"
+          : "";
     const c = controls(s, busy, jobPending);
-    const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : c.canGenerate;
+    const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : filming ? c.canVideo : c.canGenerate;
     generateBtn.disabled = !allowed;
-    generateBtn.textContent = jobPending ? "Generating…" : upscaling ? "Upscale" : editing ? "Edit" : "Generate";
+    generateBtn.textContent = jobPending ? "Generating…" : upscaling ? "Upscale" : editing ? "Edit" : filming ? "Make video" : "Generate";
     $("gen-hint").textContent = jobPending
       ? "A job is running. You can submit another when it finishes."
       : allowed
-        ? ""
+        ? filming
+          ? VIDEO_WAIT_TEXT
+          : ""
+        : filming && s.video !== null && s.video.models?.state !== "ready" && GENERATE_READY.has(s.state)
+          ? "Make video unlocks when the video models are on the instance (see above)."
         : s.state === "none"
           ? "No instance is running. An admin needs to start one."
           : "Generating is available when the instance is ready.";
@@ -1298,7 +1445,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   /** The style of the selected entry, only if the server still lists it for the current mode. */
   function currentStyle(s: ApiState | null): StyleInfo | null {
-    if (mode === "upscale") return null;
+    if (mode === "upscale" || mode === "video") return null;
     const id = chosenStyle[mode];
     return id === null || s === null ? null : stylesForMode(s.styles, mode).find((st) => st.id === id) ?? null;
   }
@@ -1474,7 +1621,7 @@ export function mountApp(doc: Document, env: Env): App {
     const entry = chooseEntry(selectedId, menu.items);
     if (entry !== null) selectedId = entry.id;
     mode = entry?.tool ?? "generate";
-    if (mode !== "upscale") chosenStyle[mode] = entry?.style ?? null;
+    if (mode === "generate" || mode === "edit") chosenStyle[mode] = entry?.style ?? null;
     renderMenu(menu, entry);
     return entry;
   }
@@ -1806,6 +1953,7 @@ export function mountApp(doc: Document, env: Env): App {
   function refLimits(s: ApiState | null): EditInfo | null {
     if (s === null) return null;
     if (mode === "upscale") return s.upscale ? upscaleAsEdit(s.upscale) : null;
+    if (mode === "video") return s.video ? videoAsEdit(s.video) : null;
     return s.edit;
   }
 
@@ -1840,7 +1988,7 @@ export function mountApp(doc: Document, env: Env): App {
         remove.type = "button";
         remove.setAttribute("aria-label", `Remove reference ${i + 1}: ${r.file.name}`);
         remove.addEventListener("click", () => removeReference(r.id));
-        item.append(make("p", referenceTag(style, i), "ref-tag"), make("p", r.file.name, "ref-name"), remove);
+        item.append(make("p", mode === "video" ? "Start image" : referenceTag(style, i), "ref-tag"), make("p", r.file.name, "ref-name"), remove);
         return item;
       }),
       ...empty,
@@ -1904,7 +2052,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   $("gen-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    void (mode === "upscale" ? submitUpscale() : mode === "edit" ? submitEdit() : submitGenerate());
+    void (mode === "upscale" ? submitUpscale() : mode === "video" ? submitVideo() : mode === "edit" ? submitEdit() : submitGenerate());
   });
 
   async function submitGenerate(): Promise<void> {
@@ -1998,11 +2146,41 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  async function submitVideo(): Promise<void> {
+    formError.hidden = true;
+    if (!controls(state, busy, jobPending).canVideo) return;
+    const prompt = promptBox.value;
+    if (prompt.trim() === "") return formFail("Describe the video first.");
+    if (references.length > 1) return formFail("Attach at most one start image for a video.");
+    const seed = parseSeed($<HTMLInputElement>("seed").value);
+    if (!seed.ok) return formFail(seed.message);
+    const size = videoSizeSelect.value;
+    const duration = videoDurationSelect.value;
+    if (size === "" || duration === "") return formFail("Choose a size and a length.");
+    const file = references[0]?.file ?? null;
+    jobPending = true; // also blocks a second submit while the image is being read and sent
+    if (state) renderForm(state);
+    try {
+      const body: Record<string, unknown> = { prompt, size, duration };
+      if (seed.value !== undefined) body["seed"] = seed.value;
+      if (file !== null) body["image"] = await readBase64(file);
+      const res = await call("POST", API.video, body);
+      const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
+      if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
+      const entry = addEntry(id, "video", prompt, videoLabel(size, duration, file !== null));
+      void pollJob(entry, 0);
+    } catch (err) {
+      jobPending = false;
+      formFail(err instanceof Error ? err.message : "Could not start the job.");
+      if (state) renderForm(state);
+    }
+  }
+
   // ---- results ----
 
   const historyBox = $("history");
   function addEntry(id: string, kind: JobKind, prompt: string, label: string): HistoryEntry {
-    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, submittedAt: env.now(), progress: null, previewSeq: 0, previewUrl: null, status: "pending", message: "", images: [], indexes: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
+    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, submittedAt: env.now(), progress: null, previewSeq: 0, previewUrl: null, status: "pending", message: "", images: [], indexes: [], videos: [], videoSrc: [], videoErrors: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
     history.unshift(entry);
     historyBox.prepend(entry.node);
     $("hist-empty").hidden = true;
@@ -2029,8 +2207,8 @@ export function mountApp(doc: Document, env: Env): App {
   async function chainResult(src: string, name: string, entryId: string): Promise<void> {
     const target = offeredEntries().find((i) => i.id === entryId);
     if (target === undefined) return;
-    // One image for an upscale, so a result replaces whatever was attached; edit adds to the list.
-    if (target.tool === "upscale") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
+    // One image for an upscale or a video, so a result replaces whatever was attached; edit adds to the list.
+    if (target.tool === "upscale" || target.tool === "video") { while (references.length > 0) releaseUrl(references.pop()!.url); renderReferences(); }
     selectEntry(entryId, false);
     const rules = refLimits(state);
     if (rules === null) return;
@@ -2069,6 +2247,7 @@ export function mountApp(doc: Document, env: Env): App {
         kids.push(bar, make("p", stepText(e.progress), "muted job-step"));
       }
       kids.push(make("p", elapsedText(env.now() - e.submittedAt), "muted job-elapsed"));
+      if (e.kind === "video") kids.push(make("p", VIDEO_WAIT_TEXT, "muted job-wait"));
       if (e.previewUrl !== null) {
         const fig = make("figure", undefined, "live-preview");
         const img = make("img");
@@ -2083,6 +2262,11 @@ export function mountApp(doc: Document, env: Env): App {
     } else {
       const took = durationText(e.kind, e.seconds);
       if (took !== null) kids.push(make("p", took, "muted job-time"));
+      if (e.kind === "video") {
+        kids.push(videoResults(e));
+        e.node.replaceChildren(...kids);
+        return;
+      }
       const grid = make("div", undefined, "grid");
       e.images.forEach((src, i) => {
         const fig = make("figure");
@@ -2117,6 +2301,71 @@ export function mountApp(doc: Document, env: Env): App {
   }
 
   /**
+   * A video job's results: each file is fetched once (so it plays from a blob URL without range requests, also on
+   * phones) and shown in a <video controls playsinline> with a Download link. Videos are not saved to the gallery.
+   */
+  function videoResults(e: HistoryEntry): HTMLElement {
+    const grid = make("div", undefined, "grid");
+    e.videos.forEach((_path, i) => {
+      const fig = make("figure");
+      const src = e.videoSrc[i] ?? null;
+      const problem = e.videoErrors[i] ?? "";
+      if (src !== null) {
+        const player = make("video");
+        player.controls = true;
+        player.playsInline = true;
+        player.setAttribute("playsinline", "");
+        player.preload = "metadata";
+        player.src = src;
+        player.setAttribute("aria-label", `Video ${i + 1} for: ${e.prompt}`);
+        const dl = make("a", "Download", "dl");
+        dl.href = src;
+        dl.setAttribute("download", `video-${e.id}-${i}.mp4`);
+        fig.append(player, dl);
+      } else if (problem !== "") {
+        const note = make("p", `The video could not be loaded: ${problem}`, "alert bad");
+        note.setAttribute("role", "alert");
+        fig.append(note);
+      } else {
+        const wait = make("p", "Loading the video…", "muted");
+        wait.setAttribute("role", "status");
+        fig.append(wait);
+      }
+      fig.append(make("p", "Videos are not saved to the gallery: use Download to keep one.", "muted"));
+      grid.append(fig);
+    });
+    return grid;
+  }
+
+  /** Fetch each video of a finished video job once and keep it as an object URL (only a video type is accepted). */
+  async function loadVideos(e: HistoryEntry): Promise<void> {
+    for (let i = 0; i < e.videos.length; i++) {
+      try {
+        const res = await env.fetch(e.videos[i]!, { credentials: "same-origin" });
+        if (!res.ok) {
+          let json: unknown = null;
+          try {
+            json = await res.json();
+          } catch {
+            json = null;
+          }
+          throw new ApiError(errorText(res.status, json));
+        }
+        const blob = await res.blob();
+        if (blob.type !== "video/mp4" && blob.type !== "video/webm") throw new ApiError("the server did not send a video.");
+        const url = previewUrl(blob);
+        if (url === null) throw new ApiError("this browser cannot show it.");
+        e.videoSrc[i] = url;
+        e.videoErrors[i] = "";
+      } catch (err) {
+        e.videoSrc[i] = null;
+        e.videoErrors[i] = err instanceof Error ? err.message : "it could not be fetched.";
+      }
+      renderEntry(e);
+    }
+  }
+
+  /**
    * The per-result buttons (Save, Use as reference, Upscale) depend on what the server offers now, not when
    * the job finished: when that changes, the finished entries are drawn again from the current state.
    */
@@ -2142,7 +2391,8 @@ export function mountApp(doc: Document, env: Env): App {
     jobPending = false;
     renderEntry(e);
     if (state) renderForm(state);
-    if (status === "done" && state?.gallery === true && autosaveBox.checked) void autoSave(e);
+    if (status === "done" && e.kind === "video") void loadVideos(e);
+    else if (status === "done" && state?.gallery === true && autosaveBox.checked) void autoSave(e);
   }
 
   // ---- save to the gallery ----
@@ -2328,11 +2578,14 @@ export function mountApp(doc: Document, env: Env): App {
       if (r["status"] === "done" && Array.isArray(r["images"])) {
         e.images = [];
         e.indexes = [];
-        for (const img of r["images"] as unknown[]) {
+        e.videos = [];
+        // A video job lists its files under `videos`; the paths are rebuilt from the id and index here.
+        const files = e.kind === "video" ? (Array.isArray(r["videos"]) ? (r["videos"] as unknown[]) : []) : (r["images"] as unknown[]);
+        for (const img of files) {
           const idx = typeof img === "object" && img !== null ? (img as Record<string, unknown>)["index"] : undefined;
-          const url = imageUrl(e.id, idx);
+          const url = e.kind === "video" ? videoUrl(e.id, idx) : imageUrl(e.id, idx);
           if (url === null) continue;
-          e.images.push(url);
+          (e.kind === "video" ? e.videos : e.images).push(url);
           e.indexes.push(idx as number);
         }
         e.seconds = parseSeconds(r["seconds"]);

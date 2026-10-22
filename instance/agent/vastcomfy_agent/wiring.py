@@ -15,6 +15,9 @@ from .deadlines import DeadlineStore
 from .destroy_flow import DestroyFlow
 from .destroyer import Destroyer
 from .idle import IdleWatcher
+from .model_link import guarded_client
+from .profile import Downloader, free_bytes_of, load_profile
+from .video_models import VideoModels
 from .runner import Runner
 from .state import StateStore
 from .status import StatusBuilder
@@ -71,8 +74,34 @@ def build(
     )
     flow = DestroyFlow(states, destroyer, make_stop_comfy(cfg, run))
     idle = IdleWatcher(states, deadlines, now, cfg.idle_minutes, cfg.idle_warn_minutes)
+    video = VideoModels(
+        load_profile=lambda: load_profile(Path(cfg.repo_dir) / "instance" / "profiles" / f"{cfg.profile}.yaml"),
+        comfy=comfy,
+        comfy_dir=Path(cfg.comfy_dir),
+        free_bytes_fn=free_bytes_of,
+        disk_margin_mb=cfg.disk_margin_mb,
+        include_at_boot=cfg.include_video_models,
+        # The boot's own downloader settings; its own HTTP client, as it runs beside the agent's requests.
+        make_downloader=lambda on_progress: Downloader(
+            hf_base=cfg.hf_base_url, token=cfg.hf_token, client=httpx.Client(timeout=cfg.http_timeout_s),
+            retries=cfg.download_retries, backoff_s=cfg.download_backoff_s, chunk_bytes=cfg.download_chunk_bytes,
+            on_progress=on_progress, connections=cfg.download_connections,
+        ),
+        states=states,
+        state_dir=state_dir,
+        link_hosts=cfg.video_model_link_hosts,
+        link_max_bytes=cfg.video_model_link_max_bytes,
+        make_link_client=lambda: guarded_client(
+            cfg.video_model_link_hosts, cfg.video_model_link_redirect_domains, cfg.http_timeout_s,
+        ),
+        make_link_downloader=lambda client, link, on_progress: Downloader(
+            hf_base=f"https://{link.host}", token="", client=client, retries=cfg.download_retries,  # config-lint: ok (checked link host)
+            backoff_s=cfg.download_backoff_s, chunk_bytes=cfg.download_chunk_bytes, on_progress=on_progress,
+            connections=cfg.download_connections,
+        ),
+    )
     runner = Runner(states=states, idle=idle, comfy=comfy, flow=flow, state_dir=state_dir, now=now,
-                    destroy_failed_retry_s=cfg.destroy_failed_retry_s)
+                    destroy_failed_retry_s=cfg.destroy_failed_retry_s, busy=video.busy)
     status = StatusBuilder(
         state_dir=state_dir,
         states=states,
@@ -82,7 +111,8 @@ def build(
         profile=cfg.profile,
         commit=cfg.repo_commit,
         now=now,
+        video=video.view,
     )
     workflows = WorkflowStore(Path(cfg.workflows_dir), cfg.workflow_max_bytes)
-    deps = Deps(cfg=cfg, states=states, deadlines=deadlines, status=status, flow=flow, workflows=workflows)
+    deps = Deps(cfg=cfg, states=states, deadlines=deadlines, status=status, flow=flow, workflows=workflows, video=video)
     return Wired(cfg, states, deadlines, comfy, destroyer, flow, idle, runner, status, workflows, deps)

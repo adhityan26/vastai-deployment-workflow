@@ -6,6 +6,7 @@ import { buildUpscalePrompt } from "./upscale.js";
 import { resolveTuning, type Tuning } from "./guidance.js";
 import { checkStyleReferences, resolveStyle, stylePrompt } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
+import { VIDEO_OUTPUT_CLASS, buildVideoPrompt } from "./video.js";
 
 export class GenerateTimeout extends Error {
   constructor(message = "generation timed out") {
@@ -265,6 +266,63 @@ export async function upscale(deps: UpscaleDeps, input: UpscaleRequest): Promise
   return { promptId, width: image!.width, height: image!.height };
 }
 
+export interface VideoDeps {
+  comfy: Pick<ComfyClient, "submit" | "uploadImage">;
+  profile: Profile;
+  /** The video workflow template JSON from the profile (never from the request). */
+  template: unknown;
+  cfg: AppsConfig;
+  /** Uniform random in [0, 1); injectable for deterministic tests. */
+  random?: () => number;
+  newName?: () => string;
+  /** The progress socket's client id; ComfyUI then sends this job's progress and previews there. */
+  clientId?: string;
+  /** The instance's linked diffusion model (its plain file name) when it uses one instead of the pinned model. */
+  diffusionFile?: string;
+}
+
+export interface VideoRequest {
+  prompt: unknown;
+  /** A size name from the profile's video section. */
+  size: unknown;
+  /** A duration name from the profile's video section. */
+  duration: unknown;
+  seed?: unknown;
+  /** Optional base64 start image (image to video); absent or null is text to video. */
+  image?: unknown;
+}
+
+/**
+ * Validate a video request completely (prompt, seed, size, duration and the optional start image, which is
+ * checked like an edit reference), then upload the start image under a name chosen here and submit the filled
+ * workflow. Nothing leaves for the instance before every check has passed.
+ */
+export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ promptId: string; startImage: boolean }> {
+  const spec = deps.profile.video;
+  if (spec === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
+  const seed = checkPromptAndSeed(deps.cfg, deps.random, { prompt: input.prompt, seed: input.seed });
+  if (typeof input.size !== "string") throw new GenerateInputError("unknown_size", "size is not offered for video");
+  if (typeof input.duration !== "string") throw new GenerateInputError("unknown_duration", "duration is not offered for video");
+  const fields = {
+    prompt: input.prompt as string,
+    seed,
+    size: input.size,
+    duration: input.duration,
+    ...(deps.diffusionFile === undefined ? {} : { diffusionFile: deps.diffusionFile }),
+  };
+  const wanted = input.image !== undefined && input.image !== null;
+  // Exactly one start image, decoded and checked like a reference (anything but a base64 string is refused).
+  const [image] = wanted ? decodeReferences([input.image], referenceLimits(deps.cfg)) : [];
+  // Dry run with a placeholder name: size, duration and workflow mismatches surface before the upload.
+  buildVideoPrompt(spec, deps.template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
+  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, deps.template, fields), deps.clientId)).promptId, startImage: false };
+  const kind = FILE_TYPES[image.type];
+  const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
+  const stored = await deps.comfy.uploadImage(`video-${token()}.${kind.ext}`, image.bytes, kind.contentType);
+  const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, deps.template, { ...fields, startImage: stored.name }), deps.clientId);
+  return { promptId, startImage: true };
+}
+
 function clipMessage(text: string): string {
   return text.length > MESSAGE_MAX ? `${text.slice(0, MESSAGE_MAX)}...` : text;
 }
@@ -314,18 +372,22 @@ export function executionSeconds(status: Record<string, unknown> | undefined): n
   return ms < 0 || ms > MAX_EXECUTION_MS ? null : tenthsOfSeconds(ms);
 }
 
+/** The nodes whose history outputs are the job's result: SaveImage, and SaveVideo for the video workflow. */
+const OUTPUT_CLASSES = new Set(["SaveImage", VIDEO_OUTPUT_CLASS]);
+
 function saveImageNodes(template: unknown): Set<string> {
   const ids = new Set<string>();
   if (typeof template === "object" && template !== null) {
     for (const [id, node] of Object.entries(template as Record<string, unknown>)) {
-      if ((node as { class_type?: unknown } | null)?.class_type === "SaveImage") ids.add(id);
+      if (OUTPUT_CLASSES.has((node as { class_type?: unknown } | null)?.class_type as string)) ids.add(id);
     }
   }
   return ids;
 }
 
 /**
- * One history read: the images once the prompt has finished, or null while it has not.
+ * One history read: the images once the prompt has finished, or null while it has not. A SaveVideo node lists
+ * its file under `images` as well (ComfyUI's video preview output, with `animated`); UNVERIFIED on a real run.
  * Throws GenerateFailed when ComfyUI reports an error or produced no images; Unreachable and
  * ComfyError propagate. Never sleeps, so a web request can poll without blocking.
  */

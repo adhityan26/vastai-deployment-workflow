@@ -38,6 +38,20 @@ export interface AgentStatus {
   commit: string;
   failsafe_alive: boolean;
   destroy: { pending: boolean; attempts: number; last_error?: string | null };
+  /** The video model files on the instance; absent from an agent without video support. */
+  video_models?: VideoModelsStatus | null;
+}
+
+export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
+export interface VideoModelsStatus {
+  state: VideoModelsState;
+  /** This boot downloads them itself (INCLUDE_VIDEO_MODELS). */
+  boot: boolean;
+  bytes_done: number;
+  bytes_total: number;
+  reason?: string | null;
+  /** The diffusion model in use: the pinned one, or a linked one (not integrity-pinned) with the sha256 that arrived. */
+  model?: { file: string; linked: boolean; sha256?: string | null } | null;
 }
 
 export class AgentClient {
@@ -109,6 +123,17 @@ export class AgentClient {
     if (reply.status < 200 || reply.status >= 300) this.fail("extend", reply);
     const body = parseJson(reply.body);
     return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  }
+
+  /** Ask the agent to download the missing video model files in the background (POST /video-models). */
+  async startVideoModels(url?: string): Promise<VideoModelsStatus> {
+    const reply = await this.call("POST", "/video-models", url === undefined ? {} : { url });
+    if (reply.status < 200 || reply.status >= 300) this.fail("video models", reply);
+    const body = parseJson(reply.body) as VideoModelsStatus | null;
+    if (body === null || typeof body !== "object" || typeof body.state !== "string") {
+      throw new AgentError(reply.status, "video models: response is not a status");
+    }
+    return body;
   }
 
   async destroy(reason: "manual" | "watchdog"): Promise<void> {

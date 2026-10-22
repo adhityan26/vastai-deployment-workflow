@@ -95,8 +95,8 @@ export class LiveProgress implements ProgressSink {
   }
 }
 
-/** Which workflow a job ran: its SaveImage node is looked up in that template when polling. */
-export type JobKind = "generate" | "edit" | "upscale";
+/** Which workflow a job ran: its SaveImage (or SaveVideo) node is looked up in that template when polling. */
+export type JobKind = "generate" | "edit" | "upscale" | "video";
 
 export interface Job {
   readonly id: string;

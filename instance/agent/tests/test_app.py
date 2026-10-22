@@ -176,3 +176,70 @@ def test_extend_is_allowed_when_the_failsafe_record_is_not_pending(env, tmp_path
 def test_openapi_declares_the_409(env):
     client, _, _ = env
     assert "409" in client.get("/openapi.json").json()["paths"]["/extend"]["post"]["responses"]
+
+
+# --- POST /video-models ---
+
+class FakeVideo:
+    def __init__(self, refuse=None):
+        from vastcomfy_agent.models import VideoModelsStatus
+
+        self.refuse, self.calls = refuse, 0
+        self.status = VideoModelsStatus(state="downloading", boot=False, bytes_done=0, bytes_total=50)
+
+    def start(self, url=None):
+        self.calls += 1
+        self.url = url
+        if self.refuse is not None:
+            raise self.refuse
+        return self.status
+
+    def view(self):
+        return self.status
+
+
+def test_video_models_starts_the_download_and_reports_it(env):
+    client, deps, _ = env
+    assert client.post("/video-models").status_code == 401
+    assert client.post("/video-models", headers=AUTH).json()["detail"]["code"] == "video_unavailable"
+    deps.video = FakeVideo()
+    res = client.post("/video-models", headers=AUTH)
+    assert res.status_code == 202
+    assert res.json() == {"state": "downloading", "boot": False, "bytes_done": 0, "bytes_total": 50, "reason": None, "model": None}
+
+
+def test_video_models_refusals_keep_their_status_and_code(env):
+    from vastcomfy_agent.video_models import VideoModelsRefused
+
+    client, deps, _ = env
+    deps.video = FakeVideo(VideoModelsRefused(409, "disk_insufficient", "too small"))
+    res = client.post("/video-models", headers=AUTH)
+    assert res.status_code == 409 and res.json()["detail"] == {"code": "disk_insufficient", "message": "too small"}
+
+
+def test_status_carries_the_video_models_and_survives_their_errors(tmp_path, make_cfg):
+    from vastcomfy_agent.models import VideoModelsStatus
+
+    clock = Clock()
+    states = StateStore(tmp_path / "s", clock)
+    deadlines = DeadlineStore(tmp_path / "s", clock)
+    ok = VideoModelsStatus(state="ready", boot=True, bytes_done=5, bytes_total=5)
+    builder = StatusBuilder(state_dir=tmp_path / "s", states=states, deadlines=deadlines, comfy=FakeComfy(),
+                            gpu_reader=lambda: None, profile="image", commit="c", now=clock, video=lambda: ok)
+    assert builder.build().video_models == ok
+
+    def boom():
+        raise OSError("disk")
+
+    builder._video = boom
+    assert builder.build().video_models is None
+
+
+def test_video_models_passes_a_link_and_refuses_other_body_members(env):
+    client, deps, _ = env
+    deps.video = FakeVideo()
+    assert client.post("/video-models", headers=AUTH, json={"url": "https://huggingface.co/o/r/resolve/main/m.safetensors"}).status_code == 202
+    assert deps.video.url == "https://huggingface.co/o/r/resolve/main/m.safetensors"
+    assert client.post("/video-models", headers=AUTH, json={}).status_code == 202 and deps.video.url is None
+    assert client.post("/video-models", headers=AUTH, json={"url": 5}).status_code == 422
+    assert client.post("/video-models", headers=AUTH, json={"path": "/etc/passwd"}).status_code == 422

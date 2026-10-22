@@ -78,7 +78,7 @@
       </div>
 
       <div id="edit-box" hidden>
-        <label for="ref-input">Reference images</label>
+        <label id="ref-label" for="ref-input">Reference images</label>
         <p id="ref-hint" class="muted"></p>
         <input id="ref-input" name="references" type="file" multiple>
         <p id="ref-error" class="alert bad" role="alert" hidden></p>
@@ -95,6 +95,23 @@
         <div id="scale-box" hidden>
           <label for="scale">Scale</label>
           <select id="scale" name="scale"></select>
+        </div>
+      </div>
+
+      <div id="video-box" hidden>
+        <label for="video-size">Size</label>
+        <select id="video-size" name="video_size"></select>
+        <label for="video-duration">Length</label>
+        <select id="video-duration" name="duration"></select>
+        <div id="video-models" class="video-models" hidden>
+          <p id="video-models-text" role="status"></p>
+          <div id="video-models-link" hidden>
+            <label for="video-models-url">Model link (optional)</label>
+            <input id="video-models-url" name="video_model_url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="huggingface.co/&lt;owner&gt;/&lt;repo&gt;/resolve/&lt;revision&gt;/&lt;file&gt;" aria-describedby="video-models-link-note">
+            <p id="video-models-link-note" class="muted"></p>
+          </div>
+          <button id="video-models-download" type="button" hidden>Download video models</button>
+          <p id="video-models-error" class="alert bad" role="alert" hidden></p>
         </div>
       </div>
 
@@ -119,7 +136,7 @@
       </details>
 
       <div id="sampling-box">
-      <fieldset>
+      <fieldset id="quality-box">
         <legend>Quality</legend>
         <div id="presets" class="seg"></div>
       </fieldset>

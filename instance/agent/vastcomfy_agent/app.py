@@ -8,10 +8,11 @@ from .config import Config
 from .deadlines import DeadlineStore, ExtendError
 from .destroy_flow import DestroyFlow
 from .files import read_json
-from .models import DestroyRequest, ExtendRequest, ExtendResponse, Status
+from .models import DestroyRequest, ExtendRequest, ExtendResponse, Status, VideoModelsRequest, VideoModelsStatus
 from .paths import StatePaths
 from .state import InvalidTransition, State, StateStore
 from .status import StatusBuilder
+from .video_models import VideoModels, VideoModelsRefused
 from .workflows import WorkflowError, WorkflowStore
 
 
@@ -23,6 +24,7 @@ class Deps:
     status: StatusBuilder
     flow: DestroyFlow
     workflows: WorkflowStore
+    video: VideoModels | None = None
 
 
 # A destroy is underway or has failed: moving a deadline now could stop the failsafe from retrying.
@@ -79,6 +81,29 @@ def create_app(deps: Deps) -> FastAPI:
             pass
         tasks.add_task(deps.flow.run, body.reason)
         return {"accepted": True}
+
+    @app.post(
+        "/video-models", status_code=202, response_model=VideoModelsStatus, dependencies=guarded,
+        responses={
+            404: {"description": "No enabled video section (code video_unavailable)"},
+            400: {"description": "A refused model link (codes invalid_model_link, model_link_host_not_allowed, "
+                                 "model_link_unsupported_type, model_link_name_clash)"},
+            409: {"description": "Not now: the instance is not ready, ComfyUI lacks the video node classes, the disk "
+                                 "is too small, or the link's host refused (codes not_ready, video_nodes_missing, "
+                                 "disk_insufficient, model_link_too_large, model_link_unreachable, "
+                                 "model_link_redirect_not_allowed)"},
+            503: {"description": "ComfyUI could not be asked (code comfy_unavailable)"},
+        },
+    )
+    def start_video_models(body: VideoModelsRequest | None = None) -> VideoModelsStatus:
+        """Download the missing video model files in the background (single-flight); the progress is in /status.
+        `url`: a Hugging Face .safetensors link that replaces the diffusion model (NOT integrity-pinned)."""
+        if deps.video is None:
+            raise HTTPException(status_code=404, detail={"code": "video_unavailable", "message": "video is not set up"})
+        try:
+            return deps.video.start(body.url if body is not None else None)
+        except VideoModelsRefused as err:
+            raise HTTPException(status_code=err.status, detail={"code": err.code, "message": err.message}) from None
 
     @app.get("/workflows", dependencies=guarded)
     def list_workflows() -> list[dict]:

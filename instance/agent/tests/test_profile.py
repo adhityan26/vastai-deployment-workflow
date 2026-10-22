@@ -6,7 +6,8 @@ import pytest
 from vastcomfy_agent.files import read_json
 from vastcomfy_agent.profile import (
     Downloader, DiskInsufficient, DownloadError, ModelSpec, NodeInstallError, NodeSpec, Profile,
-    ProfileError, ProgressWriter, check_disk, install_nodes, load_profile, missing_models, target_path,
+    ProfileError, ProgressWriter, boot_models, boot_node_classes, check_disk, install_nodes, load_profile,
+    missing_models, target_path, video_model_specs,
 )
 
 PROFILE_YAML = """
@@ -403,7 +404,7 @@ def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     profile = load_profile(instance / "profiles" / "image.yaml")
     # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
     assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
-    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json")
+    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json", "video-ti2v.json")
 
 
 def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_another_model(tmp_path):
@@ -543,3 +544,131 @@ def test_the_shipped_profile_has_one_preset_mechanism_and_its_samples_download_n
     for name, node in (("qwen-image-t2i.json", "8"), ("qwen-image-edit.json", "7")):
         graph = json.loads((root / "workflows" / name).read_text())
         assert graph[node]["inputs"]["cfg"] == raw["guidance"]["default"]
+
+
+# --- video section (the web app fills the workflow; the agent checks what decides downloads and the boot check) ---
+
+def _video_raw():
+    shipped, raw = _shipped_raw()
+    return raw
+
+
+VIDEO_PINS = [
+    {"file": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "repo": "org/video", "revision": "a" * 40,
+     "dest": "models/diffusion_models/", "size_bytes": 10},
+    {"file": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "repo": "org/video", "revision": "a" * 40,
+     "dest": "models/text_encoders/", "size_bytes": 10},
+    {"file": "split_files/vae/wan2.2_vae.safetensors", "repo": "org/video", "revision": "a" * 40,
+     "dest": "models/vae/", "size_bytes": 10},
+]
+
+
+def _write_raw(tmp_path, raw):
+    import yaml
+
+    path = tmp_path / "image.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
+
+
+def test_the_shipped_video_section_is_off_and_adds_no_boot_requirement():
+    """Off until the owner pins the model files: nothing is downloaded for it and boot checks no video node."""
+    import json
+    from pathlib import Path
+
+    instance = Path(__file__).resolve().parents[2]
+    raw = _video_raw()
+    video = raw["video"]
+    assert video["enabled"] is False
+    assert video["workflow"] in raw["workflows"] and (instance / "workflows" / video["workflow"]).is_file()
+    profile = load_profile(instance / "profiles" / "image.yaml")
+    assert profile.video_enabled is False
+    assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
+    # Every node class of the shipped graph is one boot will require once video is on (native nodes only).
+    graph = json.loads((instance / "workflows" / video["workflow"]).read_text())
+    assert {n["class_type"] for n in graph.values()} | {"LoadImage"} == set(video["node_classes"])
+    # The graph names exactly the model files the section lists.
+    used = {v for n in graph.values() for v in n["inputs"].values() if isinstance(v, str)}
+    assert {m["file"] for m in video["models"]} <= used
+
+
+def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only_when_asked(tmp_path):
+    raw = _video_raw()
+    raw["models"] += VIDEO_PINS
+    raw["video"]["enabled"] = True
+    profile = load_profile(_write_raw(tmp_path, raw))
+    assert profile.video_enabled is True
+    assert profile.video_models == tuple(m["file"] for m in raw["video"]["models"])
+    assert profile.video_node_classes == tuple(raw["video"]["node_classes"])
+    image_classes = ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
+    # An image-only boot is exactly as before: no video file, no video node class.
+    assert profile.provides_node_classes == image_classes
+    assert boot_node_classes(profile, False) == image_classes
+    image_only = boot_models(profile, False)
+    assert [m.file for m in image_only] == [m.file for m in profile.models[:-3]]
+    assert [m.file for m in video_model_specs(profile)] == [p["file"] for p in VIDEO_PINS]
+    # A boot that includes video downloads every file and also requires the video classes, once each.
+    assert boot_models(profile, True) == profile.models
+    with_video = boot_node_classes(profile, True)
+    assert with_video[:3] == image_classes and set(with_video[3:]) == set(raw["video"]["node_classes"])
+    assert "SaveVideo" in with_video and len(set(with_video)) == len(with_video)
+
+
+def test_video_off_means_nothing_is_skipped_or_added(tmp_path):
+    raw = _video_raw()
+    raw["models"] += VIDEO_PINS  # pinned, but the section is off: they are ordinary models
+    profile = load_profile(_write_raw(tmp_path, raw))
+    assert profile.video_models == () and video_model_specs(profile) == ()
+    assert boot_models(profile, False) == profile.models
+    assert boot_node_classes(profile, True) == profile.provides_node_classes
+
+
+def test_missing_models_and_the_disk_check_can_be_limited_to_some_models(tmp_path):
+    profile = load_profile(write_profile(tmp_path))
+    comfy = tmp_path / "comfy"
+    only = (profile.models[1],)
+    assert missing_models(profile, comfy, only) == [profile.models[1]]
+    check_disk(profile, comfy, 50 + 1024 * 1024, 1, only)  # 50 bytes plus the margin fits
+    with pytest.raises(DiskInsufficient):
+        check_disk(profile, comfy, 50 + 1024 * 1024, 1)  # all models: 150 bytes do not
+
+
+def test_enabled_video_without_its_pinned_models_fails_loudly(tmp_path):
+    raw = _video_raw()
+    raw["video"]["enabled"] = True
+    with pytest.raises(ProfileError, match="video model wan2.2_ti2v_5B_fp16.safetensors is not listed in models"):
+        load_profile(_write_raw(tmp_path, raw))
+
+
+def test_enabled_video_with_a_model_in_the_wrong_folder_fails(tmp_path):
+    raw = _video_raw()
+    pins = [dict(p) for p in VIDEO_PINS]
+    pins[2]["dest"] = "models/loras/"
+    raw["models"] += pins
+    raw["video"]["enabled"] = True
+    with pytest.raises(ProfileError, match="wan2.2_vae.safetensors must have dest models/vae/"):
+        load_profile(_write_raw(tmp_path, raw))
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda v, r: v.update(enabled="yes"), "video enabled must be true or false"),
+    (lambda v, r: v.update(workflow="../x.json"), "video workflow"),
+    (lambda v, r: r.update(workflows=[w for w in r["workflows"] if w != v["workflow"]]), "video workflow .* is not listed in workflows"),
+    (lambda v, r: v.update(models="x"), "video models must be a non-empty list"),
+    (lambda v, r: v.update(models=[]), "video models must be a non-empty list"),
+    (lambda v, r: v.update(models=[{"file": "../x.safetensors", "dest": "models/vae/"}]), "video model file"),
+    (lambda v, r: v.update(models=[{"file": "x.safetensors", "dest": "/abs/"}]), "video model dest"),
+    (lambda v, r: v.update(node_classes=["a/b"]), "invalid node class name"),
+    (lambda v, r: v.update(node_classes="SaveVideo"), "video node_classes must be a list"),
+])
+def test_a_malformed_video_section_fails_the_profile_even_while_off(tmp_path, change, message):
+    raw = _video_raw()
+    change(raw["video"], raw)
+    with pytest.raises(ProfileError, match=message):
+        load_profile(_write_raw(tmp_path, raw))
+
+
+def test_a_profile_without_a_video_section_still_loads(tmp_path):
+    raw = _video_raw()
+    del raw["video"]
+    assert load_profile(_write_raw(tmp_path, raw)).video_enabled is False

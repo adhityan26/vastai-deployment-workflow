@@ -104,6 +104,14 @@ import {
   parseStoredFilters,
   startFilterProblem,
   startFiltersAreDefault,
+  VIDEO_WAIT_TEXT,
+  durationLabel,
+  videoAsEdit,
+  videoHint,
+  videoLabel,
+  videoUrl,
+  videoDownloadLabel,
+  videoModelsNote,
 } from "../../public/model.js";
 import {
   PANEL_STORAGE_KEY,
@@ -906,8 +914,9 @@ describe("the tool menu", () => {
           item({ id: "nocat", category: "nowhere" }),
           item({ id: "blank", title: "  " }),
           item({ id: "long", title: "x".repeat(201) }),
-          item({ id: "tool", tool: "video" }),
+          item({ id: "tool", tool: "audio" }),
           item({ id: "upstyle", tool: "upscale", style: "anything" }), // upscale takes no style
+          item({ id: "vidstyle", tool: "video", style: "anything" }), // nor does video
           item({ id: "badstyle", tool: "edit", style: "../x" }),
           item({ id: "off", available: "yes" }), // only true is true
           item({ id: "noicon", icon: 7, description: "   " }),
@@ -1192,5 +1201,115 @@ describe("edit sizes from the state", () => {
       { name: "1:1", width: 1024, height: 1024 },
       { name: "9:16", width: 768, height: 1344 },
     ]);
+  });
+});
+
+describe("video", () => {
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }],
+    durations: [{ name: "About 3 s", seconds: 3 }, { name: "Short", seconds: 2 }],
+    max_bytes: 2 * 1024 * 1024,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+    download_bytes: 18_000_000_000,
+    models: { state: "ready" as const, bytes_done: 5, bytes_total: 5, percent: 100, reason: null },
+    model: null as { file: string; linked: boolean; sha256: string | null } | null,
+  };
+  const state = (over: Record<string, unknown> = {}) => parseState({ ...base, ...over })!;
+  const entry = (over: Partial<MenuEntry> = {}): MenuEntry => ({ id: "t", title: "T", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true, ...over });
+
+  it("reads the server's video offer, and treats anything malformed as no video", () => {
+    expect(state({ video }).video).toEqual(video);
+    expect(state().video).toBeNull();
+    const bad: Record<string, unknown>[] = [
+      { ...video, sizes: [] },
+      { ...video, durations: [] },
+      { ...video, sizes: [{ name: "x", width: 0, height: 10 }] },
+      { ...video, durations: [{ name: "x", seconds: -1 }] },
+      { ...video, durations: [{ name: "x", seconds: 1.5 }] },
+      { ...video, durations: [{ name: "", seconds: 3 }] },
+      { ...video, durations: [null] },
+      { ...video, types: ["gif"] },
+      { ...video, max_bytes: 0 },
+    ];
+    for (const v of bad) expect(state({ video: v }).video, JSON.stringify(v)).toBeNull();
+  });
+
+  it("can make a video only when the server offers it, the instance is ready and no job runs", () => {
+    expect(controls(state({ video }), false, false).canVideo).toBe(true);
+    expect(controls(state({ video }), false, true).canVideo).toBe(false);
+    expect(controls(state({ video, state: "booting" }), false, false).canVideo).toBe(false);
+    expect(controls(state(), false, false).canVideo).toBe(false);
+    // Not while the instance lacks its video models (or does not say).
+    for (const models of [null, { ...video.models, state: "downloading" }, { ...video.models, state: "not_installed" }, { ...video.models, state: "failed" }]) {
+      expect(controls(state({ video: { ...video, models } }), false, false).canVideo).toBe(false);
+    }
+  });
+
+  it("reads the video model state strictly; anything odd is 'not reported'", () => {
+    expect(state({ video: { ...video, models: { state: "downloading", bytes_done: 3, bytes_total: 9, percent: 33, reason: null } } }).video!.models).toEqual({
+      state: "downloading", bytes_done: 3, bytes_total: 9, percent: 33, reason: null,
+    });
+    expect(state({ video: { ...video, models: { state: "maybe" } } }).video!.models).toBeNull();
+    expect(state({ video: { ...video, models: { state: "failed", bytes_done: -1, percent: 101, reason: "" } } }).video!.models).toEqual({
+      state: "failed", bytes_done: 0, bytes_total: 0, percent: null, reason: null,
+    });
+    expect(state({ video: { ...video, download_bytes: -5 } }).video!.download_bytes).toBe(0);
+  });
+
+  it("words the video model state for admins (with the download button) and members (ask an admin)", () => {
+    const at = (models: unknown) => ({ ...video, models } as typeof video);
+    expect(videoModelsNote(video, true)).toEqual({ text: "", download: false });
+    expect(videoModelsNote(at({ state: "not_installed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), true)).toEqual({ text: "This instance was started without the video models.", download: true });
+    expect(videoModelsNote(at({ state: "not_installed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), false)).toEqual({
+      text: "The video models are not installed on this instance. Ask an admin to download them.", download: false,
+    });
+    expect(videoModelsNote(at({ state: "downloading", bytes_done: 4_500_000_000, bytes_total: 18_000_000_000, percent: 25, reason: null }), false).text).toBe(
+      "Downloading the video models: 4.5 GB of 18.0 GB (25%). Images keep working meanwhile; Make video unlocks when it is done.",
+    );
+    expect(videoModelsNote(at({ state: "failed", bytes_done: 0, bytes_total: 1, percent: 0, reason: "disk full" }), true)).toEqual({ text: "The video model download failed: disk full.", download: true });
+    expect(videoModelsNote(at({ state: "failed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), false).text).toBe("The video model download failed. Ask an admin to try again.");
+    expect(videoModelsNote(at(null), true).download).toBe(false);
+    expect(videoModelsNote(at({ state: "unavailable", bytes_done: 0, bytes_total: 0, percent: null, reason: null }), true)).toEqual({ text: "This instance has no video models.", download: false });
+    // A linked model in use: admins are reminded it is not pinned; members are told nothing.
+    const linked = { ...video, model: { file: "better.gguf", linked: true, sha256: "a".repeat(64) } };
+    expect(videoModelsNote(linked, true).text).toContain("Video model in use: better.gguf, from a link. A linked model is NOT integrity-pinned or licence-checked");
+    expect(videoModelsNote(linked, true).text).toContain(`sha256 ${"a".repeat(64)}`);
+    expect(videoModelsNote(linked, false).text).toBe("");
+    expect(state({ video: { ...video, model: { file: "x.gguf", linked: true, sha256: "nothex" } } }).video!.model).toEqual({ file: "x.gguf", linked: true, sha256: null });
+    expect(state({ video: { ...video, model: { file: "" } } }).video!.model).toBeNull();
+    expect(videoDownloadLabel(video)).toBe("Download video models (about 18.0 GB, several minutes)");
+    expect(videoDownloadLabel({ ...video, download_bytes: 0 })).toBe("Download video models (several minutes)");
+  });
+
+  it("offers the video entry only while video is on, never with a style, and continues a result into it", () => {
+    const items = [entry({ id: "gen" }), entry({ id: "video", tool: "video" }), entry({ id: "up", tool: "upscale" })];
+    const menu = { categories: [{ id: "create", title: "Create" }], items };
+    expect(usableMenu(state({ menu, video })).items.map((i) => i.id)).toEqual(["gen", "video"]);
+    expect(usableMenu(state({ menu })).items.map((i) => i.id)).toEqual(["gen"]);
+    expect(chainTargets([entry({ id: "video", tool: "video" }), entry({ id: "up", tool: "upscale" }), entry({ id: "e", tool: "edit" })])).toEqual([
+      { id: "e", title: "Use as reference" }, { id: "up", title: "Upscale" }, { id: "video", title: "Make a video" },
+    ]);
+    // Without a server menu the page builds one with a Video entry.
+    expect(usableMenu(state({ video })).items.map((i) => [i.id, i.tool, i.icon])).toEqual([["generate", "generate", "image"], ["video", "video", "film"]]);
+    expect(knobsFor(state({ video }), "video")).toEqual({ negativePrompt: false, cfg: false });
+  });
+
+  it("builds the file path from the job id and index only", () => {
+    expect(videoUrl("job-1", 0)).toBe("/api/video/job-1/0");
+    for (const [id, index] of [["../x", 0], ["job-1", -1], ["job-1", 1.5], ["job-1", "0"], ["job 1", 0], ["job-1", 1000]] as const) {
+      expect(videoUrl(id as string, index)).toBeNull();
+    }
+  });
+
+  it("words the form: one optional start image, the length, the label and the long wait", () => {
+    expect(videoAsEdit(video)).toEqual({ max_references: 1, max_bytes: video.max_bytes, max_pixels: 1_000_000, types: ["png", "jpeg"], resolutions: [], sizes: [] });
+    expect(videoHint(video)).toBe("Optional: one start image (PNG, JPEG), 2.0 MB at most, brings that picture to life. Without one the video is made from the prompt alone. You can also paste an image (Ctrl/Cmd+V).");
+    expect(durationLabel(video.durations[0]!)).toBe("About 3 s");
+    expect(durationLabel(video.durations[1]!)).toBe("Short (about 2 s)");
+    expect(videoLabel("Landscape", "About 3 s", false)).toBe("Video: Landscape, About 3 s");
+    expect(videoLabel("Landscape", "About 3 s", true)).toBe("Video: Landscape, About 3 s, from an image");
+    expect(VIDEO_WAIT_TEXT).toContain("several minutes");
+    expect(durationText("video", 312)).toBe("Made in 5 min 12 s");
   });
 });

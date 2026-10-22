@@ -38,7 +38,8 @@ declare module "fastify" {
 export interface ServerDeps {
   cfg: AppsConfig;
   auth: Pick<Auth, "identify" | "role">;
-  lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "offers" | "parseFilters" | "start" | "destroy" | "destroyUnknown" | "extend" | "console" | "history">;
+  lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "offers" | "parseFilters" | "start" | "destroy" | "destroyUnknown" | "extend" | "console" | "history"> &
+    Partial<Pick<Lifecycle, "downloadVideoModels">>;
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
@@ -50,6 +51,8 @@ export interface ServerDeps {
   editTemplate?: unknown;
   /** The upscale workflow template; null/absent when the profile has no enabled upscale section. */
   upscaleTemplate?: unknown;
+  /** The video workflow template; null/absent when the profile has no enabled video section (video is then off). */
+  videoTemplate?: unknown;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
   /** Saved images (MinIO); absent means saving and the gallery are off (the routes answer 503). */
@@ -68,7 +71,7 @@ export interface ServerDeps {
 
 // Protocol constants: header values defined by the HTTP/CSP specifications.
 const CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; " +
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; " +
   "connect-src 'self'; manifest-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; " +
   "frame-ancestors 'none'";
 const SECURITY_HEADERS: Record<string, string> = {

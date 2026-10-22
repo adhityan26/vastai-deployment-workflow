@@ -37,6 +37,30 @@ class ComfyClient:
             raise ComfyUnavailable(f"object_info/{name}: {type(exc).__name__}: {exc}") from None
         return isinstance(data, dict) and name in data
 
+    def unlisted_files(self, classes: tuple[str, ...], names: tuple[str, ...]) -> list[str]:
+        """The file names no input of these node classes offers (GET /object_info/<class> lists a loader's files).
+        Raises ComfyUnavailable when ComfyUI cannot be asked."""
+        seen: set[str] = set()
+
+        def walk(value) -> None:
+            if isinstance(value, str):
+                seen.add(value)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+
+        for name in classes:
+            try:
+                response = self._client.get(f"{self._base}/object_info/{quote(name, safe='')}")
+                response.raise_for_status()
+                walk(response.json())
+            except (httpx.HTTPError, ValueError) as exc:
+                raise ComfyUnavailable(f"object_info/{name}: {type(exc).__name__}") from None
+        return [n for n in names if n not in seen]
+
     def ready(self) -> bool:
         try:
             return self._client.get(f"{self._base}/system_stats").status_code == 200

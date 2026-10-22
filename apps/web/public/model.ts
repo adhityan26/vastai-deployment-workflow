@@ -25,6 +25,8 @@ export const API = {
   generate: "/api/generate",
   edit: "/api/edit",
   upscale: "/api/upscale",
+  video: "/api/video",
+  videoModels: "/api/video-models",
   credit: "/api/credit",
   offers: "/api/offers",
   history: "/api/history",
@@ -70,8 +72,8 @@ export interface Resolution { name: string; value: number }
 /** What the server offers for edit with reference images (null in the state when edit is off). */
 export interface EditInfo { max_references: number; max_bytes: number; max_pixels: number; types: string[]; resolutions: Resolution[]; /** Output sizes an edit may ask for; empty when none (then the result follows the first image). */ sizes: Size[] }
 export type Mode = "generate" | "edit";
-/** The page's modes: the two that take styles, and upscale (one image in, a bigger one out). */
-export type PageMode = Mode | "upscale";
+/** The page's modes: the two that take styles, upscale (one image in, a bigger one out) and video. */
+export type PageMode = Mode | "upscale" | "video";
 export type StyleValue = number | string | boolean;
 /** One parameter of a style, as the server lists it (limits only; where it goes stays on the server). */
 export interface StyleParam {
@@ -113,6 +115,25 @@ export interface Knobs { negativePrompt: boolean; cfg: boolean }
 export interface AdvancedInfo { generate: Knobs; edit: Knobs; negativeMaxChars: number }
 /** What the server offers for upscale (null in the state when upscale is off). */
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
+/** One video length the server offers: its name and about how many seconds it lasts. */
+export interface VideoDurationInfo { name: string; seconds: number }
+export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
+/** The video model files on the running instance (GET /api/state video.models). */
+export interface VideoModelsView { state: VideoModelsState; bytes_done: number; bytes_total: number; percent: number | null; reason: string | null }
+/** What the server offers for video (null in the state when video is off); the start image is optional. */
+export interface VideoInfo {
+  sizes: Size[];
+  durations: VideoDurationInfo[];
+  max_bytes: number;
+  max_pixels: number;
+  types: string[];
+  /** Size of all video model files (what "Download video models" may fetch). */
+  download_bytes: number;
+  /** The instance's video model files; null without an instance or when it does not say. */
+  models: VideoModelsView | null;
+  /** The diffusion model in use (admins only): pinned, or linked (not integrity-pinned) with its sha256. */
+  model: { file: string; linked: boolean; sha256: string | null } | null;
+}
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -141,6 +162,8 @@ export interface ApiState {
   gallery: boolean;
   styles: StyleInfo[];
   upscale: UpscaleInfo | null;
+  /** Video (text to video, or image to video with one start image); null when the server does not offer it. */
+  video: VideoInfo | null;
   guidance: GuidanceInfo | null;
   /** The Advanced section per mode (negative prompt, guidance). */
   advanced: AdvancedInfo;
@@ -297,6 +320,59 @@ function parseUpscale(v: unknown): UpscaleInfo | null {
   return { scales: scales as string[], max_bytes: v["max_bytes"], max_pixels: v["max_pixels"], types: types as string[] };
 }
 
+const MAX_VIDEO_SECONDS = 600;
+
+/** The video offer of the state; null when it is missing or anything in it is unusable. */
+function parseVideo(v: unknown): VideoInfo | null {
+  if (!isObj(v) || !posInt(v["max_bytes"]) || !posInt(v["max_pixels"])) return null;
+  const { sizes, durations, types } = v;
+  if (!Array.isArray(types) || types.length === 0 || !types.every((t) => typeof t === "string" && EDIT_TYPES.includes(t))) return null;
+  if (!Array.isArray(sizes) || sizes.length === 0 || !Array.isArray(durations) || durations.length === 0) return null;
+  const sizeList: Size[] = [];
+  for (const z of sizes) {
+    if (!isObj(z) || typeof z["name"] !== "string" || z["name"] === "" || !posInt(z["width"]) || !posInt(z["height"])) return null;
+    sizeList.push({ name: z["name"], width: z["width"], height: z["height"] });
+  }
+  const durationList: VideoDurationInfo[] = [];
+  for (const d of durations) {
+    const seconds = d && isObj(d) ? d["seconds"] : undefined;
+    if (!isObj(d) || typeof d["name"] !== "string" || d["name"] === "" || !Number.isInteger(seconds) || (seconds as number) < 0 || (seconds as number) > MAX_VIDEO_SECONDS) return null;
+    durationList.push({ name: d["name"], seconds: seconds as number });
+  }
+  const download = v["download_bytes"];
+  return {
+    sizes: sizeList,
+    durations: durationList,
+    max_bytes: v["max_bytes"],
+    max_pixels: v["max_pixels"],
+    types: types as string[],
+    download_bytes: Number.isSafeInteger(download) && (download as number) >= 0 ? (download as number) : 0,
+    models: parseVideoModels(v["models"]),
+    model: parseVideoModel(v["model"]),
+  };
+}
+
+const VIDEO_MODEL_STATES: readonly VideoModelsState[] = ["unavailable", "not_installed", "downloading", "ready", "failed"];
+const count = (v: unknown): number => (Number.isSafeInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+
+function parseVideoModel(v: unknown): VideoInfo["model"] {
+  if (!isObj(v) || typeof v["file"] !== "string" || v["file"] === "" || v["file"].length > 128) return null;
+  const sha = typeof v["sha256"] === "string" && /^[0-9a-f]{64}$/.test(v["sha256"]) ? v["sha256"] : null;
+  return { file: v["file"], linked: v["linked"] === true, sha256: sha };
+}
+
+function parseVideoModels(v: unknown): VideoModelsView | null {
+  if (!isObj(v) || !(VIDEO_MODEL_STATES as readonly unknown[]).includes(v["state"])) return null;
+  const pct = v["percent"];
+  return {
+    state: v["state"] as VideoModelsState,
+    bytes_done: count(v["bytes_done"]),
+    bytes_total: count(v["bytes_total"]),
+    percent: Number.isInteger(pct) && (pct as number) >= 0 && (pct as number) <= 100 ? (pct as number) : null,
+    reason: typeof v["reason"] === "string" && v["reason"] !== "" ? v["reason"] : null,
+  };
+}
+
 function parseGuidance(v: unknown): GuidanceInfo | null {
   if (!isObj(v)) return null;
   const [min, max, step, def] = [num(v["min"]), num(v["max"]), num(v["step"]), num(v["default"])];
@@ -403,6 +479,7 @@ export function parseState(json: unknown): ApiState | null {
     gallery: json["gallery"] === true,
     styles: parseStyles(json["styles"]),
     upscale: parseUpscale(json["upscale"]),
+    video: parseVideo(json["video"]),
     guidance: parseGuidance(json["guidance"]),
     advanced: parseAdvanced(json["advanced"]),
     menu: parseMenu(json["menu"]),
@@ -816,6 +893,8 @@ export interface Controls {
   canEdit: boolean;
   /** Generating is possible and the server offers upscale. */
   canUpscale: boolean;
+  /** Generating is possible and the server offers video. */
+  canVideo: boolean;
 }
 
 export function controls(s: ApiState | null, busy: boolean, jobPending: boolean): Controls {
@@ -829,6 +908,8 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canGenerate: s !== null && GENERATE_STATES.has(state) && !jobPending,
     canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
     canUpscale: s !== null && s.upscale !== null && GENERATE_STATES.has(state) && !jobPending,
+    // Video also needs its model files on the instance (never a job that would only wait for them).
+    canVideo: s !== null && s.video !== null && s.video.models?.state === "ready" && GENERATE_STATES.has(state) && !jobPending,
   };
 }
 
@@ -857,6 +938,12 @@ export function isJobId(id: unknown): id is string {
 export function imageUrl(id: string, index: unknown): string | null {
   if (!isJobId(id) || typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > MAX_IMAGE_INDEX) return null;
   return `/api/image/${id}/${index}`;
+}
+
+/** The URL of a video job's file from a validated job id and a numeric index (never the server's text). */
+export function videoUrl(id: string, index: unknown): string | null {
+  const image = imageUrl(id, index);
+  return image === null ? null : image.replace(/^\/api\/image\//, `${API.video}/`);
 }
 
 export function presetLabel(p: Preset): string {
@@ -1005,7 +1092,7 @@ export interface MenuEntry {
 export interface MenuInfo { categories: MenuCategory[]; items: MenuEntry[] }
 
 const MENU_ID = /^[a-z][a-z0-9_-]{0,63}$/;
-const MENU_TOOLS: readonly PageMode[] = ["generate", "edit", "upscale"];
+const MENU_TOOLS: readonly PageMode[] = ["generate", "edit", "upscale", "video"];
 const MENU_TEXT_MAX = 200; // the server sends at most 60 (title) and 120 (description) characters
 const nonBlank = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.length <= MENU_TEXT_MAX;
 
@@ -1023,7 +1110,7 @@ function parseMenu(v: unknown): MenuInfo | null {
     const tool = i["tool"] as PageMode;
     const style = i["style"];
     if (!MENU_TOOLS.includes(tool) || !categories.some((c) => c.id === i["category"]) || items.some((k) => k.id === i["id"])) continue;
-    if (style !== null && (typeof style !== "string" || !MENU_ID.test(style) || tool === "upscale")) continue;
+    if (style !== null && (typeof style !== "string" || !MENU_ID.test(style) || tool === "upscale" || tool === "video")) continue;
     items.push({
       id: i["id"],
       title: i["title"],
@@ -1044,7 +1131,7 @@ const FALLBACK_CATEGORY: MenuCategory = { id: "tools", title: "Tools" };
 /** A menu from what the state offers (the server's menu is missing): the plain tools, then each style per mode. */
 function fallbackMenu(s: ApiState): MenuInfo {
   const plain = (id: string, title: string, icon: string, tool: PageMode): MenuEntry => ({ id, title, description: null, icon, category: FALLBACK_CATEGORY.id, tool, style: null, available: true });
-  const items = [plain("generate", "Generate", "image", "generate"), plain("edit", "Edit images", "wand", "edit"), plain("upscale", "Upscale", "expand", "upscale")];
+  const items = [plain("generate", "Generate", "image", "generate"), plain("edit", "Edit images", "wand", "edit"), plain("upscale", "Upscale", "expand", "upscale"), plain("video", "Video", "film", "video")];
   for (const st of s.styles) {
     for (const m of st.modes) {
       items.push({ id: st.modes.length === 1 ? st.id : `${st.id}-${m}`, title: st.title, description: null, icon: m === "edit" ? "wand" : "image", category: FALLBACK_CATEGORY.id, tool: m, style: st.id, available: true });
@@ -1061,8 +1148,8 @@ export function usableMenu(s: ApiState): MenuInfo {
   const menu = s.menu ?? fallbackMenu(s);
   const items = menu.items.filter((i) => {
     if (!i.available) return false;
-    if ((i.tool === "edit" && s.edit === null) || (i.tool === "upscale" && s.upscale === null)) return false;
-    return i.style === null || (i.tool !== "upscale" && s.styles.some((st) => st.id === i.style && st.modes.includes(i.tool as Mode)));
+    if ((i.tool === "edit" && s.edit === null) || (i.tool === "upscale" && s.upscale === null) || (i.tool === "video" && s.video === null)) return false;
+    return i.style === null || ((i.tool === "generate" || i.tool === "edit") && s.styles.some((st) => st.id === i.style && st.modes.includes(i.tool as Mode)));
   });
   return { categories: menu.categories.filter((c) => items.some((i) => i.category === c.id)), items };
 }
@@ -1087,18 +1174,19 @@ export function menuGroups(menu: MenuInfo, query: string): { category: MenuCateg
   });
 }
 
-/** The ways to continue from a result: every edit entry ("Use as reference", with the style's title), then upscale. */
+/** The ways to continue from a result: every edit entry ("Use as reference", with the style's title), upscale, then video. */
 export function chainTargets(items: readonly MenuEntry[]): { id: string; title: string }[] {
   const edits = items.filter((i) => i.tool === "edit").map((i) => ({ id: i.id, title: i.style === null ? "Use as reference" : `Use as reference: ${i.title}` }));
   const ups = items.filter((i) => i.tool === "upscale").map((i) => ({ id: i.id, title: "Upscale" }));
-  return [...edits, ...ups];
+  const videos = items.filter((i) => i.tool === "video").map((i) => ({ id: i.id, title: "Make a video" }));
+  return [...edits, ...ups, ...videos];
 }
 
 // ---- Advanced: negative prompt and guidance, and the defaults a style pre-fills ----
 
 /** What the Advanced section shows in a mode: each knob only when the mode's workflow takes it. */
 export function knobsFor(s: ApiState, mode: PageMode): Knobs {
-  if (mode === "upscale") return NO_KNOBS;
+  if (mode === "upscale" || mode === "video") return NO_KNOBS;
   const k = s.advanced[mode];
   return { negativePrompt: k.negativePrompt, cfg: k.cfg && s.guidance !== null };
 }
@@ -1146,7 +1234,7 @@ export type Prefilled = Partial<{ [K in FormKey]: { value: FormValues[K]; previo
 
 /** A style's defaults that this server can use in this mode: offered names only, cfg on the grid, text bounded. */
 export function usableDefaults(style: StyleInfo | null, s: ApiState, mode: PageMode): Partial<FormValues> {
-  if (style === null || mode === "upscale") return {};
+  if (style === null || mode === "upscale" || mode === "video") return {};
   const d = style.defaults;
   const knobs = knobsFor(s, mode);
   const out: Partial<FormValues> = {};
@@ -1196,6 +1284,84 @@ export function upscaleLabel(scale: string): string {
   return `Upscale: ${scale}`;
 }
 
+// ---- video ----
+
+/** The rules for the optional start image of a video, in the shape pickReferences takes (one image at most). */
+export function videoAsEdit(v: VideoInfo): EditInfo {
+  return { max_references: 1, max_bytes: v.max_bytes, max_pixels: v.max_pixels, types: v.types, resolutions: [], sizes: [] };
+}
+
+export function videoHint(v: VideoInfo): string {
+  return `Optional: one start image (${v.types.map((t) => t.toUpperCase()).join(", ")}), ${formatMegabytes(v.max_bytes)} at most, brings that picture to life. Without one the video is made from the prompt alone. You can also paste an image (Ctrl/Cmd+V).`;
+}
+
+/** "About 5 s (5 s)" is redundant: the option shows the name, plus the seconds only when the name lacks them. */
+export function durationLabel(d: VideoDurationInfo): string {
+  return d.name.includes(`${d.seconds} s`) ? d.name : `${d.name} (about ${d.seconds} s)`;
+}
+
+/** The job label, the way the server labels the same job. */
+export function videoLabel(size: string, duration: string, fromImage: boolean): string {
+  return `Video: ${size}, ${duration}${fromImage ? ", from an image" : ""}`;
+}
+
+/** What an admin must know before linking a model (shown next to both link inputs and with a linked model in use). */
+export const LINK_NOTICE =
+  "A linked model is NOT integrity-pinned or licence-checked: only link a file you trust. Hugging Face file links " +
+  "only (.safetensors or .gguf); it replaces the video diffusion model, the text encoder and VAE stay pinned. A .gguf " +
+  "file is loaded with the GGUF loader, which may not support this model (untested).";
+/** Longest link the server accepts. */
+export const MODEL_LINK_MAX_CHARS = 2048;
+
+// Where the Start dialog's "Include video models" choice is remembered in this browser ("1" or "0", a preference).
+export const START_VIDEO_STORAGE_KEY = "vast-comfy.start-video"; // config-lint: ok (browser storage key, not configuration)
+
+/** "18.0 GB" for a download size (decimal units, like the boot download). */
+function gigabytes(bytes: number): string {
+  return `${(bytes / BYTES_PER_GB).toFixed(1)} GB`;
+}
+
+/** The label of the admin's download button. */
+export function videoDownloadLabel(v: VideoInfo): string {
+  return v.download_bytes > 0 ? `Download video models (about ${gigabytes(v.download_bytes)}, several minutes)` : "Download video models (several minutes)";
+}
+
+/**
+ * What the Video panel says about the instance's video model files, and whether this user gets the download button
+ * (admins only, while they are missing or after a failed download). Empty text when they are ready.
+ */
+export function videoModelsNote(v: VideoInfo, admin: boolean): { text: string; download: boolean } {
+  const m = v.models;
+  if (m === null) return { text: "The instance does not report its video models yet. Start an instance, or wait until it is ready.", download: false };
+  switch (m.state) {
+    case "ready": {
+      const model = v.model;
+      if (!admin || model === null || !model.linked) return { text: "", download: false };
+      const sha = model.sha256 === null ? "" : ` sha256 ${model.sha256}.`;
+      return { text: `Video model in use: ${model.file}, from a link. ${LINK_NOTICE}${sha}`, download: false };
+    }
+    case "downloading": {
+      const pct = m.percent === null ? "" : ` (${m.percent}%)`;
+      const size = m.bytes_total > 0 ? `: ${gigabytes(m.bytes_done)} of ${gigabytes(m.bytes_total)}${pct}` : pct;
+      return { text: `Downloading the video models${size}. Images keep working meanwhile; Make video unlocks when it is done.`, download: false };
+    }
+    case "failed":
+      return {
+        text: `The video model download failed${m.reason === null ? "" : `: ${m.reason}`}.${admin ? "" : " Ask an admin to try again."}`,
+        download: admin,
+      };
+    case "unavailable":
+      return { text: "This instance has no video models.", download: false };
+    default:
+      return admin
+        ? { text: "This instance was started without the video models.", download: true }
+        : { text: "The video models are not installed on this instance. Ask an admin to download them.", download: false };
+  }
+}
+
+/** Shown while a video runs: it takes minutes, and the page must stay open for the result to appear. */
+export const VIDEO_WAIT_TEXT = "A video takes several minutes, often 5 to 20 on these GPUs. Keep this page open: the result appears here when it is ready.";
+
 // ---- a running job: step counter and live preview ----
 
 export interface JobProgress { step: number; max: number }
@@ -1244,8 +1410,8 @@ export function elapsedText(ms: number): string {
 
 // ---- how long a job took ----
 
-export type JobKind = "generate" | "edit" | "upscale";
-const DURATION_VERB: Record<JobKind, string> = { generate: "Generated", edit: "Edited", upscale: "Upscaled" };
+export type JobKind = "generate" | "edit" | "upscale" | "video";
+const DURATION_VERB: Record<JobKind, string> = { generate: "Generated", edit: "Edited", upscale: "Upscaled", video: "Made" };
 const SECONDS_MAX_SHOWN = 86_400;
 const SECONDS_PER_MINUTE = 60;
 const ONE_DECIMAL_BELOW_S = 10;

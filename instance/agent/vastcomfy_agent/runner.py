@@ -22,7 +22,7 @@ class Runner:
     and retry the destroy from destroy_failed at most every `destroy_failed_retry_s` seconds."""
 
     def __init__(self, *, states: StateStore, idle: IdleWatcher, comfy, flow: DestroyFlow, state_dir: Path,
-                 now: Callable[[], int], destroy_failed_retry_s: int):
+                 now: Callable[[], int], destroy_failed_retry_s: int, busy: Callable[[], bool] = lambda: False):
         self._states = states
         self._idle = idle
         self._comfy = comfy
@@ -31,6 +31,7 @@ class Runner:
         self._now = now
         self._retry_s = destroy_failed_retry_s
         self._last_retry: int | None = None  # in memory: start of the current wait in destroy_failed
+        self._busy = busy  # other work that counts as activity (a background video model download)
 
     def _failsafe_destroying(self) -> str | None:
         """The failsafe's destroy reason while it is destroying (failsafe_deadline or hard_cap), else None."""
@@ -57,6 +58,9 @@ class Runner:
             return
         counts = self._comfy.queue_counts()
         total = None if counts is None else counts[0] + counts[1]
+        if self._busy():
+            # A running download is activity like a queued job: the idle timer must not stop the instance under it.
+            total = (total or 0) + 1
         if self._idle.tick(total) == "destroy":
             self._flow.run("idle_timeout")
 

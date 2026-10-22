@@ -461,8 +461,9 @@ image slots and hint, notes or prompt, quality/size/resolution, Advanced, the ac
 and Gallery cards follow it (the usage history is a dialog opened from the server panel, see "Usage history"). The server status lives in a server panel on the right (below). Arrow keys, Home and End move through the entries; the chosen
 entry is marked (`aria-current`) and remembered in this browser (`localStorage` key `vast-comfy.tool`, an entry id
 only; an id the current menu does not have falls back to the first entry). "Use as reference" and "Upscale" on a
-result or a saved image select the matching entry. Requests are the same as before the menu: an entry only picks
-the mode and the style (`/api/generate`, `/api/edit` or `/api/upscale`, with `style: {id, params}` for a style entry).
+result or a saved image select the matching entry ("Make a video" selects Video, see "Video"). Requests are the same
+as before the menu: an entry only picks the mode and the style (`/api/generate`, `/api/edit`, `/api/upscale` or
+`/api/video`, with `style: {id, params}` for a style entry; video and upscale take no style).
 
 The menu comes from the profile (`instance/profiles/image.yaml`) and is listed in `GET /api/state` under `menu`
 (categories and entries in display order: id, title, description, icon, category, tool, style, available; never
@@ -517,7 +518,8 @@ To add a tool: add a style under `styles:` (see the next section) with `enabled:
 `menu.categories` item.
 
 Icons are a closed set drawn by the page itself (inline SVG built in `apps/web/public/icons.ts`, nothing loaded from
-outside): `image`, `wand`, `user`, `users`, `swap`, `shirt`, `restore`, `sparkles`, `expand`, `camera`, `brush`. The
+outside): `image`, `wand`, `user`, `users`, `swap`, `shirt`, `restore`, `sparkles`, `expand`, `camera`, `brush`,
+`film`. The
 profile loader refuses any other name (the icon list in `apps/core/src/menu.ts`); the page draws an unknown name as
 `sparkles`. A new icon needs both lists changed (a test checks that they match).
 
@@ -591,6 +593,165 @@ squared must be at most `UPSCALE_MAX_INTERMEDIATE_PIXELS`, and input x factor sq
 about 2 MP (1448x1448) at any scale. Each scale's `factor` must equal model_factor x value, or the profile is refused. The image is validated like an edit reference (magic bytes, size,
 pixels). Every result also gets an "Upscale" button next to "Use as reference". UNVERIFIED on a real instance: the
 workflow `instance/workflows/image-upscale.json` has never run, and VRAM use of a large upscale is unknown.
+
+## Video
+
+A fourth mode, "Video" (menu category Create): a short clip from a prompt (text to video), or from a prompt plus
+exactly one start image (image to video: attach it with the picker, paste it, or press "Make a video" on a result or
+a saved image). One model does both, through native ComfyUI nodes only (no custom node): the workflow is
+`instance/workflows/video-ti2v.json`, the profile's `video:` section maps its inputs. The page offers the sizes and
+lengths of the profile (`video.sizes`, multiples of 32; `video.durations`, frames 4n+1 at `video.fps`) and an
+optional seed; there is no quality preset, negative prompt or guidance (the workflow keeps its own). The job runs
+like any other (same rate limit, same step counter over the websocket, previews if ComfyUI sends any) and the result
+is shown in `<video controls playsinline>` with a Download link.
+
+**It ships OFF.** Its three model files (about 18 GB) are not pinned yet: a cloud session cannot reach Hugging Face,
+and a `models:` line is never written from memory. To switch it on (laptop):
+
+1. Check the licence on the model card of each repo named in the comment under `models:` in
+   `instance/profiles/image.yaml`.
+2. Run the three `python3 scripts/pin_model.py ...` commands written in that comment and paste the printed lines
+   into `models:` (if a file is not in the named repo the script says so; it is then in the other repackaged repo).
+3. Set `video.enabled: true`. Both loaders now refuse the profile while a listed video file is missing from
+   `models:` or has another dest ("video model ... is not listed in models"), so a forgotten pin stops the web app
+   at startup and the instance at boot, never a job.
+4. Optional: `VAST_VIDEO_DISK_GB` (default 80, the disk rented for a start with the video models),
+   `VIDEO_TIMEOUT_S` (default 2400, must stay below `WEB_JOB_TTL_S`, 3600, or the web app refuses to start),
+   `VIDEO_MAX_BYTES` (largest result read from the instance, default 100 MiB) and `VIDEO_VIEW_TIMEOUT_S` (one result
+   download, default 300 s). Images keep `GENERATE_TIMEOUT_S`, `WEB_IMAGE_MAX_BYTES` and `WEB_IMAGE_TIMEOUT_S`.
+5. Push, bump `REPO_COMMIT`, deploy.
+
+### Video models at Start, or later on demand
+
+The video files are **not** downloaded at every boot. The admin's Start dialog has **Include video models** (shown
+only where the server offers video; unticked by default; the last choice is remembered in this browser, key
+`vast-comfy.start-video`):
+
+- **Unticked (default): exactly the boot of before.** Same disk (`VAST_DISK_GB`), same offer search and price, no
+  `INCLUDE_VIDEO_MODELS` in the instance env; the agent downloads only the image models, its disk check counts only
+  them, boot requires only `provides_node_classes`, and the overall download progress and slow-download ETA leave
+  the video files out.
+- **Ticked:** the GPU list, the offers and the estimate are searched and priced for the larger disk (the larger of
+  `VAST_DISK_GB` and `VAST_VIDEO_DISK_GB`), the Start body carries `video_models: true`, the instance gets
+  `INCLUDE_VIDEO_MODELS=true` and downloads the video files at boot like every other model (pinned size, ranged
+  download, disk check) and also requires the section's `node_classes` before ready. The boot takes longer
+  (about 18 GB more): on a slow host the slow-download guard may release the machine; raise
+  `BOOT_MAX_DOWNLOAD_ETA_MIN` if that happens too often.
+
+**On demand** (changed your mind after the start): in the Video tool an admin sees "This instance was started without
+the video models" and a **Download video models (about N GB, several minutes)** button (`POST /api/video-models`,
+admin only: it uses the instance's disk and network for minutes). Members see "Ask an admin to download them" and no
+button. The agent (`POST /video-models`) first checks, before a single byte: the instance is ready (not booting or
+stopping), ComfyUI has the section's node classes (`video_nodes_missing` otherwise: the instance image is too old),
+and the disk holds the missing files plus `DISK_MARGIN_MB` (`disk_insufficient` with the GB needed and free
+otherwise: an instance started with the default 50 GB disk may well be too small; start the next one with the box
+ticked). It then downloads only the missing files in the background with the boot's own code (pinned size, ranged
+download into a `.part` file, atomic rename), single-flight (a second press changes nothing). `/api/state`
+`video.models` shows `not_installed`, `downloading` (bytes, percent; the page shows "Downloading the video models:
+4.5 GB of 18.0 GB (25%)"), `ready` or `failed` (with the reason and a retry button for admins). Image jobs keep
+running meanwhile. A running download counts as activity: the idle shutdown does not stop the instance under it (the
+failsafe deadline and the hard cap still apply). Cut off (agent or instance restart): nothing half-written is ever
+used; pressing the button again fetches only what is missing.
+
+**Video jobs are never queued while the files are missing:** `POST /api/video` answers 409
+`video_models_not_ready` (not installed, still downloading, failed, or not reported) and Make video stays disabled
+until `video.models.state` is `ready`.
+
+**ComfyUI and the new files:** ComfyUI's loader lists are read from its model folders, and recent ComfyUI versions
+cache them per folder and re-read a folder when its modification time changes, so a running ComfyUI should offer the
+new files without a restart. This is from reading ComfyUI's code behaviour as remembered, NOT verified on the
+instance image. The agent therefore checks instead of assuming: after the download it asks
+`/object_info/<class>` of every video node class and requires each new file name to be listed; if one is not, the
+state is `failed` with "ComfyUI does not list ... yet; it needs a restart". It never restarts ComfyUI itself (that
+would cut off running image jobs). The node classes are native, so they exist from ComfyUI's start; only the files
+are new.
+
+### A model link instead of the pinned diffusion model
+
+An admin may give a **link to a different video diffusion model**: the "Video model link (optional)" field under
+"Include video models" in the Start dialog (enabled only when the box is ticked; `video_model_url` in the Start
+body, `VIDEO_MODEL_URL` on the instance), or the "Model link (optional)" field next to "Download video models" in the
+Video tool (`url` of `POST /api/video-models`). The field is never stored in the browser. Empty means the pinned model
+(an on-demand download without a link also drops an active link). The link replaces only the diffusion model slot
+(the video `models` entry with dest `models/diffusion_models/`); the text encoder and VAE stay the pinned entries.
+
+**A linked model is NOT integrity-pinned or licence-checked** (the page says so next to both fields and, for admins,
+under the Video tool while a linked model is in use). There is no sha256 to compare with: the instance computes the
+sha256 of what arrived and reports it (boot log line "linked video model ... sha256 ... (not pinned)", the agent log,
+`/api/state` `video.model.sha256` for admins).
+
+Rules (untrusted input; checked by the web app before anything is rented or sent, and again on the instance):
+https only; ASCII only; no user info, no port, no percent-encoding, no query except `?download=true`, no fragment;
+the host must be exactly one of `VIDEO_MODEL_LINK_HOSTS` (default `huggingface.co`; IP literals, `localhost`, a
+trailing dot and look-alike hosts such as `huggingface.co.evil.com` are refused); the path must be
+`<owner>/<repo>/resolve|blob/<revision>/<path to file>` (a `blob` link becomes the `resolve` link); the file must end
+in `.safetensors` or `.gguf` (never a pickle format). The instance then downloads it with the boot's own downloader
+from the `resolve` URL, and every request of that download, each redirect hop included, is checked before it is sent:
+https, port 443, no user info, no IP literal, a host that is a link host or inside `VIDEO_MODEL_LINK_REDIRECT_DOMAINS`
+(default `huggingface.co,hf.co`, which covers Hugging Face's CDN hosts). The size comes from a HEAD on the instance
+(capped by `VIDEO_MODEL_LINK_MAX_BYTES`, default 20 GiB); the disk check runs before the download. After the download
+the file must be what its extension says (a GGUF file starts with `GGUF`; a safetensors file starts with the length
+of a JSON header that opens with `{` and fits in the file), else it is deleted and refused (`model_link_bad_file`).
+A linked file may not have the name of a pinned model (`model_link_name_clash`: it would overwrite it). The web app
+passes its `VIDEO_MODEL_LINK_*` values to the instance with every start of a profile with video.
+
+Error codes: `invalid_model_link`, `model_link_host_not_allowed`, `model_link_unsupported_type`,
+`model_link_name_clash` (400) and `model_link_too_large`, `model_link_unreachable`, `model_link_redirect_not_allowed`,
+`video_gguf_loader_missing` (409, from the instance). At boot a refused link fails the boot (`download_failed`, the
+code in the boot log) and the machine is released: the web app checks everything it can before renting, but the
+size, the redirects and the file itself can only be checked on the instance.
+
+The active link is kept on the instance (`video_link.json` in its state dir) and reported in the agent's status;
+video jobs then load the linked file: the web app names it in the workflow copy wherever the workflow named the
+pinned diffusion file. A `.safetensors` link keeps the native `UNETLoader`; a **`.gguf` link turns that node into
+`UnetLoaderGGUF`** (input `unet_name` only), and the instance requires that node class before the download (on
+demand: `video_gguf_loader_missing`) or at boot (`verify-nodes` fails, the boot log says `video_gguf_loader_missing`).
+
+**GGUF is UNVERIFIED for this model.** The instance installs only the ComfyUI-GGUF fork pinned in `nodes:` for the
+image model, `leejet/ComfyUI-GGUF` (its pin is unchanged). Whether that fork can load this video model's GGUF files
+is unknown; the GGUF loader usually used for this video model is the original `city96/ComfyUI-GGUF`, which could not
+load the image model ("Unknown model architecture", the reason the fork is used). If the fork cannot, the download and the node check still succeed, and the first video job
+fails at the loader: the page shows "Failed: UnetLoaderGGUF: ..." with ComfyUI's message (for the image model the
+original pack said "Unknown model architecture"). No second GGUF node pack is installed by this change.
+
+Decision: a link does **not** make `video.enabled: true` possible without the pins. Enabling still requires all
+three video files pinned in `models:`. Relaxing that only for the diffusion slot would change both profile loaders and
+the readiness rules for a small gain: the text encoder and VAE need the same `pin_model.py` step anyway, and the
+pinned diffusion model remains the default when no link is given.
+
+### What the web app enforces
+
+The body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start image is checked like an
+edit reference (magic bytes, size, pixels, side, one frame) and uploaded under a name the server chooses; the
+workflow is checked against the section at startup (every mapped input exists, the output node is `SaveVideo`, the
+start image input is free, the graph loads every listed model file). The result is read from
+`GET /api/video/{id}/{index}` (owner or admin, the instance that made it only), at most `VIDEO_MAX_BYTES`, and served
+only when its first bytes are an mp4 (`ftyp` box of a video brand) or WebM (EBML DocType `webm`): the type comes from
+those bytes, never from ComfyUI, with `nosniff`, `no-store` and a fixed file name. The page fetches it once and plays
+it from a `blob:` URL (the CSP allows `media-src 'self' blob:`), so phones need no range requests. A video job is
+never served by `/api/image`.
+
+Not in phase 1, on purpose: **saving a video to the gallery.** The gallery's types, size limit and quotas are image
+ones (`POST /api/gallery` answers `video_not_saveable` for a video job, the page shows no Save button and auto-save
+skips videos); use Download. Also left out: a negative prompt or guidance for video, more than one start image, an
+end frame, sound, cancelling an on-demand download (it ends with the instance), links for the text encoder or VAE.
+
+Waiting: ComfyUI runs one job at a time. While a clip renders (many minutes), image jobs of other people wait in
+ComfyUI's queue, and their own `GENERATE_TIMEOUT_S` clock (600 s) runs from their submit: a long video can make a
+queued image job time out on the page although ComfyUI still runs it later. The page warns that a video takes
+several minutes and keeps the form busy until it is done (like every job). Idle shutdown does not hit a running
+video (a busy queue resets the idle timer); the failsafe and the hard cap still do.
+
+UNVERIFIED (nothing here has run against ComfyUI or a real instance): the workflow graph and its node and input
+names (written from the native nodes as documented, not exported from a running ComfyUI), whether `SaveVideo` with
+format mp4 / codec h264 writes a browser-playable file and lists it under `images` in its history output, VRAM at
+1280x704 x 121 frames on a 24 GB card, how long a clip takes on an A5000/3090/4090, the quality of the smaller sizes
+and of the shipped negative prompt, playback on iPhone and Android, the real file sizes, the longer boot with the
+box ticked, the on-demand download on a real instance (its speed beside running image jobs, the disk left on a
+default 50 GB instance, and whether ComfyUI lists the new files without a restart), the price difference of
+the larger disk, and model links: the CDN host names Hugging Face redirects to today (assumed inside
+`huggingface.co`/`hf.co`), the HEAD size after its redirect, a real linked download, and whether the pinned
+ComfyUI-GGUF fork loads this video model's GGUF files (it may well not; see above).
 
 ## Live progress and preview
 
@@ -854,6 +1015,10 @@ wrote it had no Docker daemon or registry access). Also unverified:
 The Vast create/destroy request shapes and the instance label were verified in the T13 spike.
 
 ## NOT verified yet
+
+- Video ("Video"): off and unpinned; never run. The workflow, the node classes, the mp4 output, VRAM, time per clip,
+  phone playback, file sizes, disk and boot time, the on-demand download and whether ComfyUI lists new model files
+  without a restart are all unchecked.
 
 - The custom instance image ("Custom instance image"): never built, pushed, pulled by Vast or booted.
 

@@ -83,6 +83,11 @@ async function main(): Promise<void> {
     ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.upscale.workflow), "utf8"))
     : null;
 
+  // Video likewise: only with an enabled video section (its model files pinned), and its workflow must load.
+  const videoTemplate: unknown = profile.video
+    ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.video.workflow), "utf8"))
+    : null;
+
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
     // Fail closed: an empty allow-list no longer means "any GPU".
@@ -142,6 +147,8 @@ async function main(): Promise<void> {
     clock: () => Date.now() / 1000,
     tsAuthKey,
     profileModels: profile.models,
+    // An image-only boot skips these; the overall download progress must leave them out too.
+    videoModelFiles: profile.video?.models.map((m) => m.file) ?? [],
     consoleStore,
     usage,
     log,
@@ -163,6 +170,7 @@ async function main(): Promise<void> {
     template,
     editTemplate,
     upscaleTemplate,
+    videoTemplate,
     credit: () => vast.accountCredit(),
     gallery,
     login: { configured: auth.configured, oidc, sessions },

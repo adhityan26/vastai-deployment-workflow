@@ -1,5 +1,5 @@
 import { camelCase, type AppsConfig } from "./config.js";
-import type { AgentStatus } from "./agent.js";
+import type { AgentStatus, VideoModelsStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
@@ -184,6 +184,7 @@ export class DestroyFailedError extends Error {
 export interface AgentLike {
   status(): Promise<AgentStatus>;
   extend(kind: "idle" | "failsafe", minutes: number): Promise<Record<string, unknown>>;
+  startVideoModels?(url?: string): Promise<VideoModelsStatus>;
   destroy(reason: "manual" | "watchdog"): Promise<void>;
 }
 
@@ -214,6 +215,11 @@ export interface LifecycleDeps {
   sleep?(seconds: number): Promise<void>;
   /** The profile's model files in download order, for the overall download progress. */
   profileModels?: readonly ModelSpec[];
+  /**
+   * The plain file names of the profile's video model files (empty without enabled video). A boot that does not
+   * include video (the agent's video_models.boot) does not download them, so the overall progress leaves them out.
+   */
+  videoModelFiles?: readonly string[];
   /** Where the boot console persists (BOOT_LOG_PATH); without it the console lives in memory only. */
   consoleStore?: ConsoleStoreLike;
   /** The usage history (USAGE_LOG_PATH); without it nothing is recorded and history() is empty. */
@@ -587,9 +593,43 @@ export class Lifecycle {
     return [wanted];
   }
 
-  /** The configured offer filters (throws VastError on a bad VAST_* value). */
-  private baseFilters(): OfferFilters {
-    return offerFiltersFromConfig(this.cfg);
+  /** The configured offer filters (throws VastError on a bad VAST_* value), with the disk this start needs. */
+  private baseFilters(choice: StartFilters): OfferFilters {
+    const base = offerFiltersFromConfig(this.cfg);
+    return { ...base, diskGb: this.diskFor(choice) };
+  }
+
+  /**
+   * The disk to rent: VAST_DISK_GB, or for a boot that includes the video model files at least VAST_VIDEO_DISK_GB
+   * (read only then). An image-only start rents, searches and pays exactly as before.
+   */
+  private diskFor(choice: StartFilters): number {
+    const disk = intCfg(this.cfg, "vastDiskGb", "VAST_DISK_GB", 1);
+    return choice.videoModels === true ? Math.max(disk, intCfg(this.cfg, "vastVideoDiskGb", "VAST_VIDEO_DISK_GB", 1)) : disk;
+  }
+
+  /** VIDEO_MODEL_LINK_* of this web app for the instance (its own checks of a link use them). */
+  private linkRules(): Record<string, string> {
+    const list = (key: string, env: string): string => {
+      const v = this.cfg[key];
+      if (!Array.isArray(v) || v.length === 0 || !v.every((h) => typeof h === "string" && /^[a-z0-9.-]{1,253}$/.test(h))) {
+        throw new Error(`${env} must list one or more host names`);
+      }
+      return v.join(",");
+    };
+    return {
+      VIDEO_MODEL_LINK_HOSTS: list("videoModelLinkHosts", "VIDEO_MODEL_LINK_HOSTS"),
+      VIDEO_MODEL_LINK_REDIRECT_DOMAINS: list("videoModelLinkRedirectDomains", "VIDEO_MODEL_LINK_REDIRECT_DOMAINS"),
+      VIDEO_MODEL_LINK_MAX_BYTES: String(intCfg(this.cfg, "videoModelLinkMaxBytes", "VIDEO_MODEL_LINK_MAX_BYTES", 1)),
+    };
+  }
+
+  /** The models this boot downloads, in order: every profile model, minus the video files unless it includes them. */
+  private bootModels(agent: AgentStatus | null): readonly ModelSpec[] {
+    const all = this.deps.profileModels ?? [];
+    const video = new Set(this.deps.videoModelFiles ?? []);
+    if (video.size === 0 || agent?.video_models?.boot === true) return all;
+    return all.filter((m) => !video.has(baseName(m.file)));
   }
 
   /**
@@ -599,7 +639,7 @@ export class Lifecycle {
    */
   private async offersFor(
     models: readonly string[],
-    base: OfferFilters = this.baseFilters(),
+    base: OfferFilters = this.baseFilters({}),
     avoid: ReadonlySet<number> = new Set(),
     choice: StartFilters = {},
   ): Promise<Offer[]> {
@@ -627,7 +667,7 @@ export class Lifecycle {
 
   /** Check the filter members of a request against the configured limits (a request can only narrow them). */
   parseFilters(raw: unknown): StartFilters {
-    return parseStartFilters(raw, { maxDph: this.baseFilters().maxDph });
+    return parseStartFilters(raw, { maxDph: this.baseFilters({}).maxDph });
   }
 
   /** The offer an explicit choice names, else the first of the filtered order; NoOffers/OfferGone when none. */
@@ -645,7 +685,7 @@ export class Lifecycle {
   /** The best offers now (after the configured limits, the bad-machine list and the filters), for the dialog. */
   async offers(gpu?: string, choice: StartFilters = {}): Promise<PublicOffer[]> {
     const models = this.modelsFor(gpu);
-    const list = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
+    const list = await this.offersFor(models, this.baseFilters(choice), await this.badMachines(), choice);
     return list.slice(0, intCfg(this.cfg, "startOfferListMax", "START_OFFER_LIST_MAX", 1)).map(publicOffer);
   }
 
@@ -676,7 +716,7 @@ export class Lifecycle {
   /** Every allowed model in config order with its cheapest matching offer (one Vast search). */
   async gpuOptions(choice: StartFilters = {}): Promise<GpuOption[]> {
     const models = this.allowedModels();
-    const offers = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
+    const offers = await this.offersFor(models, this.baseFilters(choice), await this.badMachines(), choice);
     return models.map((name) => {
       const best = offers.find((o) => normalizeGpuName(o.gpu_name as string) === name);
       if (best === undefined) return { name, dph: null, vram_gb: null, available: false, location: null, down_mbps: null };
@@ -699,11 +739,11 @@ export class Lifecycle {
    */
   async estimate(gpu?: string, choice: StartFilters = {}): Promise<CostEstimate> {
     const models = this.modelsFor(gpu);
-    const list = await this.offersFor(models, this.baseFilters(), await this.badMachines(), choice);
+    const list = await this.offersFor(models, this.baseFilters(choice), await this.badMachines(), choice);
     return this.estimateFor(this.pickOffer(list, choice));
   }
 
-  private buildEnv(hostname: string, token: string, authKey: string): Record<string, string> {
+  private buildEnv(hostname: string, token: string, authKey: string, choice: StartFilters = {}): Record<string, string> {
     const cfg = this.cfg;
     const comfyPort = intCfg(cfg, "comfyPort", "COMFY_PORT", 1);
     // Key names are the instance contract (spec 7.2); values come from config.
@@ -730,6 +770,12 @@ export class Lifecycle {
       ...(typeof cfg["comfyPreviewMethod"] === "string" && cfg["comfyPreviewMethod"] !== ""
         ? { COMFY_PREVIEW_METHOD: cfg["comfyPreviewMethod"] }
         : {}),
+      // Only when asked (Start dialog "Include video models"): without it the instance boots image-only (default).
+      ...(choice.videoModels === true ? { INCLUDE_VIDEO_MODELS: "true" } : {}),
+      // A link that replaces the pinned diffusion model (already checked by the route; the instance checks again).
+      ...(choice.videoModels === true && choice.videoModelUrl !== undefined ? { VIDEO_MODEL_URL: choice.videoModelUrl } : {}),
+      // The link rules travel with every start of a profile with video, so an on-demand link is checked the same way.
+      ...((this.deps.videoModelFiles ?? []).length > 0 ? this.linkRules() : {}),
     };
   }
 
@@ -800,7 +846,7 @@ export class Lifecycle {
     let filters: OfferFilters;
     let avoid: Set<number>;
     try {
-      filters = this.baseFilters();
+      filters = this.baseFilters(choice);
       avoid = await this.badMachines();
     } catch (err) {
       return failBeforeCreate(err, "config_invalid");
@@ -817,8 +863,8 @@ export class Lifecycle {
     try {
       request = {
         image: strCfg(this.cfg, "vastImage", "VAST_IMAGE"),
-        disk: intCfg(this.cfg, "vastDiskGb", "VAST_DISK_GB", 1),
-        env: this.buildEnv(hostname, token, authKey),
+        disk: this.diskFor(choice),
+        env: this.buildEnv(hostname, token, authKey, choice),
         onstart: ONSTART_CMD,
         label: `${LABEL_PREFIX}${LABEL_SEPARATOR}${hostname}`,
       };
@@ -1002,6 +1048,26 @@ export class Lifecycle {
     }
   }
 
+  /**
+   * Ask the active instance's agent to download the video model files (admin action). Errors keep the agent's
+   * status and code (AgentError); messages are scrubbed of the token and hostname.
+   */
+  async downloadVideoModels(url?: string): Promise<VideoModelsStatus> {
+    const record = await this.deps.registry.active();
+    if (record === null || record.vast_instance_id === null || record.status === "stopping") {
+      throw new NoActiveInstanceError();
+    }
+    this.secrets.add(record.agent_token);
+    const agent = this.deps.agentFor(record);
+    if (typeof agent.startVideoModels !== "function") throw new NoActiveInstanceError();
+    try {
+      return await agent.startVideoModels(url);
+    } catch (err) {
+      if (err instanceof Error) err.message = this.scrub(err.message);
+      throw err;
+    }
+  }
+
   /** Merged status of registry, Vast and agent. Never throws because one source is down. */
   async view(): Promise<StatusView> {
     const now = this.now();
@@ -1115,7 +1181,7 @@ export class Lifecycle {
       gpu_name: record === null ? null : (rowGpu ?? startGpu),
       start_failure: startFailure,
       server,
-      download: overallDownload(state, progress, this.deps.profileModels ?? []),
+      download: overallDownload(state, progress, this.bootModels(agent)),
       remaining: {
         idle_s: left(agent?.idle_destroy_at),
         failsafe_s: left(agent?.failsafe_at),
@@ -1691,7 +1757,7 @@ export class Lifecycle {
       return null;
     };
     if (record.status !== "booting" || id === null) return reset();
-    const dl = overallDownload(agent.state ?? "", agent.progress, this.deps.profileModels ?? []);
+    const dl = overallDownload(agent.state ?? "", agent.progress, this.bootModels(agent));
     if (dl === null) return reset();
     const observeS = intCfg(this.cfg, "modelEtaMinObserveS", "MODEL_ETA_MIN_OBSERVE_S", 1);
     const maxEtaS = intCfg(this.cfg, "bootMaxDownloadEtaMin", "BOOT_MAX_DOWNLOAD_ETA_MIN", 1) * SECONDS_PER_MINUTE;

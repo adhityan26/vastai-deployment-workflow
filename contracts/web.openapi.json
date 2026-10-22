@@ -228,7 +228,8 @@
                       "description": "Relative /api/image path"
                     }
                   }
-                }
+                },
+                "description": "The result images; an empty list for a video job (see videos)"
               },
               "seconds": {
                 "type": "number",
@@ -242,6 +243,27 @@
                 ],
                 "minimum": 0,
                 "description": "Seconds the job waited before ComfyUI started it, when the server saw that on the progress socket; null when unknown"
+              },
+              "videos": {
+                "type": "array",
+                "description": "Only for a video job: its files, at /api/video/{id}/{index}",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "index",
+                    "url"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "index": {
+                      "type": "integer"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "Relative /api/video path"
+                    }
+                  }
+                }
               }
             },
             "additionalProperties": false
@@ -296,7 +318,8 @@
           "upscale",
           "guidance",
           "advanced",
-          "menu"
+          "menu",
+          "video"
         ],
         "properties": {
           "state": {
@@ -712,7 +735,8 @@
                         "sparkles",
                         "expand",
                         "camera",
-                        "brush"
+                        "brush",
+                        "film"
                       ],
                       "description": "A built-in inline SVG icon of the page bundle"
                     },
@@ -725,7 +749,8 @@
                       "enum": [
                         "generate",
                         "edit",
-                        "upscale"
+                        "upscale",
+                        "video"
                       ],
                       "description": "Which request the entry sends"
                     },
@@ -1130,6 +1155,183 @@
                 "description": "GENERATE_MAX_NEGATIVE_PROMPT_CHARS (after trimming)"
               }
             }
+          },
+          "video": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "sizes",
+                  "durations",
+                  "download_bytes",
+                  "models",
+                  "max_bytes",
+                  "max_pixels",
+                  "types",
+                  "model"
+                ],
+                "properties": {
+                  "sizes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "width",
+                        "height"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "width": {
+                          "type": "integer"
+                        },
+                        "height": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  },
+                  "durations": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "seconds"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "seconds": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      }
+                    }
+                  },
+                  "max_bytes": {
+                    "type": "integer",
+                    "description": "Largest start image"
+                  },
+                  "max_pixels": {
+                    "type": "integer"
+                  },
+                  "types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "png",
+                        "jpeg",
+                        "webp"
+                      ]
+                    }
+                  },
+                  "download_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Size of all video model files (what Download video models may fetch)"
+                  },
+                  "models": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "state",
+                          "bytes_done",
+                          "bytes_total",
+                          "percent",
+                          "reason"
+                        ],
+                        "properties": {
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "unavailable",
+                              "not_installed",
+                              "downloading",
+                              "ready",
+                              "failed"
+                            ]
+                          },
+                          "bytes_done": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "bytes_total": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "percent": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Why a download failed (scrubbed agent text)"
+                          }
+                        }
+                      }
+                    ],
+                    "description": "The video model files on the running instance: ready after a boot with Include video models or a finished on-demand download; null without an instance or when its agent does not say"
+                  },
+                  "model": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "file",
+                          "linked",
+                          "sha256"
+                        ],
+                        "properties": {
+                          "file": {
+                            "type": "string"
+                          },
+                          "linked": {
+                            "type": "boolean",
+                            "description": "true: from a link, NOT integrity-pinned or licence-checked"
+                          },
+                          "sha256": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "sha256 of the linked file as it arrived (reported, not checked)"
+                          }
+                        }
+                      }
+                    ],
+                    "description": "The diffusion model in use on the instance; admins only (null for members and without an answer)"
+                  }
+                }
+              }
+            ],
+            "description": "Null when video is off on this server (no enabled video section, or its workflow did not load). Never frames, nodes or model files"
           }
         }
       },
@@ -2089,6 +2291,19 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
       }
@@ -2237,6 +2452,19 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
       }
@@ -2591,7 +2819,7 @@
             }
           },
           "400": {
-            "description": "Body does not match the schema (code invalid_body)",
+            "description": "Body does not match the schema (code invalid_body), or the job is a video job (code video_not_saveable: phase 1 saves images only)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2948,6 +3176,21 @@
                       "null"
                     ],
                     "description": "Rent exactly this offer from GET /api/offers instead of the first of the sort order; 409 offer_gone when it vanished or no longer passes the filters (nothing is rented, nothing billed)."
+                  },
+                  "video_models": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "true: include the video model files in the boot (rents max(VAST_DISK_GB, VAST_VIDEO_DISK_GB) of disk and sets INCLUDE_VIDEO_MODELS=true on the instance). Refused with 400 video_unavailable where video is off. Absent, null or false: the image-only boot"
+                  },
+                  "video_model_url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2048,
+                    "description": "Optional https Hugging Face file link (resolve or blob, .safetensors or .gguf) that replaces the video diffusion model for this boot; only with video_models true. Checked before anything is rented and again on the instance (redirect hosts, size cap VIDEO_MODEL_LINK_MAX_BYTES, file magic bytes). NOT integrity-pinned or licence-checked. Empty or null: the pinned model"
                   }
                 }
               }
@@ -3005,7 +3248,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed); video_models where video is off (code video_unavailable); a refused video_model_url (codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf); invalid_model_link also for a link without video_models)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4268,7 +4511,7 @@
             }
           },
           "404": {
-            "description": "Unknown job, image or not yours (code not_found)",
+            "description": "Unknown job, image or not yours, or a video job (code not_found; its file is at /api/video)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4621,8 +4864,469 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
+      }
+    },
+    "/api/video": {
+      "post": {
+        "operationId": "video",
+        "summary": "Make a short video (member or admin; shares the generate rate limit). 404 video_unavailable when the profile has no enabled video section. Text to video, or image to video when `image` (exactly one base64 start image, validated like an edit reference: magic bytes, size, pixels, side) is sent. Size and duration are names from video in /api/state. Poll the returned id with GET /api/generate/{id} (a video job times out after VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S); when done its file is listed under `videos` and served by GET /api/video/{id}/{index}. The job's label is \"Video: <size>, <duration>\" plus \", from an image\". A video cannot be saved to the gallery (phase 1).",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "prompt",
+                  "size",
+                  "duration"
+                ],
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "What should happen in the video; at most GENERATE_MAX_PROMPT_CHARS characters"
+                  },
+                  "size": {
+                    "type": "string",
+                    "description": "A size name from video.sizes in /api/state"
+                  },
+                  "duration": {
+                    "type": "string",
+                    "description": "A duration name from video.durations in /api/state"
+                  },
+                  "seed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "description": "Optional; random when absent"
+                  },
+                  "image": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Optional base64 PNG, JPEG or WebP start image (image to video); absent or null is text to video"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the video service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_size, unknown_duration, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than the video body limit, derived from EDIT_REFERENCE_MAX_BYTES for one base64 image and GENERATE_MAX_PROMPT_CHARS (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The instance is not ready (code not_ready), or its video model files are not there (code video_models_not_ready: not installed, still downloading, failed or not reported; never queued)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Generate rate limit reached (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Profile and workflow disagree (code profile_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ComfyUI unavailable (also while uploading the start image) or oversized response (codes comfy_unavailable, upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video is not available on this server: no enabled video section or its workflow did not load (code video_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video/{id}/{index}": {
+      "get": {
+        "operationId": "videoFile",
+        "summary": "Video bytes relayed from ComfyUI for a finished video job; nothing is stored (owner or admin). Served only when the file's first bytes are an mp4 (ISO base media ftyp of a video brand) or WebM (EBML DocType webm), with that type, X-Content-Type-Options nosniff, Cache-Control no-store and Content-Disposition inline; filename=\"video-<index>.<mp4|webm>\". No Range support: the page fetches the whole file once and plays it from a blob URL.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,3}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The video (Cache-Control: no-store)",
+            "content": {
+              "video/mp4": {},
+              "video/webm": {}
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route, including an account whose groups map to no role (code forbidden)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed id or index (code invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job, not a video job, not finished, no such file, video off, or not yours (code not_found)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The instance that made it is gone (code gone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Unsafe reference, a body that is not an mp4 or WebM video, a body over VIDEO_MAX_BYTES, or ComfyUI unavailable (codes video_rejected, video_too_large, video_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video-models": {
+      "post": {
+        "operationId": "videoModels",
+        "summary": "Download the video model files onto the running instance (admin). The agent checks that the instance serves, that ComfyUI has the video node classes and that the disk holds the files, then downloads only the missing files in the background (single-flight; a second call changes nothing). Image jobs keep running; the download counts as activity for the idle shutdown. Progress: video.models in /api/state. With `url`, that file replaces the diffusion model (NOT integrity-pinned or licence-checked; a .gguf file needs the GGUF loader node and is loaded with it). Text encoder and VAE stay pinned.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2048,
+                    "description": "Optional model link (same rules as video_model_url of /api/start); absent, null or blank: the pinned diffusion model (an active link is dropped)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "models"
+                  ],
+                  "properties": {
+                    "models": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "bytes_done",
+                            "bytes_total",
+                            "percent",
+                            "reason"
+                          ],
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "unavailable",
+                                "not_installed",
+                                "downloading",
+                                "ready",
+                                "failed"
+                              ]
+                            },
+                            "bytes_done": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "bytes_total": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "percent": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Why a download failed (scrubbed agent text)"
+                            }
+                          }
+                        }
+                      ],
+                      "description": "The video model files on the running instance: ready after a boot with Include video models or a finished on-demand download; null without an instance or when its agent does not say"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A body that does not match (code invalid_body), or a refused link: codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf), model_link_name_clash (the agent's)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video is not available on this server (code video_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No active instance (code no_instance), or the agent refused: codes video_unavailable, not_ready, video_nodes_missing (ComfyUI lacks the node classes), disk_insufficient (the instance disk is too small: start with Include video models), comfy_unavailable; for a link: model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed, video_gguf_loader_missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The agent could not be reached or answered with an error (code agent_unavailable), or an oversized answer (code upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

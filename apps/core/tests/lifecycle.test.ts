@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppsConfig } from "../src/config.js";
-import type { AgentStatus } from "../src/agent.js";
+import type { AgentStatus, VideoModelsStatus } from "../src/agent.js";
 import { AgentError } from "../src/agent.js";
 import { Unreachable } from "../src/http.js";
 import { AlreadyActiveError, Registry, type InstanceRecord, type NewRecord } from "../src/registry.js";
@@ -163,6 +163,11 @@ class FakeAgent implements AgentLike {
     this.calls.push("agent.extend");
     return this.extendImpl(kind, minutes);
   }
+  videoImpl: () => Promise<VideoModelsStatus> = async () => ({ state: "downloading", boot: false, bytes_done: 0, bytes_total: 50 });
+  async startVideoModels(): Promise<VideoModelsStatus> {
+    this.calls.push("agent.video");
+    return this.videoImpl();
+  }
   async destroy(reason: "manual" | "watchdog"): Promise<void> {
     this.calls.push(`agent.destroy:${reason}`);
     this.destroyCalls.push(reason);
@@ -188,6 +193,7 @@ function setup(
     authKey: () => Promise<string>;
     cfg: Record<string, unknown>;
     models: readonly ModelSpec[];
+    videoFiles: readonly string[];
     usage: UsageHistory;
   }> = {},
 ) {
@@ -210,6 +216,7 @@ function setup(
     agentFor: () => agent,
     clock,
     ...(over.models ? { profileModels: over.models } : {}),
+    ...(over.videoFiles ? { videoModelFiles: over.videoFiles } : {}),
     ...(over.usage ? { usage: over.usage } : {}),
     tsAuthKey: over.authKey ?? (async () => AUTH_KEY),
     newToken: () => TOKEN,
@@ -2132,5 +2139,80 @@ describe("Lifecycle advanced offer choice", () => {
     expect(life.parseFilters({ max_dph: 0.5 })).toEqual({ maxDph: 0.5 });
     expect(() => life.parseFilters({ max_dph: 0.51 })).toThrow(StartFilterError);
     expect(life.parseFilters(undefined)).toEqual({});
+  });
+});
+
+
+describe("video models at Start and on demand", () => {
+  it("an image-only start is unchanged: VAST_DISK_GB, no INCLUDE_VIDEO_MODELS, VAST_VIDEO_DISK_GB not even read", async () => {
+    const { life, vast } = setup({ cfg: { vastVideoDiskGb: "broken" } });
+    await life.start();
+    expect(vast.requests[0]!.disk).toBe(50);
+    expect(vast.requests[0]!.env).not.toHaveProperty("INCLUDE_VIDEO_MODELS");
+    expect(vast.searches[0]).toMatchObject({ diskGb: 50 });
+  });
+
+  it("a start that includes video rents and searches the larger disk and tells the instance", async () => {
+    const { life, vast } = setup({ cfg: { vastVideoDiskGb: 80 } });
+    await life.start(undefined, null, { videoModels: true });
+    expect(vast.requests[0]!.disk).toBe(80);
+    expect(vast.requests[0]!.env["INCLUDE_VIDEO_MODELS"]).toBe("true");
+    expect(vast.searches[0]).toMatchObject({ diskGb: 80 });
+    const big = setup({ cfg: { vastVideoDiskGb: 20, vastDiskGb: 60 } });
+    await big.life.start(undefined, null, { videoModels: true });
+    expect(big.vast.requests[0]!.disk).toBe(60); // never less than VAST_DISK_GB
+  });
+
+  it("a link travels as VIDEO_MODEL_URL with the video models only, and the link rules with every start of a profile with video", async () => {
+    const link = "https://huggingface.co/o/r/resolve/main/m.safetensors"; // config-lint: ok (test fixture)
+    const rules = { videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["huggingface.co", "hf.co"], videoModelLinkMaxBytes: 1000 };
+    const withVideo = setup({ cfg: { vastVideoDiskGb: 80, ...rules }, videoFiles: ["v.safetensors"] });
+    await withVideo.life.start(undefined, null, { videoModels: true, videoModelUrl: link });
+    expect(withVideo.vast.requests[0]!.env).toMatchObject({
+      VIDEO_MODEL_URL: link, VIDEO_MODEL_LINK_HOSTS: "huggingface.co", VIDEO_MODEL_LINK_REDIRECT_DOMAINS: "huggingface.co,hf.co", VIDEO_MODEL_LINK_MAX_BYTES: "1000",
+    });
+    const noVideoBox = setup({ cfg: rules, videoFiles: ["v.safetensors"] });
+    await noVideoBox.life.start(undefined, null, { videoModelUrl: link });
+    expect(noVideoBox.vast.requests[0]!.env).not.toHaveProperty("VIDEO_MODEL_URL");
+    expect(noVideoBox.vast.requests[0]!.env).toHaveProperty("VIDEO_MODEL_LINK_HOSTS");
+    const bad = setup({ cfg: { ...rules, videoModelLinkHosts: ["evil host"] }, videoFiles: ["v.safetensors"] });
+    expect(((await errorOf(bad.life.start())) as StartError).reason).toBe("config_invalid");
+  });
+
+  it("the estimate and the offer lists search the disk of the chosen boot", async () => {
+    const { life, vast } = setup({ cfg: { vastVideoDiskGb: 80 } });
+    await life.estimate(undefined, { videoModels: true });
+    await life.offers(undefined, {});
+    await life.gpuOptions({ videoModels: true });
+    expect(vast.searches.map((f) => f.diskGb)).toEqual([80, 50, 80]);
+  });
+
+  it("the overall download of an image-only boot leaves the video files out", async () => {
+    const models = [{ file: "a.bin", size_bytes: 10 }, { file: "sub/v.bin", size_bytes: 1000 }];
+    const { life, vast, agent } = setup({ models, videoFiles: ["v.bin"], cfg: { videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["hf.co"], videoModelLinkMaxBytes: 10 } });
+    await life.start();
+    vast.instances[0]!.actual_status = "running";
+    agent.statusImpl = async () => status("downloading", { progress: { phase: "models", file: "a.bin", bytes_done: 5, bytes_total: 10 } });
+    expect((await life.view()).download).toMatchObject({ files_total: 1, bytes_total: 10, bytes_done: 5 });
+    agent.statusImpl = async () =>
+      status("downloading", {
+        progress: { phase: "models", file: "a.bin", bytes_done: 5, bytes_total: 10 },
+        video_models: { state: "not_installed", boot: true, bytes_done: 0, bytes_total: 1000 },
+      });
+    expect((await life.view()).download).toMatchObject({ files_total: 2, bytes_total: 1010, bytes_done: 5 });
+  });
+
+  it("downloadVideoModels forwards to the active instance's agent, scrubbed, and needs an instance", async () => {
+    const { life, agent, calls } = setup();
+    await expect(life.downloadVideoModels()).rejects.toThrow(/no active instance/);
+    await life.start();
+    expect(await life.downloadVideoModels()).toEqual({ state: "downloading", boot: false, bytes_done: 0, bytes_total: 50 });
+    expect(calls).toContain("agent.video");
+    agent.videoImpl = async () => {
+      throw new AgentError(409, `video models failed with HTTP 409: disk too small (${TOKEN})`, "disk_insufficient");
+    };
+    const err = (await errorOf(life.downloadVideoModels())) as AgentError;
+    expect(err.code).toBe("disk_insufficient");
+    expect(err.message).not.toContain(TOKEN);
   });
 });

@@ -103,12 +103,16 @@ export class ComfyClient {
     return entry && typeof entry === "object" ? (entry as HistoryEntry) : null;
   }
 
-  async view(filename: string, subfolder: string, type: ViewType): Promise<{ bytes: Buffer; contentType: string }> {
+  /**
+   * Download one file from /view. `limits` replaces the image bounds (WEB_IMAGE_MAX_BYTES, WEB_IMAGE_TIMEOUT_S) for
+   * a larger file such as a video (VIDEO_MAX_BYTES, VIDEO_VIEW_TIMEOUT_S, read by the caller at startup).
+   */
+  async view(filename: string, subfolder: string, type: ViewType, limits?: { maxBytes: number; timeoutMs: number }): Promise<{ bytes: Buffer; contentType: string }> {
     safeSegment("filename", filename, false);
     safeSegment("subfolder", subfolder, true);
     if (!(VIEW_TYPES as readonly string[]).includes(type)) throw new ComfyError(0, "type must be input, output or temp");
     const q = new URLSearchParams({ filename, subfolder, type });
-    const reply = await this.call("GET", `/view?${q.toString()}`, undefined, this.imageMax, this.imageMs);
+    const reply = await this.call("GET", `/view?${q.toString()}`, undefined, limits?.maxBytes ?? this.imageMax, limits?.timeoutMs ?? this.imageMs);
     if (reply.status !== 200) this.fail("view", reply);
     return { bytes: reply.body, contentType: reply.contentType };
   }
