@@ -131,6 +131,8 @@ export interface VideoInfo {
   download_bytes: number;
   /** The instance's video model files; null without an instance or when it does not say. */
   models: VideoModelsView | null;
+  /** The diffusion model in use (admins only): pinned, or linked (not integrity-pinned) with its sha256. */
+  model: { file: string; linked: boolean; sha256: string | null } | null;
 }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
@@ -346,11 +348,18 @@ function parseVideo(v: unknown): VideoInfo | null {
     types: types as string[],
     download_bytes: Number.isSafeInteger(download) && (download as number) >= 0 ? (download as number) : 0,
     models: parseVideoModels(v["models"]),
+    model: parseVideoModel(v["model"]),
   };
 }
 
 const VIDEO_MODEL_STATES: readonly VideoModelsState[] = ["unavailable", "not_installed", "downloading", "ready", "failed"];
 const count = (v: unknown): number => (Number.isSafeInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+
+function parseVideoModel(v: unknown): VideoInfo["model"] {
+  if (!isObj(v) || typeof v["file"] !== "string" || v["file"] === "" || v["file"].length > 128) return null;
+  const sha = typeof v["sha256"] === "string" && /^[0-9a-f]{64}$/.test(v["sha256"]) ? v["sha256"] : null;
+  return { file: v["file"], linked: v["linked"] === true, sha256: sha };
+}
 
 function parseVideoModels(v: unknown): VideoModelsView | null {
   if (!isObj(v) || !(VIDEO_MODEL_STATES as readonly unknown[]).includes(v["state"])) return null;
@@ -1296,6 +1305,14 @@ export function videoLabel(size: string, duration: string, fromImage: boolean): 
   return `Video: ${size}, ${duration}${fromImage ? ", from an image" : ""}`;
 }
 
+/** What an admin must know before linking a model (shown next to both link inputs and with a linked model in use). */
+export const LINK_NOTICE =
+  "A linked model is NOT integrity-pinned or licence-checked: only link a file you trust. Hugging Face file links " +
+  "only (.safetensors or .gguf); it replaces the video diffusion model, the text encoder and VAE stay pinned. A .gguf " +
+  "file is loaded with the GGUF loader, which may not support this model (untested).";
+/** Longest link the server accepts. */
+export const MODEL_LINK_MAX_CHARS = 2048;
+
 // Where the Start dialog's "Include video models" choice is remembered in this browser ("1" or "0", a preference).
 export const START_VIDEO_STORAGE_KEY = "vast-comfy.start-video"; // config-lint: ok (browser storage key, not configuration)
 
@@ -1317,8 +1334,12 @@ export function videoModelsNote(v: VideoInfo, admin: boolean): { text: string; d
   const m = v.models;
   if (m === null) return { text: "The instance does not report its video models yet. Start an instance, or wait until it is ready.", download: false };
   switch (m.state) {
-    case "ready":
-      return { text: "", download: false };
+    case "ready": {
+      const model = v.model;
+      if (!admin || model === null || !model.linked) return { text: "", download: false };
+      const sha = model.sha256 === null ? "" : ` sha256 ${model.sha256}.`;
+      return { text: `Video model in use: ${model.file}, from a link. ${LINK_NOTICE}${sha}`, download: false };
+    }
     case "downloading": {
       const pct = m.percent === null ? "" : ` (${m.percent}%)`;
       const size = m.bytes_total > 0 ? `: ${gigabytes(m.bytes_done)} of ${gigabytes(m.bytes_total)}${pct}` : pct;

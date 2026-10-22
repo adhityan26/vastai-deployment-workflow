@@ -277,6 +277,8 @@ export interface VideoDeps {
   newName?: () => string;
   /** The progress socket's client id; ComfyUI then sends this job's progress and previews there. */
   clientId?: string;
+  /** The instance's linked diffusion model (its plain file name) when it uses one instead of the pinned model. */
+  diffusionFile?: string;
 }
 
 export interface VideoRequest {
@@ -301,7 +303,13 @@ export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ pro
   const seed = checkPromptAndSeed(deps.cfg, deps.random, { prompt: input.prompt, seed: input.seed });
   if (typeof input.size !== "string") throw new GenerateInputError("unknown_size", "size is not offered for video");
   if (typeof input.duration !== "string") throw new GenerateInputError("unknown_duration", "duration is not offered for video");
-  const fields = { prompt: input.prompt as string, seed, size: input.size, duration: input.duration };
+  const fields = {
+    prompt: input.prompt as string,
+    seed,
+    size: input.size,
+    duration: input.duration,
+    ...(deps.diffusionFile === undefined ? {} : { diffusionFile: deps.diffusionFile }),
+  };
   const wanted = input.image !== undefined && input.image !== null;
   // Exactly one start image, decoded and checked like a reference (anything but a base64 string is refused).
   const [image] = wanted ? decodeReferences([input.image], referenceLimits(deps.cfg)) : [];

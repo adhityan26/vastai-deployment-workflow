@@ -19,6 +19,8 @@ export interface StartFilters {
   offerId?: number;
   /** Include the profile's video model files in the boot (a larger disk, INCLUDE_VIDEO_MODELS on the instance). */
   videoModels?: true;
+  /** A checked link (canonical resolve URL) replacing the video diffusion model; set by the route, never parsed here. */
+  videoModelUrl?: string;
 }
 
 export class StartFilterError extends Error {

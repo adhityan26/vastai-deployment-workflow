@@ -120,6 +120,8 @@ import {
   usableDefaults,
   upscaleAsEdit,
   VIDEO_WAIT_TEXT,
+  LINK_NOTICE,
+  MODEL_LINK_MAX_CHARS,
   START_VIDEO_STORAGE_KEY,
   videoDownloadLabel,
   videoModelsNote,
@@ -672,6 +674,20 @@ export function mountApp(doc: Document, env: Env): App {
       const videoSize = state?.video?.download_bytes ?? 0;
       videoRow.append(videoBox, make("span", ` Include video models (about ${(videoSize / 1e9).toFixed(1)} GB more to download, a larger disk; the boot takes longer)`));
       videoRow.hidden = !offersVideo;
+      // An optional link that replaces the video diffusion model for this boot (only with the box ticked; never stored).
+      const linkRow = make("div", undefined, "start-field");
+      linkRow.hidden = !offersVideo;
+      const linkLabel = make("label", "Video model link (optional)");
+      linkLabel.htmlFor = "start-video-url";
+      const linkIn = make("input");
+      linkIn.id = "start-video-url";
+      linkIn.type = "url";
+      linkIn.maxLength = MODEL_LINK_MAX_CHARS;
+      linkIn.autocomplete = "off";
+      linkIn.spellcheck = false;
+      linkIn.placeholder = "huggingface.co/<owner>/<repo>/resolve/<revision>/<file>";
+      linkIn.disabled = !includeVideo;
+      linkRow.append(linkLabel, linkIn, make("p", LINK_NOTICE, "muted"));
       /** The query of the estimate and the lists: the filters, plus the video choice when it is ticked. */
       const startQuery = (offer: number | null): string =>
         [filterQueryString(filters, offer), includeVideo ? "video_models=true" : ""].filter((p) => p !== "").join("&");
@@ -685,7 +701,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, advanced, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, linkRow, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -773,6 +789,7 @@ export function mountApp(doc: Document, env: Env): App {
             gpu: chosen,
             ...filterBodyMembers(filters, chosenOffer),
             ...(includeVideo ? { video_models: true } : {}),
+            ...(includeVideo && linkIn.value.trim() !== "" ? { video_model_url: linkIn.value.trim() } : {}),
           });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
@@ -880,6 +897,7 @@ export function mountApp(doc: Document, env: Env): App {
       // The disk (and so the price and the offers) follow the video choice.
       videoBox.addEventListener("change", () => {
         includeVideo = videoBox.checked;
+        linkIn.disabled = !includeVideo;
         writeStartVideo(includeVideo);
         void onFiltersChanged();
       });
@@ -1250,6 +1268,8 @@ export function mountApp(doc: Document, env: Env): App {
     const note = s.video === null ? { text: "", download: false } : videoModelsNote(s.video, s.role === "admin");
     $("video-models-text").textContent = note.text;
     videoModelsBtn.hidden = !note.download;
+    $("video-models-link").hidden = !note.download;
+    $("video-models-link-note").textContent = LINK_NOTICE;
     videoModelsBtn.textContent = s.video === null ? "" : videoDownloadLabel(s.video);
     videoModelsBtn.disabled = videoModelsAsking || !GENERATE_READY.has(s.state);
     videoModelsBox.hidden = !filming || (note.text === "" && videoModelsError.hidden);
@@ -1261,8 +1281,10 @@ export function mountApp(doc: Document, env: Env): App {
     videoModelsAsking = true;
     videoModelsError.hidden = true;
     if (state) renderForm(state);
+    // The link is sent once and never stored in the browser.
+    const url = $<HTMLInputElement>("video-models-url").value.trim();
     try {
-      await call("POST", API.videoModels, {});
+      await call("POST", API.videoModels, url === "" ? {} : { url });
     } catch (err) {
       if (err instanceof AuthLostError) return;
       videoModelsError.textContent = err instanceof Error ? err.message : "The download could not be started.";

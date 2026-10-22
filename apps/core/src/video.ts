@@ -1,4 +1,5 @@
 import { GenerateInputError, ProfileError } from "./profile-errors.js";
+import { isLinkedModelName, loaderFor } from "./model-link.js";
 import { isPlainFileName, landsIn, parseSizeList, type ComfyPrompt, type ModelEntry, type ParamRef, type SizeSpec } from "./profile.js";
 
 // Video mode: text to video, or image to video with exactly one start image, through one model and native
@@ -44,7 +45,15 @@ export interface VideoInput {
   duration: string;
   /** The uploaded start image (image to video); absent for text to video. */
   startImage?: string;
+  /**
+   * A linked diffusion model the instance has in place of the pinned one (its plain file name, as the instance
+   * reports it): every input of the workflow that names the pinned diffusion file names this one instead.
+   */
+  diffusionFile?: string;
 }
+
+/** The ComfyUI folder of the diffusion model slot (the one a link may replace). */
+export const DIFFUSION_FOLDER = "models/diffusion_models";
 
 /** Node id of the LoadImage node the web app adds for a start image. */
 export const VIDEO_START_NODE = "video_start";
@@ -236,6 +245,32 @@ export function buildVideoPrompt(spec: VideoSpec, workflowJson: unknown, input: 
       throw new GenerateInputError("workflow_mismatch", `workflow lacks node ${r.node} input ${r.input}`);
     }
     node.inputs[r.input] = values[key];
+  }
+  if (input.diffusionFile !== undefined) {
+    const slot = spec.models.find((m) => m.dest === DIFFUSION_FOLDER);
+    if (slot === undefined || !isLinkedModelName(input.diffusionFile)) {
+      throw new GenerateInputError("workflow_mismatch", "the linked video model cannot be used with this workflow");
+    }
+    const loader = loaderFor(input.diffusionFile);
+    let used = 0;
+    for (const node of Object.values(copy)) {
+      for (const [k, v] of Object.entries(node.inputs ?? {})) {
+        if (v !== slot.file) continue;
+        used++;
+        if (loader === null) {
+          node.inputs[k] = input.diffusionFile;
+        } else {
+          // A .gguf file needs the GGUF loader: the native UNETLoader node becomes one (its only input is unet_name).
+          if (node.class_type !== "UNETLoader" || k !== "unet_name") {
+            throw new GenerateInputError("workflow_mismatch", "the workflow's diffusion model loader is not a UNETLoader");
+          }
+          node.class_type = loader;
+          node.inputs = { unet_name: input.diffusionFile };
+          break;
+        }
+      }
+    }
+    if (used === 0) throw new GenerateInputError("workflow_mismatch", `workflow does not load ${slot.file}`);
   }
   if (input.startImage !== undefined) {
     const target = copy[spec.startImage.node];

@@ -105,6 +105,11 @@
         <select id="video-duration" name="duration"></select>
         <div id="video-models" class="video-models" hidden>
           <p id="video-models-text" role="status"></p>
+          <div id="video-models-link" hidden>
+            <label for="video-models-url">Model link (optional)</label>
+            <input id="video-models-url" name="video_model_url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="huggingface.co/&lt;owner&gt;/&lt;repo&gt;/resolve/&lt;revision&gt;/&lt;file&gt;" aria-describedby="video-models-link-note">
+            <p id="video-models-link-note" class="muted"></p>
+          </div>
           <button id="video-models-download" type="button" hidden>Download video models</button>
           <p id="video-models-error" class="alert bad" role="alert" hidden></p>
         </div>

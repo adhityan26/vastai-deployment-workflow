@@ -151,7 +151,9 @@ describe("AgentClient video models", () => {
     const { client, seen } = await fake((s, res) => (s.url === "/video-models" ? json(res, 202, vm) : json(res, 200, { ...STATUS, video_models: vm })));
     expect((await client.status()).video_models).toEqual(vm);
     expect(await client.startVideoModels()).toEqual(vm);
-    expect(seen[1]).toMatchObject({ method: "POST", url: "/video-models", auth: `Bearer ${TOKEN}` });
+    expect(seen[1]).toMatchObject({ method: "POST", url: "/video-models", auth: `Bearer ${TOKEN}`, body: "{}" });
+    await client.startVideoModels("https://huggingface.co/o/r/resolve/main/m.safetensors"); // config-lint: ok (test fixture)
+    expect(JSON.parse(seen[2]!.body)).toEqual({ url: "https://huggingface.co/o/r/resolve/main/m.safetensors" }); // config-lint: ok (test fixture)
   });
 
   it("keeps the agent's refusal code and refuses an unusable answer", async () => {

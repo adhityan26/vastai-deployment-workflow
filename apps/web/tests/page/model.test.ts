@@ -1213,6 +1213,7 @@ describe("video", () => {
     types: ["png", "jpeg"],
     download_bytes: 18_000_000_000,
     models: { state: "ready" as const, bytes_done: 5, bytes_total: 5, percent: 100, reason: null },
+    model: null as { file: string; linked: boolean; sha256: string | null } | null,
   };
   const state = (over: Record<string, unknown> = {}) => parseState({ ...base, ...over })!;
   const entry = (over: Partial<MenuEntry> = {}): MenuEntry => ({ id: "t", title: "T", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true, ...over });
@@ -1270,6 +1271,13 @@ describe("video", () => {
     expect(videoModelsNote(at({ state: "failed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), false).text).toBe("The video model download failed. Ask an admin to try again.");
     expect(videoModelsNote(at(null), true).download).toBe(false);
     expect(videoModelsNote(at({ state: "unavailable", bytes_done: 0, bytes_total: 0, percent: null, reason: null }), true)).toEqual({ text: "This instance has no video models.", download: false });
+    // A linked model in use: admins are reminded it is not pinned; members are told nothing.
+    const linked = { ...video, model: { file: "better.gguf", linked: true, sha256: "a".repeat(64) } };
+    expect(videoModelsNote(linked, true).text).toContain("Video model in use: better.gguf, from a link. A linked model is NOT integrity-pinned or licence-checked");
+    expect(videoModelsNote(linked, true).text).toContain(`sha256 ${"a".repeat(64)}`);
+    expect(videoModelsNote(linked, false).text).toBe("");
+    expect(state({ video: { ...video, model: { file: "x.gguf", linked: true, sha256: "nothex" } } }).video!.model).toEqual({ file: "x.gguf", linked: true, sha256: null });
+    expect(state({ video: { ...video, model: { file: "" } } }).video!.model).toBeNull();
     expect(videoDownloadLabel(video)).toBe("Download video models (about 18.0 GB, several minutes)");
     expect(videoDownloadLabel({ ...video, download_bytes: 0 })).toBe("Download video models (several minutes)");
   });

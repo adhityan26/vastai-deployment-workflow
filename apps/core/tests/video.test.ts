@@ -171,6 +171,34 @@ describe("buildVideoPrompt", () => {
   });
 });
 
+describe("buildVideoPrompt with a linked diffusion model", () => {
+  const ok = { prompt: "x", seed: 1, size: "Landscape", duration: "About 3 s" };
+  it("names the linked file wherever the workflow named the pinned diffusion model", () => {
+    const pinned = (shipped().video.models as Doc[]).find((m) => m.dest.startsWith("models/diffusion_models"))!.file;
+    const p = buildVideoPrompt(spec(), template, { ...ok, diffusionFile: "better_unet.safetensors" });
+    expect(JSON.stringify(p)).not.toContain(pinned);
+    expect(p["1"]!.inputs["unet_name"]).toBe("better_unet.safetensors");
+    expect(p["2"]).toEqual(template["2"]); // text encoder and VAE stay pinned
+    expect(p["3"]).toEqual(template["3"]);
+  });
+
+  it("a .gguf file turns the UNETLoader into the GGUF loader with only its unet_name input", () => {
+    const p = buildVideoPrompt(spec(), template, { ...ok, diffusionFile: "better-Q5_K_M.gguf" });
+    expect(p["1"]).toEqual({ class_type: "UnetLoaderGGUF", inputs: { unet_name: "better-Q5_K_M.gguf" } });
+    expect(p["4"]!.inputs["model"]).toEqual(["1", 0]); // the sampler still reads node 1's model
+    expect(template["1"].class_type).toBe("UNETLoader"); // the template is not mutated
+    const odd = structuredClone(template);
+    odd["1"].class_type = "SomethingElse";
+    expect(() => buildVideoPrompt(spec(), odd, { ...ok, diffusionFile: "b.gguf" })).toThrow(expect.objectContaining({ code: "workflow_mismatch" }));
+  });
+
+  it("refuses a name that is not a plain .safetensors or .gguf file", () => {
+    for (const bad of ["../x.safetensors", "x.ckpt", "a/b.safetensors", ""]) {
+      expect(() => buildVideoPrompt(spec(), template, { ...ok, diffusionFile: bad })).toThrow(expect.objectContaining({ code: "workflow_mismatch" }));
+    }
+  });
+});
+
 describe("sniffVideo", () => {
   it("recognises mp4 (ISO base media with a ftyp box) and WebM by their first bytes", () => {
     expect(sniffVideo(mp4())).toBe("video/mp4");

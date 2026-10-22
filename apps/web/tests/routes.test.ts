@@ -337,6 +337,8 @@ async function harness(
     videoTimeoutS: 1800,
     videoMaxBytes: 65536,
     videoViewTimeoutS: 30,
+    videoModelLinkHosts: ["huggingface.co"],
+    vastVideoDiskGb: 80,
     bootLogMaxLines: 500,
     bootLogMaxLineChars: 400,
     bootLogPollMinS: 5,
@@ -2659,6 +2661,7 @@ describe("video", () => {
       durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
       download_bytes: 3000,
       models: { state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null },
+      model: null,
       max_bytes: 4096,
       max_pixels: 1_000_000,
       types: ["png", "jpeg", "webp"],
@@ -2890,6 +2893,102 @@ describe("video", () => {
     expect(off.json().error.code).toBe("video_unavailable");
     expect(h.vast.creates).toBe(0);
     expect((await post("/api/start", await admin(), { confirm: true, video_models: false })).statusCode).toBe(200);
+  });
+
+  const LINK = "https://huggingface.co/someone/better-video/resolve/main/better_unet.safetensors"; // config-lint: ok (test fixture)
+  const BAD_LINKS: [string, string][] = [
+    ["http://huggingface.co/o/r/resolve/main/m.safetensors", "invalid_model_link"], // config-lint: ok (test fixture)
+    ["https://user@huggingface.co/o/r/resolve/main/m.safetensors", "invalid_model_link"], // config-lint: ok (test fixture)
+    ["https://169.254.169.254/o/r/resolve/main/m.safetensors", "invalid_model_link"], // config-lint: ok (test fixture)
+    ["https://huggingface.co:8443/o/r/resolve/main/m.safetensors", "invalid_model_link"], // config-lint: ok (test fixture)
+    ["https://huggingface.co.evil.com/o/r/resolve/main/m.safetensors", "model_link_host_not_allowed"], // config-lint: ok (test fixture)
+    ["https://huggingface.co/o/r/resolve/main/%2e%2e/m.safetensors", "invalid_model_link"], // config-lint: ok (test fixture)
+    ["https://huggingface.co/o/r/resolve/main/m.ckpt", "model_link_unsupported_type"], // config-lint: ok (test fixture)
+  ];
+
+  it.each(BAD_LINKS)("Start refuses the link %s (%s) before anything is rented", async (url, code) => {
+    h = await harness({ profile: videoProfile(), ready: false });
+    const res = await post("/api/start", await admin(), { confirm: true, video_models: true, video_model_url: url });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.vast.creates).toBe(0);
+    expect(h.vast.searches).toHaveLength(0);
+  });
+
+  it("Start takes a link only with the video models; an empty link is the pinned model", async () => {
+    h = await harness({ profile: videoProfile(), ready: false });
+    const a = await admin();
+    const without = await post("/api/start", a, { confirm: true, video_model_url: LINK });
+    expect(without.statusCode).toBe(400);
+    expect(without.json().error.code).toBe("invalid_model_link");
+    expect(h.vast.creates).toBe(0);
+    const started = await post("/api/start", a, { confirm: true, video_models: true, video_model_url: LINK });
+    expect(started.statusCode, started.body).toBe(200);
+    expect(h.vast.creates).toBe(1);
+    h = await harness({ profile: videoProfile(), ready: false });
+    expect((await post("/api/start", await admin(), { confirm: true, video_models: true, video_model_url: "  " })).statusCode).toBe(200);
+    expect((await post("/api/start", await admin(), { confirm: true, video_models: true, video_model_url: "x".repeat(3000) })).statusCode).toBe(400);
+  });
+
+  it("Download video models passes a checked link (as its resolve URL) to the agent", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ state: "not_installed", boot: false, bytes_done: 0, bytes_total: 3000, reason: null }));
+    const res = await post("/api/video-models", await admin(), { url: `${LINK.replace("/resolve/", "/blob/")}?download=true` });
+    expect(res.statusCode).toBe(202);
+    const sent = h.agentSeen.find((x) => x.url === "/video-models")!;
+    expect(JSON.parse(sent.body)).toEqual({ url: LINK });
+    h.agentSeen.length = 0;
+    expect((await post("/api/video-models", await admin(), { url: null })).statusCode).toBe(202);
+    expect(JSON.parse(h.agentSeen.find((x) => x.url === "/video-models")!.body)).toEqual({});
+  });
+
+  it.each(BAD_LINKS)("Download video models refuses the link %s (%s) without asking the agent", async (url, code) => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ state: "not_installed", boot: false, bytes_done: 0, bytes_total: 3000, reason: null }));
+    const res = await post("/api/video-models", await admin(), { url });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.agentSeen.some((x) => x.url === "/video-models")).toBe(false);
+  });
+
+  it("passes the agent's link refusals: 400 for the link itself, 409 for what its host answered", async () => {
+    for (const [status, code] of [[400, "model_link_name_clash"], [409, "model_link_redirect_not_allowed"], [409, "model_link_too_large"]] as const) {
+      h = await harness({ profile: videoProfile() });
+      h.setAgent((s, res) => (s.url === "/video-models" ? json(res, status, { detail: { code, message: "refused" } }) : json(res, 200, agentStatus("ready"))));
+      const res = await post("/api/video-models", await admin(), { url: LINK });
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+    }
+  });
+
+  it("a video job after a linked download loads the linked file; admins see which model is in use", async () => {
+    h = await harness({ profile: videoProfile() });
+    const sha = "a".repeat(64);
+    h.setAgent(agentWith({ ...VM_READY, model: { file: "better_unet.safetensors", linked: true, sha256: sha } }));
+    h.setComfy(comfyVideo());
+    expect((await call("GET", "/api/state", await admin())).json().video.model).toEqual({ file: "better_unet.safetensors", linked: true, sha256: sha });
+    expect((await call("GET", "/api/state", await member())).json().video.model).toBeNull();
+    expect((await post("/api/video", await member(), ok)).statusCode).toBe(202);
+    const prompt = sentPrompt();
+    expect(prompt["1"].inputs.unet_name).toBe("better_unet.safetensors");
+    expect(JSON.stringify(prompt)).not.toContain("wan2.2_ti2v_5B_fp16");
+  });
+
+  it("a linked .gguf model is loaded with the GGUF loader", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ ...VM_READY, model: { file: "better-Q5_K_M.gguf", linked: true, sha256: null } }));
+    h.setComfy(comfyVideo());
+    expect((await post("/api/video", await member(), ok)).statusCode).toBe(202);
+    expect(sentPrompt()["1"]).toEqual({ class_type: "UnetLoaderGGUF", inputs: { unet_name: "better-Q5_K_M.gguf" } });
+  });
+
+  it("refuses a video job when the instance reports an unusable linked model name", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ ...VM_READY, model: { file: "../evil.safetensors", linked: true, sha256: null } }));
+    h.setComfy(comfyVideo());
+    const res = await post("/api/video", await member(), ok);
+    expect(res.statusCode).toBe(409);
+    expect(h.comfySeen).toHaveLength(0);
   });
 
   it("needs a session and a ready instance; the page may play blob videos (CSP media-src)", async () => {

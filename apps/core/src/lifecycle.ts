@@ -184,7 +184,7 @@ export class DestroyFailedError extends Error {
 export interface AgentLike {
   status(): Promise<AgentStatus>;
   extend(kind: "idle" | "failsafe", minutes: number): Promise<Record<string, unknown>>;
-  startVideoModels?(): Promise<VideoModelsStatus>;
+  startVideoModels?(url?: string): Promise<VideoModelsStatus>;
   destroy(reason: "manual" | "watchdog"): Promise<void>;
 }
 
@@ -608,6 +608,22 @@ export class Lifecycle {
     return choice.videoModels === true ? Math.max(disk, intCfg(this.cfg, "vastVideoDiskGb", "VAST_VIDEO_DISK_GB", 1)) : disk;
   }
 
+  /** VIDEO_MODEL_LINK_* of this web app for the instance (its own checks of a link use them). */
+  private linkRules(): Record<string, string> {
+    const list = (key: string, env: string): string => {
+      const v = this.cfg[key];
+      if (!Array.isArray(v) || v.length === 0 || !v.every((h) => typeof h === "string" && /^[a-z0-9.-]{1,253}$/.test(h))) {
+        throw new Error(`${env} must list one or more host names`);
+      }
+      return v.join(",");
+    };
+    return {
+      VIDEO_MODEL_LINK_HOSTS: list("videoModelLinkHosts", "VIDEO_MODEL_LINK_HOSTS"),
+      VIDEO_MODEL_LINK_REDIRECT_DOMAINS: list("videoModelLinkRedirectDomains", "VIDEO_MODEL_LINK_REDIRECT_DOMAINS"),
+      VIDEO_MODEL_LINK_MAX_BYTES: String(intCfg(this.cfg, "videoModelLinkMaxBytes", "VIDEO_MODEL_LINK_MAX_BYTES", 1)),
+    };
+  }
+
   /** The models this boot downloads, in order: every profile model, minus the video files unless it includes them. */
   private bootModels(agent: AgentStatus | null): readonly ModelSpec[] {
     const all = this.deps.profileModels ?? [];
@@ -756,6 +772,10 @@ export class Lifecycle {
         : {}),
       // Only when asked (Start dialog "Include video models"): without it the instance boots image-only (default).
       ...(choice.videoModels === true ? { INCLUDE_VIDEO_MODELS: "true" } : {}),
+      // A link that replaces the pinned diffusion model (already checked by the route; the instance checks again).
+      ...(choice.videoModels === true && choice.videoModelUrl !== undefined ? { VIDEO_MODEL_URL: choice.videoModelUrl } : {}),
+      // The link rules travel with every start of a profile with video, so an on-demand link is checked the same way.
+      ...((this.deps.videoModelFiles ?? []).length > 0 ? this.linkRules() : {}),
     };
   }
 
@@ -1032,7 +1052,7 @@ export class Lifecycle {
    * Ask the active instance's agent to download the video model files (admin action). Errors keep the agent's
    * status and code (AgentError); messages are scrubbed of the token and hostname.
    */
-  async downloadVideoModels(): Promise<VideoModelsStatus> {
+  async downloadVideoModels(url?: string): Promise<VideoModelsStatus> {
     const record = await this.deps.registry.active();
     if (record === null || record.vast_instance_id === null || record.status === "stopping") {
       throw new NoActiveInstanceError();
@@ -1041,7 +1061,7 @@ export class Lifecycle {
     const agent = this.deps.agentFor(record);
     if (typeof agent.startVideoModels !== "function") throw new NoActiveInstanceError();
     try {
-      return await agent.startVideoModels();
+      return await agent.startVideoModels(url);
     } catch (err) {
       if (err instanceof Error) err.message = this.scrub(err.message);
       throw err;

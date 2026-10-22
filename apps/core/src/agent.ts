@@ -50,6 +50,8 @@ export interface VideoModelsStatus {
   bytes_done: number;
   bytes_total: number;
   reason?: string | null;
+  /** The diffusion model in use: the pinned one, or a linked one (not integrity-pinned) with the sha256 that arrived. */
+  model?: { file: string; linked: boolean; sha256?: string | null } | null;
 }
 
 export class AgentClient {
@@ -124,8 +126,8 @@ export class AgentClient {
   }
 
   /** Ask the agent to download the missing video model files in the background (POST /video-models). */
-  async startVideoModels(): Promise<VideoModelsStatus> {
-    const reply = await this.call("POST", "/video-models", {});
+  async startVideoModels(url?: string): Promise<VideoModelsStatus> {
+    const reply = await this.call("POST", "/video-models", url === undefined ? {} : { url });
     if (reply.status < 200 || reply.status >= 300) this.fail("video models", reply);
     const body = parseJson(reply.body) as VideoModelsStatus | null;
     if (body === null || typeof body !== "object" || typeof body.state !== "string") {

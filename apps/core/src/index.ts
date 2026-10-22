@@ -9,6 +9,7 @@ export * from "./generate.js";
 export * from "./lifecycle.js";
 export * from "./offer-choice.js";
 export * from "./menu.js";
+export * from "./model-link.js";
 export * from "./profile.js";
 export * from "./progress.js";
 export * from "./references.js";

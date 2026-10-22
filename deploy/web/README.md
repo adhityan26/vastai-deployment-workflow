@@ -666,6 +666,59 @@ state is `failed` with "ComfyUI does not list ... yet; it needs a restart". It n
 would cut off running image jobs). The node classes are native, so they exist from ComfyUI's start; only the files
 are new.
 
+### A model link instead of the pinned diffusion model
+
+An admin may give a **link to a different video diffusion model**: the "Video model link (optional)" field under
+"Include video models" in the Start dialog (enabled only when the box is ticked; `video_model_url` in the Start
+body, `VIDEO_MODEL_URL` on the instance), or the "Model link (optional)" field next to "Download video models" in the
+Video tool (`url` of `POST /api/video-models`). The field is never stored in the browser. Empty means the pinned model
+(an on-demand download without a link also drops an active link). The link replaces only the diffusion model slot
+(the video `models` entry with dest `models/diffusion_models/`); the text encoder and VAE stay the pinned entries.
+
+**A linked model is NOT integrity-pinned or licence-checked** (the page says so next to both fields and, for admins,
+under the Video tool while a linked model is in use). There is no sha256 to compare with: the instance computes the
+sha256 of what arrived and reports it (boot log line "linked video model ... sha256 ... (not pinned)", the agent log,
+`/api/state` `video.model.sha256` for admins).
+
+Rules (untrusted input; checked by the web app before anything is rented or sent, and again on the instance):
+https only; ASCII only; no user info, no port, no percent-encoding, no query except `?download=true`, no fragment;
+the host must be exactly one of `VIDEO_MODEL_LINK_HOSTS` (default `huggingface.co`; IP literals, `localhost`, a
+trailing dot and look-alike hosts such as `huggingface.co.evil.com` are refused); the path must be
+`<owner>/<repo>/resolve|blob/<revision>/<path to file>` (a `blob` link becomes the `resolve` link); the file must end
+in `.safetensors` or `.gguf` (never a pickle format). The instance then downloads it with the boot's own downloader
+from the `resolve` URL, and every request of that download, each redirect hop included, is checked before it is sent:
+https, port 443, no user info, no IP literal, a host that is a link host or inside `VIDEO_MODEL_LINK_REDIRECT_DOMAINS`
+(default `huggingface.co,hf.co`, which covers Hugging Face's CDN hosts). The size comes from a HEAD on the instance
+(capped by `VIDEO_MODEL_LINK_MAX_BYTES`, default 20 GiB); the disk check runs before the download. After the download
+the file must be what its extension says (a GGUF file starts with `GGUF`; a safetensors file starts with the length
+of a JSON header that opens with `{` and fits in the file), else it is deleted and refused (`model_link_bad_file`).
+A linked file may not have the name of a pinned model (`model_link_name_clash`: it would overwrite it). The web app
+passes its `VIDEO_MODEL_LINK_*` values to the instance with every start of a profile with video.
+
+Error codes: `invalid_model_link`, `model_link_host_not_allowed`, `model_link_unsupported_type`,
+`model_link_name_clash` (400) and `model_link_too_large`, `model_link_unreachable`, `model_link_redirect_not_allowed`,
+`video_gguf_loader_missing` (409, from the instance). At boot a refused link fails the boot (`download_failed`, the
+code in the boot log) and the machine is released: the web app checks everything it can before renting, but the
+size, the redirects and the file itself can only be checked on the instance.
+
+The active link is kept on the instance (`video_link.json` in its state dir) and reported in the agent's status;
+video jobs then load the linked file: the web app names it in the workflow copy wherever the workflow named the
+pinned diffusion file. A `.safetensors` link keeps the native `UNETLoader`; a **`.gguf` link turns that node into
+`UnetLoaderGGUF`** (input `unet_name` only), and the instance requires that node class before the download (on
+demand: `video_gguf_loader_missing`) or at boot (`verify-nodes` fails, the boot log says `video_gguf_loader_missing`).
+
+**GGUF is UNVERIFIED for this model.** The instance installs only the ComfyUI-GGUF fork pinned in `nodes:` for the
+image model, `leejet/ComfyUI-GGUF` (its pin is unchanged). Whether that fork can load this video model's GGUF files
+is unknown; the GGUF loader usually used for this video model is the original `city96/ComfyUI-GGUF`, which could not
+load the image model ("Unknown model architecture", the reason the fork is used). If the fork cannot, the download and the node check still succeed, and the first video job
+fails at the loader: the page shows "Failed: UnetLoaderGGUF: ..." with ComfyUI's message (for the image model the
+original pack said "Unknown model architecture"). No second GGUF node pack is installed by this change.
+
+Decision: a link does **not** make `video.enabled: true` possible without the pins. Enabling still requires all
+three video files pinned in `models:`. Relaxing that only for the diffusion slot would change both profile loaders and
+the readiness rules for a small gain: the text encoder and VAE need the same `pin_model.py` step anyway, and the
+pinned diffusion model remains the default when no link is given.
+
 ### What the web app enforces
 
 The body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start image is checked like an
@@ -681,7 +734,7 @@ never served by `/api/image`.
 Not in phase 1, on purpose: **saving a video to the gallery.** The gallery's types, size limit and quotas are image
 ones (`POST /api/gallery` answers `video_not_saveable` for a video job, the page shows no Save button and auto-save
 skips videos); use Download. Also left out: a negative prompt or guidance for video, more than one start image, an
-end frame, sound, cancelling an on-demand download (it ends with the instance).
+end frame, sound, cancelling an on-demand download (it ends with the instance), links for the text encoder or VAE.
 
 Waiting: ComfyUI runs one job at a time. While a clip renders (many minutes), image jobs of other people wait in
 ComfyUI's queue, and their own `GENERATE_TIMEOUT_S` clock (600 s) runs from their submit: a long video can make a
@@ -695,8 +748,10 @@ format mp4 / codec h264 writes a browser-playable file and lists it under `image
 1280x704 x 121 frames on a 24 GB card, how long a clip takes on an A5000/3090/4090, the quality of the smaller sizes
 and of the shipped negative prompt, playback on iPhone and Android, the real file sizes, the longer boot with the
 box ticked, the on-demand download on a real instance (its speed beside running image jobs, the disk left on a
-default 50 GB instance, and whether ComfyUI lists the new files without a restart), and the price difference of
-the larger disk.
+default 50 GB instance, and whether ComfyUI lists the new files without a restart), the price difference of
+the larger disk, and model links: the CDN host names Hugging Face redirects to today (assumed inside
+`huggingface.co`/`hf.co`), the HEAD size after its redirect, a real linked download, and whether the pinned
+ComfyUI-GGUF fork loads this video model's GGUF files (it may well not; see above).
 
 ## Live progress and preview
 

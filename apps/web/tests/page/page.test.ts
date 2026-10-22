@@ -1860,6 +1860,34 @@ describe("video", () => {
       expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
     });
 
+    it("an admin may give a model link: it is sent once with the download, shown with its notice, never stored", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, { "POST /api/video-models": { status: 202, body: { models: missing } } });
+      chooseTool("video");
+      expect(q("#video-models-link")!.hidden).toBe(false);
+      expect(q("#video-models-link-note")!.textContent).toContain("NOT integrity-pinned or licence-checked");
+      const input = q<HTMLInputElement>("#video-models-url")!;
+      expect(input.type).toBe("url");
+      expect(input.maxLength).toBe(2048);
+      expect(input.autocomplete).toBe("off");
+      input.value = "  https://huggingface.co/o/r/resolve/main/m.gguf  ";
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(posts("/api/video-models")[0]!.body).toEqual({ url: "https://huggingface.co/o/r/resolve/main/m.gguf" });
+      expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+    });
+
+    it("shows the server's refusal of a link as text", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 400, body: { error: { code: "model_link_host_not_allowed", message: "<b>links are only accepted from the allowed model hosts</b>" } } },
+      });
+      chooseTool("video");
+      q<HTMLInputElement>("#video-models-url")!.value = "https://evil.example/o/r/resolve/main/m.gguf";
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(q("#video-models-error")!.textContent).toBe("<b>links are only accepted from the allowed model hosts</b>");
+      expect(q("#video-models-error b")).toBeNull();
+    });
+
     it("shows the server's refusal of the download, for example a disk that is too small", async () => {
       await mount({ role: "admin", menu, video: at(missing) }, {
         "POST /api/video-models": { status: 409, body: { error: { code: "disk_insufficient", message: "the instance disk is too small for the video models" } } },
@@ -2415,6 +2443,33 @@ describe("start dialog: Include video models", () => {
     q("#modal-ok")!.click();
     await flush();
     expect(posts("/api/start")[0]!.body).not.toHaveProperty("video_models");
+  });
+
+  it("the model link is enabled only when ticked, sent trimmed with the start, and never stored", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const link = q<HTMLInputElement>("#start-video-url")!;
+    expect(link.disabled).toBe(true);
+    expect(link.closest("div")!.textContent).toContain("NOT integrity-pinned or licence-checked");
+    const box = q<HTMLInputElement>("#start-video")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    await flush();
+    expect(link.disabled).toBe(false);
+    link.value = " https://huggingface.co/o/r/resolve/main/m.safetensors ";
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toMatchObject({ video_models: true, video_model_url: "https://huggingface.co/o/r/resolve/main/m.safetensors" });
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+  });
+
+  it("an empty link sends nothing; a link without the box is not sent", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    q<HTMLInputElement>("#start-video-url")!.value = "https://huggingface.co/o/r/resolve/main/m.safetensors";
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).not.toHaveProperty("video_model_url");
   });
 
   it("ticked: the lists and the estimate are for the larger disk, the start asks for the video models, and it is remembered", async () => {

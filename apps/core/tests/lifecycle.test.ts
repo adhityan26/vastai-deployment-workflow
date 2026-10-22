@@ -2163,6 +2163,22 @@ describe("video models at Start and on demand", () => {
     expect(big.vast.requests[0]!.disk).toBe(60); // never less than VAST_DISK_GB
   });
 
+  it("a link travels as VIDEO_MODEL_URL with the video models only, and the link rules with every start of a profile with video", async () => {
+    const link = "https://huggingface.co/o/r/resolve/main/m.safetensors"; // config-lint: ok (test fixture)
+    const rules = { videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["huggingface.co", "hf.co"], videoModelLinkMaxBytes: 1000 };
+    const withVideo = setup({ cfg: { vastVideoDiskGb: 80, ...rules }, videoFiles: ["v.safetensors"] });
+    await withVideo.life.start(undefined, null, { videoModels: true, videoModelUrl: link });
+    expect(withVideo.vast.requests[0]!.env).toMatchObject({
+      VIDEO_MODEL_URL: link, VIDEO_MODEL_LINK_HOSTS: "huggingface.co", VIDEO_MODEL_LINK_REDIRECT_DOMAINS: "huggingface.co,hf.co", VIDEO_MODEL_LINK_MAX_BYTES: "1000",
+    });
+    const noVideoBox = setup({ cfg: rules, videoFiles: ["v.safetensors"] });
+    await noVideoBox.life.start(undefined, null, { videoModelUrl: link });
+    expect(noVideoBox.vast.requests[0]!.env).not.toHaveProperty("VIDEO_MODEL_URL");
+    expect(noVideoBox.vast.requests[0]!.env).toHaveProperty("VIDEO_MODEL_LINK_HOSTS");
+    const bad = setup({ cfg: { ...rules, videoModelLinkHosts: ["evil host"] }, videoFiles: ["v.safetensors"] });
+    expect(((await errorOf(bad.life.start())) as StartError).reason).toBe("config_invalid");
+  });
+
   it("the estimate and the offer lists search the disk of the chosen boot", async () => {
     const { life, vast } = setup({ cfg: { vastVideoDiskGb: 80 } });
     await life.estimate(undefined, { videoModels: true });
@@ -2173,7 +2189,7 @@ describe("video models at Start and on demand", () => {
 
   it("the overall download of an image-only boot leaves the video files out", async () => {
     const models = [{ file: "a.bin", size_bytes: 10 }, { file: "sub/v.bin", size_bytes: 1000 }];
-    const { life, vast, agent } = setup({ models, videoFiles: ["v.bin"] });
+    const { life, vast, agent } = setup({ models, videoFiles: ["v.bin"], cfg: { videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["hf.co"], videoModelLinkMaxBytes: 10 } });
     await life.start();
     vast.instances[0]!.actual_status = "running";
     agent.statusImpl = async () => status("downloading", { progress: { phase: "models", file: "a.bin", bytes_done: 5, bytes_total: 10 } });

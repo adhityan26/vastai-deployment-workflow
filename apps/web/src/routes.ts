@@ -27,6 +27,10 @@ import {
   video as runVideo,
   checkVideoTemplate,
   sniffVideo,
+  ModelLinkError,
+  isLinkedModelName,
+  parseModelLink,
+  MODEL_LINK_MAX_CHARS,
   type VideoDeps,
   type VideoRequest,
   type UpscaleDeps,
@@ -183,6 +187,14 @@ function publicVideoModels(v: VideoModelsStatus | null | undefined, scrub: (t: s
   };
 }
 
+/** The diffusion model the instance uses, for admins: its file name, whether it came from a link, its sha256. */
+function publicVideoModel(v: VideoModelsStatus | null | undefined) {
+  const m = v?.model;
+  if (m === null || m === undefined || typeof m.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(m.file)) return null;
+  const sha = typeof m.sha256 === "string" && /^[0-9a-f]{64}$/.test(m.sha256) ? m.sha256 : null;
+  return { file: m.file, linked: m.linked === true, sha256: sha };
+}
+
 /** Why a video job cannot run yet (null when the instance has its video models). */
 function videoModelsRefusal(v: VideoModelsStatus | null | undefined): string | null {
   if (v?.state === "ready") return null;
@@ -316,7 +328,18 @@ const START_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["confirm"],
-  properties: { confirm: { const: true }, gpu: GPU_FIELD, ...FILTER_BODY_PROPS },
+  properties: {
+    confirm: { const: true },
+    gpu: GPU_FIELD,
+    ...FILTER_BODY_PROPS,
+    // A link that replaces the video diffusion model (only with video_models true); checked by parseModelLink.
+    video_model_url: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS },
+  },
+} as const;
+const VIDEO_MODELS_BODY = {
+  type: "object",
+  additionalProperties: false,
+  properties: { url: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS } },
 } as const;
 const ESTIMATE_QUERY = {
   type: "object",
@@ -461,6 +484,25 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       : deps.profile.models
           .filter((m) => videoSpec.models.some((v) => v.file === m.file.split("/").pop()))
           .reduce((sum, m) => sum + m.size_bytes, 0);
+  // The hosts a video model link may name (read only while video is on).
+  const linkHosts: string[] = (() => {
+    if (videoLimits === null) return [];
+    const v = cfg["videoModelLinkHosts"];
+    if (!Array.isArray(v) || v.length === 0 || !v.every((h) => typeof h === "string" && h !== "")) {
+      throw new Error("VIDEO_MODEL_LINK_HOSTS must list one or more host names");
+    }
+    return v as string[];
+  })();
+  /** A checked video model link (canonical URL), null for none, or the 400 reply already sent. */
+  const readModelLink = (reply: FastifyReply, raw: unknown): string | null | FastifyReply => {
+    if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return null;
+    try {
+      return parseModelLink(typeof raw === "string" ? raw.trim() : raw, linkHosts).url;
+    } catch (err) {
+      if (err instanceof ModelLinkError) return sendError(reply, 400, err.code, err.message);
+      throw err;
+    }
+  };
   /** How long a job of this kind may run before it is given up. */
   const timeoutOf = (kind: JobKind): number => (kind === "video" && videoTimeoutMs !== null ? videoTimeoutMs : generateTimeoutMs);
   // Live progress and previews: one ComfyUI websocket per job, open at most as long as a job may run.
@@ -730,6 +772,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               download_bytes: videoDownloadBytes,
               // The instance's own state of its video model files; null without an instance or an answer.
               models: publicVideoModels(view.agent?.video_models, scrub),
+              // Which diffusion model is in use (admins only): pinned, or linked and NOT integrity-pinned.
+              model: isAdmin ? publicVideoModel(view.agent?.video_models) : null,
               max_bytes: videoLimits.maxBytes,
               max_pixels: videoLimits.maxPixels,
               types: [...videoLimits.types],
@@ -854,6 +898,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     // A malformed filter is refused before it counts: only a well-formed attempt uses the hourly limit.
     const filters = readFilters(reply, req.body);
     if (filters === null) return reply;
+    // A video model link: only with the video models, checked before anything counts, is rented or is sent.
+    const link = readModelLink(reply, (req.body as { video_model_url?: unknown }).video_model_url);
+    if (typeof link === "object" && link !== null) return link;
+    if (link !== null && filters.videoModels !== true) {
+      return sendError(reply, 400, "invalid_model_link", "a video model link needs Include video models");
+    }
+    if (link !== null) filters.videoModelUrl = link;
     // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
     if (!startLimiter.take("start")) return sendError(reply, 429, "rate_limited", "too many start requests this hour");
     const { gpu } = req.body as { gpu?: string };
@@ -1123,13 +1174,22 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       // Never queue a video the instance cannot run: its model files must be there (boot or on-demand download).
       const missing = videoModelsRefusal(view.agent?.video_models);
       if (missing !== null) return sendError(reply, 409, "video_models_not_ready", missing);
+      // A linked diffusion model replaces the pinned file name in the workflow (the name is the agent's: checked).
+      const model = view.agent?.video_models?.model;
+      if (model?.linked === true && !isLinkedModelName(model.file)) {
+        return sendError(reply, 409, "video_models_not_ready", "the instance reports an unusable video model name");
+      }
+      const diffusionFile = model?.linked === true ? (model.file as string) : undefined;
       if (!generateLimiter.take(identity.subject)) {
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
       let submitted: Awaited<ReturnType<typeof runVideo>>;
       const started = await startLive(hostname, "video");
       try {
-        submitted = await runVideo({ ...videoDeps(hostname), ...(started ? { clientId: started.clientId } : {}) }, req.body as VideoRequest);
+        submitted = await runVideo(
+          { ...videoDeps(hostname), ...(started ? { clientId: started.clientId } : {}), ...(diffusionFile === undefined ? {} : { diffusionFile }) },
+          req.body as VideoRequest,
+        );
       } catch (err) {
         started?.live.end();
         return submitFailure(reply, err, "video");
@@ -1157,20 +1217,26 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   // Download the video model files onto the running instance (admin: it uses the instance's disk and network for
   // several minutes). The agent checks the instance state, the node classes and the disk first, and runs the download
   // in the background; GET /api/state video.models shows its progress.
-  const VIDEO_MODEL_REFUSALS = new Set(["video_unavailable", "not_ready", "video_nodes_missing", "disk_insufficient", "comfy_unavailable"]);
-  app.post("/api/video-models", { ...admin, schema: { body: EMPTY_BODY } }, async (req, reply) => {
+  const VIDEO_MODEL_REFUSALS = new Set([
+    "video_unavailable", "not_ready", "video_nodes_missing", "disk_insufficient", "comfy_unavailable",
+    "invalid_model_link", "model_link_host_not_allowed", "model_link_unsupported_type", "model_link_name_clash",
+    "model_link_too_large", "model_link_unreachable", "model_link_redirect_not_allowed",
+  ]);
+  app.post("/api/video-models", { ...admin, schema: { body: VIDEO_MODELS_BODY } }, async (req, reply) => {
     if (videoLimits === null || typeof deps.lifecycle.downloadVideoModels !== "function") {
       return sendError(reply, 404, "video_unavailable", "video is not available on this server");
     }
-    log("info", `video model download requested by ${userLabel(req.identity?.username) ?? "?"}`);
+    const link = readModelLink(reply, (req.body as { url?: unknown } | undefined)?.url);
+    if (typeof link === "object" && link !== null) return link;
+    log("info", `video model download requested by ${userLabel(req.identity?.username) ?? "?"}${link === null ? "" : " (linked model)"}`);
     try {
-      const status = await deps.lifecycle.downloadVideoModels();
+      const status = await deps.lifecycle.downloadVideoModels(...(link === null ? [] : [link]));
       return reply.code(202).send({ models: publicVideoModels(status, await activeScrubber()) });
     } catch (err) {
       if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
       if (err instanceof AgentError && err.code !== undefined && VIDEO_MODEL_REFUSALS.has(err.code)) {
         const text = err.message.replace(/^video models failed with HTTP \d+:\s*/, "");
-        return sendError(reply, 409, err.code, (await activeScrubber())(text));
+        return sendError(reply, err.status === 400 ? 400 : 409, err.code, (await activeScrubber())(text));
       }
       if (err instanceof ResponseTooLarge) return tooLarge(reply);
       log("warn", `video model download failed: ${errorName(err)}`);

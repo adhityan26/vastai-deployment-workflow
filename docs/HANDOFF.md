@@ -116,6 +116,17 @@ in the history and the file plays in browsers; whether the repo paths in the pin
 (iOS/Android), result file sizes, disk use on the instance and the longer boot (more download, slow-download guard).
 Known limit: image jobs queued behind a running video keep their own 600 s timeout and may fail on the page while
 ComfyUI still runs them later.
+**Model links (owner request 2026-10-22):** an admin may give a Hugging Face link (`.safetensors` or `.gguf`) that
+replaces the video diffusion model, in the Start dialog (`video_model_url`, only with Include video models) or with
+"Download video models" (`url`). Checked on the web (shape, host allow-list `VIDEO_MODEL_LINK_HOSTS`, type) and
+again on the instance (every redirect hop: https, 443, allowed domains; HEAD size cap `VIDEO_MODEL_LINK_MAX_BYTES`;
+disk; magic bytes after download). Not integrity-pinned or licence-checked: the sha256 of what arrived is reported
+(admins see it). Text encoder and VAE stay pinned; a link does not lift the pin requirement of `video.enabled`. A
+`.gguf` link swaps the workflow's `UNETLoader` for `UnetLoaderGGUF` and requires that class
+(`video_gguf_loader_missing`); whether the pinned `leejet/ComfyUI-GGUF` fork loads this video model's GGUF files is
+UNVERIFIED (the usual loader for it is `city96/ComfyUI-GGUF`, which failed for the image model); if not, the first job fails with
+"UnetLoaderGGUF: ...". Runbook: README "A model link instead of the pinned diffusion model". Not merged: the owner
+decides after review.
 Also UNVERIFIED: the on-demand download on a real instance (speed beside running jobs, room on a default 50 GB disk:
 it may well be refused as `disk_insufficient`), ComfyUI listing the new files without a restart, the price of the
 larger disk, and the slow-download guard on a boot with the video files (about 18 GB more).
