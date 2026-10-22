@@ -277,6 +277,9 @@ upscale:
 # ticked (INCLUDE_VIDEO_MODELS on the instance); such a boot also requires `node_classes` from ComfyUI's /object_info
 # before it reports ready (an image whose ComfyUI is too old for these nodes fails the boot loudly). Without it an
 # admin can download them later from the Video tool; the agent then checks the same node classes first.
+# An admin may also give a Hugging Face link (.safetensors or .gguf) that replaces the diffusion model entry below
+# (dest models/diffusion_models/) for that boot or download; NOT integrity-pinned or licence-checked, and it does not
+# replace the pins: `enabled: true` still needs all three files pinned (deploy/web/README.md "A model link ...").
 # The web app copies the workflow, sets the mapped inputs and, with a start image, adds one LoadImage node (id
 # `video_start`) wired to `start_image`. UNVERIFIED (never run on a real instance): the graph and its node and input
 # names, the h264 mp4 output of SaveVideo, VRAM use at these sizes on a 24 GB card, the time a clip takes, and that

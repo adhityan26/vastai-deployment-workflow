@@ -29,6 +29,18 @@ class DestroyInfo(BaseModel):
     last_error: str | None = None
 
 
+class VideoModelInfo(BaseModel):
+    """The diffusion model the video workflow loads: the pinned one, or a linked one (not integrity-pinned)."""
+    file: str
+    linked: bool
+    sha256: str | None = None
+
+
+class VideoModelsRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    url: str | None = None
+
+
 class VideoModelsStatus(BaseModel):
     """The video model files on this instance (vastcomfy_agent.video_models)."""
     state: Literal["unavailable", "not_installed", "downloading", "ready", "failed"]
@@ -37,6 +49,7 @@ class VideoModelsStatus(BaseModel):
     bytes_done: int
     bytes_total: int
     reason: str | None = None
+    model: VideoModelInfo | None = None
 
 
 class Status(BaseModel):

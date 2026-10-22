@@ -135,6 +135,37 @@
       "title": "State",
       "type": "string"
     },
+    "VideoModelInfo": {
+      "description": "The diffusion model the video workflow loads: the pinned one, or a linked one (not integrity-pinned).",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "linked": {
+          "title": "Linked",
+          "type": "boolean"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "file",
+        "linked"
+      ],
+      "title": "VideoModelInfo",
+      "type": "object"
+    },
     "VideoModelsStatus": {
       "description": "The video model files on this instance (vastcomfy_agent.video_models).",
       "properties": {
@@ -149,6 +180,17 @@
         "bytes_total": {
           "title": "Bytes Total",
           "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VideoModelInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "reason": {
           "anyOf": [

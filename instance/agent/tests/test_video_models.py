@@ -74,7 +74,7 @@ def make(tmp_path, *, enabled=True, comfy=None, free=10**12, state=State.READY, 
     vm = VideoModels(
         load_profile=lambda: load_profile(profile_path), comfy=comfy or FakeComfy(), comfy_dir=tmp_path / "comfy",
         free_bytes_fn=lambda p: free, disk_margin_mb=margin, include_at_boot=include, make_downloader=make_downloader,
-        states=states, spawn=(lambda job: job()) if run_now else jobs.append,
+        states=states, state_dir=tmp_path / "state", spawn=(lambda job: job()) if run_now else jobs.append,
     )
     return vm, seen, jobs
 
@@ -87,13 +87,13 @@ def put(tmp_path, folder, name, size):
 
 def test_not_installed_until_downloaded_then_ready(tmp_path):
     vm, seen, _ = make(tmp_path, include=False)
-    assert vm.view().model_dump() == {"state": "not_installed", "boot": False, "bytes_done": 0, "bytes_total": 50, "reason": None}
+    assert vm.view().model_dump() == {"state": "not_installed", "boot": False, "bytes_done": 0, "bytes_total": 50, "reason": None, "model": None}
     view = vm.start()
     assert view.state == "downloading" and view.bytes_total == 50
     # Only the video files, from their pinned revision, into their own folders.
     assert seen == ["/org/v/resolve/r1/sub/v1.bin", "/org/v/resolve/r1/sub/v2.bin"]
     assert (tmp_path / "comfy" / "models" / "w" / "v2.bin").stat().st_size == 30
-    assert vm.view().model_dump() == {"state": "ready", "boot": False, "bytes_done": 50, "bytes_total": 50, "reason": None}
+    assert vm.view().model_dump() == {"state": "ready", "boot": False, "bytes_done": 50, "bytes_total": 50, "reason": None, "model": None}
     assert not vm.busy()
 
 
@@ -207,7 +207,7 @@ def test_a_boot_that_included_video_says_so(tmp_path):
     vm, _, _ = make(tmp_path, include=True)
     put(tmp_path, "v", "v1.bin", 20)
     put(tmp_path, "w", "v2.bin", 30)
-    assert vm.view().model_dump() == {"state": "ready", "boot": True, "bytes_done": 50, "bytes_total": 50, "reason": None}
+    assert vm.view().model_dump() == {"state": "ready", "boot": True, "bytes_done": 50, "bytes_total": 50, "reason": None, "model": None}
 
 
 def test_comfy_client_lists_the_files_its_loaders_offer():
@@ -222,3 +222,145 @@ def test_comfy_client_lists_the_files_its_loaders_offer():
     down = ComfyClient("http://comfy", httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))))  # config-lint: ok (test fixture)
     with pytest.raises(ComfyUnavailable):
         down.unlisted_files(("VideoLoader",), ("v1.bin",))
+
+
+# --- a linked diffusion model (on demand) ---
+
+LINK_PROFILE = """
+name: image
+requires: {vram_gb: 24, disk_gb: 40}
+nodes: []
+models:
+  - {file: sub/unet.safetensors, repo: org/v, revision: r1, dest: models/diffusion_models/, size_bytes: 20}
+  - {file: sub/vae.safetensors, repo: org/v, revision: r1, dest: models/vae/, size_bytes: 30}
+workflows: [video.json]
+video:
+  enabled: true
+  workflow: video.json
+  models: [{file: unet.safetensors, dest: models/diffusion_models/}, {file: vae.safetensors, dest: models/vae/}]
+  node_classes: [VideoLoader, SaveVideo]
+"""
+SAFE = (2).to_bytes(8, "little") + b"{}"  # the smallest safetensors file: an empty JSON header
+LINK = "https://huggingface.co/someone/better/resolve/main/better.safetensors"
+
+
+def make_linked(tmp_path, *, size="10", redirect=None, max_bytes=1000, link_setup=True, listed=None, body=SAFE,
+                registered=("VideoLoader", "SaveVideo")):
+    from vastcomfy_agent.model_link import redirect_guard
+
+    (tmp_path / "image.yaml").write_text(LINK_PROFILE)
+    states = StateStore(tmp_path / "state", Clock())
+    if states.get().state is None:
+        for s in (State.BOOTING, State.DOWNLOADING, State.READY):
+            states.set(s)
+    pinned, linked = [], []
+
+    def pinned_handler(request):
+        pinned.append(request.url.path)
+        return httpx.Response(200, content=b"x" * {"unet.safetensors": 20, "vae.safetensors": 30}[request.url.path.rsplit("/", 1)[-1]])
+
+    def link_handler(request):
+        linked.append((request.method, str(request.url)))
+        if redirect is not None and request.url.host == "huggingface.co":
+            return httpx.Response(302, headers={"location": redirect})
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"content-length": size})
+        return httpx.Response(200, content=body)
+
+    plain = httpx.Client(transport=httpx.MockTransport(pinned_handler))
+    guarded = httpx.Client(transport=httpx.MockTransport(link_handler),
+                           event_hooks={"request": [redirect_guard(["huggingface.co"], ["huggingface.co", "hf.co"])]})
+    comfy = FakeComfy(registered=registered,
+                      listed=listed if listed is not None else ("unet.safetensors", "vae.safetensors", "better.safetensors", "better.gguf"))
+    vm = VideoModels(
+        load_profile=lambda: load_profile(tmp_path / "image.yaml"), comfy=comfy, comfy_dir=tmp_path / "comfy",
+        free_bytes_fn=lambda p: 10**12, disk_margin_mb=0, include_at_boot=False,
+        make_downloader=lambda on: Downloader(hf_base="https://hf.example", token="", client=plain, retries=1, backoff_s=0,
+                                              chunk_bytes=7, sleep=lambda s: None, on_progress=on),
+        states=states, state_dir=tmp_path / "state", link_hosts=["huggingface.co"], link_max_bytes=max_bytes,
+        make_link_client=(lambda: guarded) if link_setup else None,
+        make_link_downloader=(lambda client, link, on: Downloader(hf_base=f"https://{link.host}", token="", client=client, retries=1,
+                                                                  backoff_s=0, chunk_bytes=7, sleep=lambda s: None, on_progress=on))
+        if link_setup else None,
+        spawn=lambda job: job(),
+    )
+    return vm, pinned, linked
+
+
+def test_a_link_replaces_the_pinned_diffusion_model_and_becomes_the_active_one(tmp_path):
+    import hashlib
+
+    vm, pinned, linked = make_linked(tmp_path)
+    assert vm.view().model.model_dump() == {"file": "unet.safetensors", "linked": False, "sha256": None}
+    vm.start(LINK)
+    assert [p.rsplit("/", 1)[-1] for p in pinned] == ["vae.safetensors"]  # the pinned diffusion model is not fetched
+    assert ("HEAD", LINK) in linked and ("GET", LINK) in linked
+    view = vm.view()
+    assert view.state == "ready"
+    assert view.model.model_dump() == {"file": "better.safetensors", "linked": True, "sha256": hashlib.sha256(SAFE).hexdigest()}
+    assert (tmp_path / "comfy" / "models" / "diffusion_models" / "better.safetensors").stat().st_size == 10
+
+
+def test_without_a_link_the_pinned_model_is_used_again(tmp_path):
+    vm, pinned, _ = make_linked(tmp_path)
+    vm.start(LINK)
+    assert vm.view().model.linked is True
+    vm.start()
+    assert "unet.safetensors" in [p.rsplit("/", 1)[-1] for p in pinned]
+    assert vm.view().model.model_dump() == {"file": "unet.safetensors", "linked": False, "sha256": None}
+    assert not (tmp_path / "state" / "video_link.json").exists()
+
+
+@pytest.mark.parametrize("url, kw, status, code", [
+    ("http://huggingface.co/o/r/resolve/main/m.safetensors", {}, 400, "invalid_model_link"),
+    ("https://evil.example/o/r/resolve/main/m.safetensors", {}, 400, "model_link_host_not_allowed"),
+    ("https://huggingface.co/o/r/resolve/main/m.pt", {}, 400, "model_link_unsupported_type"),
+    ("https://huggingface.co/o/r/resolve/main/vae.safetensors", {}, 400, "model_link_name_clash"),
+    (LINK, {"size": "5000"}, 409, "model_link_too_large"),
+    (LINK, {"redirect": "https://evil.example/steal"}, 409, "model_link_redirect_not_allowed"),
+    (LINK, {"link_setup": False}, 400, "invalid_model_link"),
+])
+def test_a_refused_link_downloads_nothing(tmp_path, url, kw, status, code):
+    vm, pinned, linked = make_linked(tmp_path, **kw)
+    with pytest.raises(VideoModelsRefused) as err:
+        vm.start(url)
+    assert (err.value.status, err.value.code) == (status, code)
+    assert pinned == [] and not any(m == "GET" for m, _ in linked)
+    assert not any("evil" in u for _, u in linked)
+    assert vm.view().state == "not_installed" and vm.view().model.linked is False
+
+
+def test_a_linked_file_comfyui_does_not_list_is_not_activated(tmp_path):
+    vm, _, _ = make_linked(tmp_path, listed=("unet.safetensors", "vae.safetensors"))
+    vm.start(LINK)
+    assert vm.view().state == "failed" and "better.safetensors" in vm.view().reason
+    assert not (tmp_path / "state" / "video_link.json").exists()
+
+
+GGUF_LINK = "https://huggingface.co/someone/better/resolve/main/better.gguf"
+GGUF = b"GGUF" + b"\x03" + b"\x00" * 5
+
+
+def test_a_gguf_link_needs_the_gguf_loader_and_is_used_once_its_magic_bytes_match(tmp_path):
+    vm, pinned, linked = make_linked(tmp_path, body=GGUF, registered=("VideoLoader", "SaveVideo", "UnetLoaderGGUF"))
+    vm.start(GGUF_LINK)
+    view = vm.view()
+    assert view.state == "ready" and view.model.file == "better.gguf" and view.model.linked is True
+
+
+def test_a_gguf_link_without_the_gguf_loader_is_refused_before_the_download(tmp_path):
+    vm, pinned, linked = make_linked(tmp_path, body=GGUF)
+    with pytest.raises(VideoModelsRefused) as err:
+        vm.start(GGUF_LINK)
+    assert (err.value.status, err.value.code) == (409, "video_gguf_loader_missing")
+    assert pinned == [] and not any(m == "GET" for m, _ in linked)
+
+
+@pytest.mark.parametrize("url, body", [(GGUF_LINK, SAFE), (LINK, GGUF), (LINK, b"<html>not a model</html>")])
+def test_a_downloaded_file_that_is_not_what_its_extension_says_is_deleted_and_not_used(tmp_path, url, body):
+    vm, _, _ = make_linked(tmp_path, body=body, size=str(len(body)), registered=("VideoLoader", "SaveVideo", "UnetLoaderGGUF"))
+    vm.start(url)
+    view = vm.view()
+    assert view.state == "failed" and view.reason.startswith("model_link_bad_file")
+    assert view.model.linked is False
+    assert not list((tmp_path / "comfy" / "models" / "diffusion_models").glob("better.*"))

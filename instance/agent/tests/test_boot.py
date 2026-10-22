@@ -747,3 +747,122 @@ def test_verify_nodes_checks_the_video_classes_only_when_the_boot_includes_video
                        http_client=fake_comfy({"UnetLoaderGGUF"}, seen))
     assert seen == [f"/object_info/{c}" for c in asked]
     assert code == (0 if include == "false" else 12)
+
+
+# --- VIDEO_MODEL_URL: a linked diffusion model replaces the pinned one for this boot ---
+
+LINK_PROFILE = """
+name: image
+requires: {vram_gb: 24, disk_gb: 40}
+nodes: []
+models:
+  - {file: m.bin, repo: org/m, revision: r1, dest: models/x/, size_bytes: 10}
+  - {file: sub/unet.safetensors, repo: org/v, revision: r1, dest: models/diffusion_models/, size_bytes: 10}
+  - {file: sub/vae.safetensors, repo: org/v, revision: r1, dest: models/vae/, size_bytes: 10}
+workflows: [video.json]
+video:
+  enabled: true
+  workflow: video.json
+  models: [{file: unet.safetensors, dest: models/diffusion_models/}, {file: vae.safetensors, dest: models/vae/}]
+  node_classes: [SaveVideo]
+"""
+SAFE = (2).to_bytes(8, "little") + b"{}"  # the smallest safetensors file: an empty JSON header
+LINK = "https://huggingface.co/someone/better-video/resolve/main/better_unet.safetensors"
+
+
+def link_client(seen, *, size="10", redirect=None):
+    from vastcomfy_agent.model_link import redirect_guard
+
+    def handler(request):
+        seen.append((request.method, str(request.url)))
+        if redirect is not None and request.url.host == "huggingface.co":
+            return httpx.Response(302, headers={"location": redirect})
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"content-length": size})
+        return httpx.Response(200, content=SAFE)
+
+    return httpx.Client(transport=httpx.MockTransport(handler),
+                        event_hooks={"request": [redirect_guard(["huggingface.co"], ["huggingface.co", "hf.co"])]})
+
+
+def link_boot(tmp_path, url=LINK, **extra):
+    environ = prepared(tmp_path, INCLUDE_VIDEO_MODELS="true", VIDEO_MODEL_URL=url, **extra)
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True, exist_ok=True)
+    (prof / "image.yaml").write_text(LINK_PROFILE)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    return environ, ef
+
+
+def test_a_linked_model_replaces_the_pinned_diffusion_model_and_its_sha256_is_recorded(tmp_path, capsys):
+    import hashlib
+    import json
+
+    environ, ef = link_boot(tmp_path)
+    pinned, linked = [], []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(pinned),
+                       link_client=link_client(linked, redirect="https://cdn-lfs.huggingface.co/blob/x"),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 0
+    assert [p.rsplit("/", 1)[-1] for p in pinned] == ["m.bin", "vae.safetensors"]  # never the pinned diffusion model
+    assert ("HEAD", LINK) in linked and all(u.startswith("https://") for _, u in linked)
+    target = tmp_path / "comfy" / "models" / "diffusion_models" / "better_unet.safetensors"
+    assert target.read_bytes() == SAFE
+    active = json.loads((tmp_path / "state" / "video_link.json").read_text())
+    assert active["sha256"] == hashlib.sha256(SAFE).hexdigest() and active["name"] == "better_unet.safetensors"
+    assert "not pinned" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("url, client_kw, why", [
+    ("https://evil.example/o/r/resolve/main/x.safetensors", {}, "model_link_host_not_allowed"),
+    ("https://huggingface.co/o/r/resolve/main/x.ckpt", {}, "model_link_unsupported_type"),
+    (LINK, {"size": "999999999999"}, "model_link_too_large"),
+    (LINK, {"redirect": "https://169.254.169.254/latest/meta-data"}, "model_link_redirect_not_allowed"),
+    ("https://huggingface.co/o/r/resolve/main/unet.safetensors", {}, "model_link_name_clash"),
+])
+def test_a_refused_link_fails_the_boot_before_any_model_is_downloaded(tmp_path, capsys, url, client_kw, why):
+    environ, ef = link_boot(tmp_path, url, VIDEO_MODEL_LINK_MAX_BYTES="1048576")
+    pinned, linked = [], []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(pinned),
+                       link_client=link_client(linked, **client_kw), free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and states(tmp_path).get().reason == "download_failed"
+    assert pinned == [] and not any(m == "GET" for m, _ in linked)
+    assert why in capsys.readouterr().err
+    assert not any("169.254" in u for _, u in linked)
+
+
+def test_the_link_is_ignored_without_include_video_models(tmp_path):
+    environ = prepared(tmp_path, VIDEO_MODEL_URL=LINK)
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(LINK_PROFILE)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    pinned, linked = [], []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(pinned),
+                       link_client=link_client(linked), free_bytes_fn=lambda p: 10**12)
+    assert code == 0 and linked == [] and [p.rsplit("/", 1)[-1] for p in pinned] == ["m.bin"]
+
+
+def test_a_linked_file_with_the_wrong_magic_bytes_fails_the_boot_and_is_removed(tmp_path, capsys):
+    environ, ef = link_boot(tmp_path, LINK.replace(".safetensors", ".gguf"))
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client([]),
+                       link_client=link_client([], size="10"), free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and "model_link_bad_file" in capsys.readouterr().err
+    assert not (tmp_path / "comfy" / "models" / "diffusion_models" / "better_unet.gguf").exists()
+
+
+@pytest.mark.parametrize("registered, code", [({"SaveVideo", "UnetLoaderGGUF"}, 0), ({"SaveVideo"}, 12)])
+def test_verify_nodes_requires_the_gguf_loader_for_a_linked_gguf_model(tmp_path, capsys, registered, code):
+    from vastcomfy_agent.model_link import ActiveLink, write_active
+
+    environ, ef = link_boot(tmp_path, LINK.replace(".safetensors", ".gguf"))
+    states(tmp_path).set(State.DOWNLOADING)
+    write_active(tmp_path / "state", ActiveLink(url=LINK, repo="someone/better-video", revision="main", file="better_unet.gguf",
+                                                name="better_unet.gguf", dest="models/diffusion_models/", size_bytes=10, sha256="a" * 64))
+    seen = []
+    got, _ = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ, http_client=fake_comfy(registered, seen))
+    assert got == code and "/object_info/UnetLoaderGGUF" in seen
+    if code:
+        assert "video_gguf_loader_missing" in capsys.readouterr().err

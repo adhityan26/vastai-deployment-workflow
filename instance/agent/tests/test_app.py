@@ -187,8 +187,9 @@ class FakeVideo:
         self.refuse, self.calls = refuse, 0
         self.status = VideoModelsStatus(state="downloading", boot=False, bytes_done=0, bytes_total=50)
 
-    def start(self):
+    def start(self, url=None):
         self.calls += 1
+        self.url = url
         if self.refuse is not None:
             raise self.refuse
         return self.status
@@ -204,7 +205,7 @@ def test_video_models_starts_the_download_and_reports_it(env):
     deps.video = FakeVideo()
     res = client.post("/video-models", headers=AUTH)
     assert res.status_code == 202
-    assert res.json() == {"state": "downloading", "boot": False, "bytes_done": 0, "bytes_total": 50, "reason": None}
+    assert res.json() == {"state": "downloading", "boot": False, "bytes_done": 0, "bytes_total": 50, "reason": None, "model": None}
 
 
 def test_video_models_refusals_keep_their_status_and_code(env):
@@ -232,3 +233,13 @@ def test_status_carries_the_video_models_and_survives_their_errors(tmp_path, mak
 
     builder._video = boom
     assert builder.build().video_models is None
+
+
+def test_video_models_passes_a_link_and_refuses_other_body_members(env):
+    client, deps, _ = env
+    deps.video = FakeVideo()
+    assert client.post("/video-models", headers=AUTH, json={"url": "https://huggingface.co/o/r/resolve/main/m.safetensors"}).status_code == 202
+    assert deps.video.url == "https://huggingface.co/o/r/resolve/main/m.safetensors"
+    assert client.post("/video-models", headers=AUTH, json={}).status_code == 202 and deps.video.url is None
+    assert client.post("/video-models", headers=AUTH, json={"url": 5}).status_code == 422
+    assert client.post("/video-models", headers=AUTH, json={"path": "/etc/passwd"}).status_code == 422

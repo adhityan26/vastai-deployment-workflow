@@ -15,6 +15,7 @@ from .deadlines import DeadlineStore
 from .destroy_flow import DestroyFlow
 from .destroyer import Destroyer
 from .idle import IdleWatcher
+from .model_link import guarded_client
 from .profile import Downloader, free_bytes_of, load_profile
 from .video_models import VideoModels
 from .runner import Runner
@@ -87,6 +88,17 @@ def build(
             on_progress=on_progress, connections=cfg.download_connections,
         ),
         states=states,
+        state_dir=state_dir,
+        link_hosts=cfg.video_model_link_hosts,
+        link_max_bytes=cfg.video_model_link_max_bytes,
+        make_link_client=lambda: guarded_client(
+            cfg.video_model_link_hosts, cfg.video_model_link_redirect_domains, cfg.http_timeout_s,
+        ),
+        make_link_downloader=lambda client, link, on_progress: Downloader(
+            hf_base=f"https://{link.host}", token="", client=client, retries=cfg.download_retries,  # config-lint: ok (checked link host)
+            backoff_s=cfg.download_backoff_s, chunk_bytes=cfg.download_chunk_bytes, on_progress=on_progress,
+            connections=cfg.download_connections,
+        ),
     )
     runner = Runner(states=states, idle=idle, comfy=comfy, flow=flow, state_dir=state_dir, now=now,
                     destroy_failed_retry_s=cfg.destroy_failed_retry_s, busy=video.busy)

@@ -401,6 +401,54 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VideoModelInfo": {
+        "description": "The diffusion model the video workflow loads: the pinned one, or a linked one (not integrity-pinned).",
+        "properties": {
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "linked": {
+            "title": "Linked",
+            "type": "boolean"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          }
+        },
+        "required": [
+          "file",
+          "linked"
+        ],
+        "title": "VideoModelInfo",
+        "type": "object"
+      },
+      "VideoModelsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "VideoModelsRequest",
+        "type": "object"
+      },
       "VideoModelsStatus": {
         "description": "The video model files on this instance (vastcomfy_agent.video_models).",
         "properties": {
@@ -415,6 +463,16 @@
           "bytes_total": {
             "title": "Bytes Total",
             "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoModelInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reason": {
             "anyOf": [
@@ -641,7 +699,7 @@
     },
     "/video-models": {
       "post": {
-        "description": "Download the missing video model files in the background (single-flight); the progress is in /status.",
+        "description": "Download the missing video model files in the background (single-flight); the progress is in /status.\n`url`: a Hugging Face .safetensors link that replaces the diffusion model (NOT integrity-pinned).",
         "operationId": "start_video_models_video_models_post",
         "parameters": [
           {
@@ -661,6 +719,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/VideoModelsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "202": {
             "content": {
@@ -672,11 +747,14 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "description": "A refused model link (codes invalid_model_link, model_link_host_not_allowed, model_link_unsupported_type, model_link_name_clash)"
+          },
           "404": {
             "description": "No enabled video section (code video_unavailable)"
           },
           "409": {
-            "description": "Not now: the instance is not ready, ComfyUI lacks the video node classes, or the disk is too small (codes not_ready, video_nodes_missing, disk_insufficient)"
+            "description": "Not now: the instance is not ready, ComfyUI lacks the video node classes, the disk is too small, or the link's host refused (codes not_ready, video_nodes_missing, disk_insufficient, model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed)"
           },
           "422": {
             "content": {
