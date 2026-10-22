@@ -16,7 +16,6 @@ models:
   - {file: sub/v2.bin, repo: org/v, revision: r1, dest: models/w/, size_bytes: 30}
 workflows: [video.json]
 video:
-  enabled: ENABLED
   workflow: video.json
   models: [{file: v1.bin, dest: models/v/}, {file: v2.bin, dest: models/w/}]
   node_classes: [VideoLoader, SaveVideo]
@@ -51,7 +50,7 @@ def body_for(request):
 def make(tmp_path, *, enabled=True, comfy=None, free=10**12, state=State.READY, include=False, handler=None, run_now=True,
          margin=0):
     profile_path = tmp_path / "image.yaml"
-    profile_path.write_text(PROFILE.replace("ENABLED", "true" if enabled else "false"))
+    profile_path.write_text(PROFILE)
     states = StateStore(tmp_path / "state", Clock())
     if states.get().state is None:
         for s in (State.BOOTING, State.DOWNLOADING, State.READY):
@@ -72,7 +71,7 @@ def make(tmp_path, *, enabled=True, comfy=None, free=10**12, state=State.READY, 
                           sleep=lambda s: None, on_progress=on_progress)
 
     vm = VideoModels(
-        load_profile=lambda: load_profile(profile_path), comfy=comfy or FakeComfy(), comfy_dir=tmp_path / "comfy",
+        load_profile=lambda: load_profile(profile_path, video_enabled=enabled), comfy=comfy or FakeComfy(), comfy_dir=tmp_path / "comfy",
         free_bytes_fn=lambda p: free, disk_margin_mb=margin, include_at_boot=include, make_downloader=make_downloader,
         states=states, state_dir=tmp_path / "state", spawn=(lambda job: job()) if run_now else jobs.append,
     )
@@ -235,7 +234,6 @@ models:
   - {file: sub/vae.safetensors, repo: org/v, revision: r1, dest: models/vae/, size_bytes: 30}
 workflows: [video.json]
 video:
-  enabled: true
   workflow: video.json
   models: [{file: unet.safetensors, dest: models/diffusion_models/}, {file: vae.safetensors, dest: models/vae/}]
   node_classes: [VideoLoader, SaveVideo]
@@ -273,7 +271,7 @@ def make_linked(tmp_path, *, size="10", redirect=None, max_bytes=1000, link_setu
     comfy = FakeComfy(registered=registered,
                       listed=listed if listed is not None else ("unet.safetensors", "vae.safetensors", "better.safetensors", "better.gguf"))
     vm = VideoModels(
-        load_profile=lambda: load_profile(tmp_path / "image.yaml"), comfy=comfy, comfy_dir=tmp_path / "comfy",
+        load_profile=lambda: load_profile(tmp_path / "image.yaml", video_enabled=True), comfy=comfy, comfy_dir=tmp_path / "comfy",
         free_bytes_fn=lambda p: 10**12, disk_margin_mb=0, include_at_boot=False,
         make_downloader=lambda on: Downloader(hf_base="https://hf.example", token="", client=plain, retries=1, backoff_s=0,
                                               chunk_bytes=7, sleep=lambda s: None, on_progress=on),

@@ -102,7 +102,8 @@ class Profile:
     # Node classes boot always checks (the video section's are added only for a boot that includes video).
     provides_node_classes: tuple[str, ...] = ()
     video_enabled: bool = False
-    # With video enabled: the plain file names of its model files (entries of `models`) and its node classes.
+    # The video section's model file names (entries of `models` once pinned) and node classes, also while video is
+    # off (VIDEO_ENABLED false): a boot leaves those files out unless video is on and the boot includes it.
     video_models: tuple[str, ...] = ()
     video_node_classes: tuple[str, ...] = ()
 
@@ -208,16 +209,19 @@ def _dest_folder(dest: str) -> str:
     return dest.rstrip("/")
 
 
-def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...]) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
-    """(enabled, its model file names, its node classes). The web app owns the rest of `video:` (apps/core/src/video.ts);
-    this checks what decides downloads and the boot check, also while video is off, so a broken section fails
-    at boot and never mid-job. Enabled video needs each of its model files pinned in `models:` with its dest."""
+def _parse_video(
+    raw: object, models: list[ModelSpec], workflows: tuple[str, ...], enabled: bool,
+) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+    """(enabled, its model file names, its node classes). Video is switched by VIDEO_ENABLED (`enabled`), never by the
+    profile. The web app owns the rest of `video:` (apps/core/src/video.ts); this checks what decides downloads and
+    the boot check, also while video is off, so a broken section fails at boot and never mid-job. Enabled video
+    needs each of its model files pinned in `models:` with its dest."""
     if raw is None:
         return False, (), ()
     video = _mapping(raw, "video")
-    enabled = video.get("enabled")
-    if not isinstance(enabled, bool):
-        raise ProfileError("video enabled must be true or false")
+    if "enabled" in video:
+        # Refused rather than ignored: a profile line that looks like a switch but does nothing misleads.
+        raise ProfileError("video `enabled:` is not read from the profile any more: remove it and set VIDEO_ENABLED=true in .env")
     workflow = video.get("workflow")
     if not isinstance(workflow, str) or not NAME_RE.fullmatch(workflow):
         raise ProfileError(f"video workflow is not a valid workflow name: {workflow!r}")
@@ -235,15 +239,17 @@ def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...
         dest = _relative(_required(item.get("dest"), "video model dest"), "video model dest")
         wanted.append((name, dest))
     classes = _parse_node_classes(video.get("node_classes"), "video node_classes")
+    names = tuple(name for name, _ in wanted)
     if not enabled:
-        return False, (), ()
+        # Still named: a boot never downloads the video files while video is off, even once they are pinned.
+        return False, names, classes
     for name, dest in wanted:
         entry = next((m for m in models if PurePosixPath(m.file).name == name), None)
         if entry is None:
             raise ProfileError(f"video model {name} is not listed in models (pin it with scripts/pin_model.py)")
         if _dest_folder(entry.dest) != _dest_folder(dest):
             raise ProfileError(f"video model {name} must have dest {_dest_folder(dest)}/")
-    return True, tuple(name for name, _ in wanted), classes
+    return True, names, classes
 
 
 _STYLE_KINDS = ("lora", "preset")
@@ -283,7 +289,8 @@ def _check_styles(raw) -> None:
                 raise ProfileError(f"style {name}: references labels must be at most max non-empty strings")
 
 
-def load_profile(path: Path) -> Profile:
+def load_profile(path: Path, video_enabled: bool = False) -> Profile:
+    """The profile; `video_enabled` is VIDEO_ENABLED (the video section is validated either way)."""
     try:
         raw = yaml.safe_load(Path(path).read_text())
         models = []
@@ -306,7 +313,7 @@ def load_profile(path: Path) -> Profile:
         _check_styles(raw.get("styles"))
         workflows = tuple(_relative(w, "workflow") for w in raw.get("workflows", []))
         declared = _parse_node_classes(raw.get("provides_node_classes"))
-        video_enabled, video_files, video_classes = _parse_video(raw.get("video"), models, workflows)
+        video_enabled, video_files, video_classes = _parse_video(raw.get("video"), models, workflows, video_enabled)
         return Profile(
             name=_required(raw["name"], "name"),
             requires_vram_gb=int(raw["requires"]["vram_gb"]),
@@ -336,9 +343,9 @@ def video_model_specs(profile: Profile) -> tuple[ModelSpec, ...]:
 
 
 def boot_models(profile: Profile, include_video: bool) -> tuple[ModelSpec, ...]:
-    """What a boot downloads: every model, minus the video section's unless the boot includes video
-    (INCLUDE_VIDEO_MODELS). Profile order is kept."""
-    if include_video:
+    """What a boot downloads: every model, minus the video section's unless video is on (VIDEO_ENABLED) and the boot
+    includes it (INCLUDE_VIDEO_MODELS). Profile order is kept."""
+    if include_video and profile.video_enabled:
         return profile.models
     skip = set(video_model_specs(profile))
     return tuple(m for m in profile.models if m not in skip)
@@ -346,7 +353,7 @@ def boot_models(profile: Profile, include_video: bool) -> tuple[ModelSpec, ...]:
 
 def boot_node_classes(profile: Profile, include_video: bool) -> tuple[str, ...]:
     """What a boot requires from ComfyUI: the declared classes, plus the video section's when it includes video."""
-    extra = profile.video_node_classes if include_video else ()
+    extra = profile.video_node_classes if include_video and profile.video_enabled else ()
     return profile.provides_node_classes + tuple(c for c in extra if c not in profile.provides_node_classes)
 
 

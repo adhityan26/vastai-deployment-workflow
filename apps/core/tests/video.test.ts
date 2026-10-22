@@ -19,14 +19,13 @@ const template = JSON.parse(readFileSync(repo(`instance/workflows/${shipped().vi
 /** Pinned-looking entries for the section's three model files (a path in the repo, like the real pins). */
 const MODELS = (shipped().video.models as Doc[]).map((m) => ({ file: `split_files/x/${m.file}`, dest: m.dest }));
 
-/** The section as it ships, switched on. */
+/** The section as it ships (no switch in it: VIDEO_ENABLED is the third argument of parseVideo). */
 function section(mutate?: (s: Doc) => void): Doc {
   const s = structuredClone(shipped().video);
-  s.enabled = true;
   mutate?.(s);
   return s;
 }
-const spec = () => parseVideo(section(), MODELS)!;
+const spec = () => parseVideo(section(), MODELS, true)!;
 
 function png(width: number, height: number): Buffer {
   const ihdr = Buffer.alloc(25);
@@ -50,17 +49,29 @@ function mp4(brand = "isom", size = 32): Buffer {
 const webm = () => Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(16)]);
 
 describe("parseVideo", () => {
-  it("is null when absent or disabled, even before the model files are pinned", () => {
-    expect(parseVideo(undefined, [])).toBeNull();
-    expect(parseVideo(null, [])).toBeNull();
-    expect(parseVideo(section((s) => (s.enabled = false)), [])).toBeNull();
+  it("is null when absent or while VIDEO_ENABLED is off, even without pins", () => {
+    expect(parseVideo(undefined, [], true)).toBeNull();
+    expect(parseVideo(null, [], true)).toBeNull();
+    expect(parseVideo(section(), [])).toBeNull();
+    expect(parseVideo(section(), [], false)).toBeNull();
   });
 
-  it("the shipped profile has the section switched off (its model files are not pinned yet)", () => {
+  it("the shipped profile has no switch in it, is off by default and works with VIDEO_ENABLED (its files are pinned)", () => {
     const doc = shipped();
-    expect(doc.video.enabled).toBe(false);
+    expect(doc.video).not.toHaveProperty("enabled");
     expect(parseVideo(doc.video, doc.models)).toBeNull();
-    expect(() => parseVideo({ ...doc.video, enabled: true }, doc.models)).toThrow(/is not listed in models/);
+    const on = parseVideo(doc.video, doc.models, true)!;
+    expect(on.models.map((m) => m.file)).toEqual(["wan2.2_ti2v_5B_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "wan2.2_vae.safetensors"]);
+    for (const m of on.models) {
+      const entry = (doc.models as Doc[]).find((e) => e.file.split("/").pop() === m.file);
+      expect(entry, m.file).toMatchObject({ dest: `${m.dest}/`, revision: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    }
+  });
+
+  it("refuses a section that still says enabled, pointing to VIDEO_ENABLED (on or off)", () => {
+    for (const v of [true, false]) {
+      for (const on of [true, false]) expect(() => parseVideo(section((s) => (s.enabled = v)), MODELS, on)).toThrow(/set VIDEO_ENABLED=true in \.env/);
+    }
   });
 
   it("reads an enabled section: sizes, durations with their seconds, fps, the mapped inputs", () => {
@@ -77,15 +88,14 @@ describe("parseVideo", () => {
   });
 
   it("refuses an enabled section whose model is missing or downloads into another folder", () => {
-    expect(() => parseVideo(section(), MODELS.slice(1))).toThrow(/video model .* is not listed in models/);
+    expect(() => parseVideo(section(), MODELS.slice(1), true)).toThrow(/video model .* is not listed in models/);
     const wrong = MODELS.map((m, i) => (i === 2 ? { ...m, dest: "models/loras/" } : m));
-    expect(() => parseVideo(section(), wrong)).toThrow(/must have dest models\/vae\//);
-    expect(parseVideo(section(), MODELS.map((m) => ({ ...m, dest: m.dest.replace(/\/$/, "") })))).not.toBeNull();
+    expect(() => parseVideo(section(), wrong, true)).toThrow(/must have dest models\/vae\//);
+    expect(parseVideo(section(), MODELS.map((m) => ({ ...m, dest: m.dest.replace(/\/$/, "") })), true)).not.toBeNull();
   });
 
   it.each<[string, (s: Doc) => void]>([
     ["an unknown key", (s) => (s.extra = 1)],
-    ["enabled not boolean", (s) => (s.enabled = "yes")],
     ["a bad workflow name", (s) => (s.workflow = "../x.json")],
     ["no models", (s) => (s.models = [])],
     ["a model with a path", (s) => (s.models[0].file = "a/b.safetensors")],
@@ -114,8 +124,9 @@ describe("parseVideo", () => {
     ["a duration with an extra key", (s) => (s.durations[0].seconds = 3)],
     ["a blank duration name", (s) => (s.durations[0].name = " ")],
   ])("refuses a section with %s (also when disabled)", (name, mutate) => {
-    expect(() => parseVideo(section(mutate), MODELS)).toThrow(ProfileError);
-    if (name !== "enabled not boolean") expect(() => parseVideo(section((s) => { s.enabled = false; mutate(s); }), MODELS)).toThrow(ProfileError);
+    void name;
+    expect(() => parseVideo(section(mutate), MODELS, true)).toThrow(ProfileError);
+    expect(() => parseVideo(section(mutate), MODELS, false)).toThrow(ProfileError);
   });
 });
 

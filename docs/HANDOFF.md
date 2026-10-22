@@ -90,10 +90,13 @@ section and `instance/workflows/video-ti2v.json`; both profile loaders validate 
 config keys `VIDEO_TIMEOUT_S`, `VIDEO_MAX_BYTES`, `VIDEO_VIEW_TIMEOUT_S`. Saving videos to the gallery is out of
 scope for phase 1 (`video_not_saveable`); the image gallery is unchanged.
 
-**It ships OFF (`video.enabled: false`) because the three model files are not pinned:** the cloud session could not
-reach Hugging Face, so no revision, size or sha256 was written. The owner runs the three `scripts/pin_model.py`
-commands from the comment under `models:` in `instance/profiles/image.yaml` (licence check first), pastes the lines
-and sets `enabled: true`. A missing pin then stops the web app and the boot with a clear error.
+**Switched by `VIDEO_ENABLED` (branch `feat/video-env-switch`, 2026-10-22), not by the profile.** The config key
+(apps and instance, default false) turns video on; the profile's `video:` section has no `enabled:` any more and both
+loaders refuse one that does (pointing to `VIDEO_ENABLED`). The three video files are pinned in `models:` (owner,
+2026-10-22, licences checked). With video off they are never downloaded (boot, network probe and its "all present"
+check leave them out), and the web app sends nothing about video to the instance; with `VIDEO_ENABLED=true` it
+passes `VIDEO_ENABLED=true` and the link rules. A video file missing from `models:` while video is on still stops the
+web app and the boot with "video model ... is not listed in models".
 
 **The video files are not downloaded at every boot (owner decision 2026-10-22).** The Start dialog has "Include video
 models" (admin, unticked by default, remembered per browser): unticked, the boot is exactly the image-only boot of
@@ -121,7 +124,7 @@ replaces the video diffusion model, in the Start dialog (`video_model_url`, only
 "Download video models" (`url`). Checked on the web (shape, host allow-list `VIDEO_MODEL_LINK_HOSTS`, type) and
 again on the instance (every redirect hop: https, 443, allowed domains; HEAD size cap `VIDEO_MODEL_LINK_MAX_BYTES`;
 disk; magic bytes after download). Not integrity-pinned or licence-checked: the sha256 of what arrived is reported
-(admins see it). Text encoder and VAE stay pinned; a link does not lift the pin requirement of `video.enabled`. A
+(admins see it). Text encoder and VAE stay pinned; a link does not lift the pin requirement of `VIDEO_ENABLED`. A
 `.gguf` link swaps the workflow's `UNETLoader` for `UnetLoaderGGUF` and requires that class
 (`video_gguf_loader_missing`); whether the pinned `leejet/ComfyUI-GGUF` fork loads this video model's GGUF files is
 UNVERIFIED (the usual loader for it is `city96/ComfyUI-GGUF`, which failed for the image model); if not, the first job fails with

@@ -605,16 +605,20 @@ optional seed; there is no quality preset, negative prompt or guidance (the work
 like any other (same rate limit, same step counter over the websocket, previews if ComfyUI sends any) and the result
 is shown in `<video controls playsinline>` with a Download link.
 
-**It ships OFF.** Its three model files (about 18 GB) are not pinned yet: a cloud session cannot reach Hugging Face,
-and a `models:` line is never written from memory. To switch it on (laptop):
+**It is OFF until `VIDEO_ENABLED=true` in `.env`** (a configuration key of the web app; the profile has no switch).
+Its three model files (about 18 GB) are pinned in `models:` of `instance/profiles/image.yaml` (the owner ran
+`scripts/pin_model.py` and checked the licences on 2026-10-22). To switch it on:
 
-1. Check the licence on the model card of each repo named in the comment under `models:` in
-   `instance/profiles/image.yaml`.
-2. Run the three `python3 scripts/pin_model.py ...` commands written in that comment and paste the printed lines
-   into `models:` (if a file is not in the named repo the script says so; it is then in the other repackaged repo).
-3. Set `video.enabled: true`. Both loaders now refuse the profile while a listed video file is missing from
-   `models:` or has another dest ("video model ... is not listed in models"), so a forgotten pin stops the web app
-   at startup and the instance at boot, never a job.
+1. Set `VIDEO_ENABLED=true` in `.env`. The web app then offers the Video tool and passes `VIDEO_ENABLED=true` to
+   every instance it starts (with `false`, the default, nothing about video is sent, so an image-only instance env
+   is unchanged). Both loaders refuse the profile while video is on and a video file is missing from `models:` or
+   has another dest ("video model ... is not listed in models"), so a missing pin stops the web app at startup and
+   the instance at boot, never a job.
+2. Do not put `enabled:` into the profile's `video:` section: both loaders refuse a section that has one, with a
+   message pointing to `VIDEO_ENABLED` (a line that looks like a switch but does nothing would mislead).
+3. While video is off, the pinned video files are never downloaded: every boot leaves them out (also out of the
+   early network probe and its "all models present" check), so an image-only boot is the same as before they were
+   pinned.
 4. Optional: `VAST_VIDEO_DISK_GB` (default 80, the disk rented for a start with the video models),
    `VIDEO_TIMEOUT_S` (default 2400, must stay below `WEB_JOB_TTL_S`, 3600, or the web app refuses to start),
    `VIDEO_MAX_BYTES` (largest result read from the instance, default 100 MiB) and `VIDEO_VIEW_TIMEOUT_S` (one result
@@ -714,7 +718,7 @@ load the image model ("Unknown model architecture", the reason the fork is used)
 fails at the loader: the page shows "Failed: UnetLoaderGGUF: ..." with ComfyUI's message (for the image model the
 original pack said "Unknown model architecture"). No second GGUF node pack is installed by this change.
 
-Decision: a link does **not** make `video.enabled: true` possible without the pins. Enabling still requires all
+Decision: a link does **not** make `VIDEO_ENABLED=true` possible without the pins. Enabling still requires all
 three video files pinned in `models:`. Relaxing that only for the diffusion slot would change both profile loaders and
 the readiness rules for a small gain: the text encoder and VAE need the same `pin_model.py` step anyway, and the
 pinned diffusion model remains the default when no link is given.

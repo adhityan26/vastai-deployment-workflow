@@ -105,8 +105,13 @@ export interface Profile {
   readonly guidance: GuidanceSpec | null;
   /** The upscale mode when the profile enables it; null otherwise. */
   readonly upscale: UpscaleSpec | null;
-  /** The video mode when the profile enables it; null otherwise. */
+  /** The video mode when VIDEO_ENABLED switches it on; null otherwise. */
   readonly video: VideoSpec | null;
+  /**
+   * The plain names of the video section's model files, also while video is off: an instance never downloads them
+   * then, so the boot download progress must leave them out (empty without a video section).
+   */
+  readonly videoFiles: readonly string[];
   /** The tool menu's categories and built-in tools (styles add their own entries: see menuItems). */
   readonly menu: MenuSpec;
   readonly models: readonly ModelSpec[];
@@ -363,7 +368,7 @@ function parseEdit(raw: unknown): EditSpec {
 }
 
 /** Load the parts of a profile the web app needs (name, generate, models); the rest is the instance loader's business. */
-export function loadProfile(path: string): Profile {
+export function loadProfile(path: string, opts: { videoEnabled?: boolean } = {}): Profile {
   try {
     const raw = mapping(parse(readFileSync(path, "utf8")), "profile");
     if (raw["generate"] === undefined || raw["generate"] === null) throw new ProfileError("profile has no generate section");
@@ -396,7 +401,8 @@ export function loadProfile(path: string): Profile {
       guidance,
       styles,
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
-      video: parseVideo(raw["video"], modelEntries(raw["models"])),
+      video: parseVideo(raw["video"], modelEntries(raw["models"]), opts.videoEnabled === true),
+      videoFiles: videoFilesOf(raw["video"]),
       menu,
       models,
     };
@@ -404,6 +410,12 @@ export function loadProfile(path: string): Profile {
     if (e instanceof ProfileError) throw new ProfileError(`${path}: ${e.message}`);
     throw new ProfileError(`${path}: invalid profile (${(e as Error).message})`);
   }
+}
+
+/** The file names of a (validated) video section's models; empty without one. */
+function videoFilesOf(raw: unknown): string[] {
+  const models = (raw as { models?: unknown } | null | undefined)?.models;
+  return Array.isArray(models) ? models.map((m) => String((m as { file?: unknown }).file)) : [];
 }
 
 /** Set the optional negative prompt and cfg inputs of a copied workflow. */

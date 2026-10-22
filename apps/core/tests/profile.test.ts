@@ -84,7 +84,14 @@ describe("loadProfile", () => {
       "vae/qwen_image_2.1_vae_bf16.safetensors",
       "Qwen2.1_Anything2RealCharacters.safetensors",
       "RealESRGAN_x4plus.safetensors",
+      // The video files (pinned 2026-10-22): listed like every model, downloaded only with video on and included.
+      "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+      "split_files/vae/wan2.2_vae.safetensors",
+      "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     ]);
+    expect(loadProfile(shipped).video).toBeNull(); // VIDEO_ENABLED unset
+    expect(loadProfile(shipped).videoFiles).toEqual(["wan2.2_ti2v_5B_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "wan2.2_vae.safetensors"]);
+    expect(loadProfile(shipped, { videoEnabled: true }).video?.workflow).toBe("video-ti2v.json");
     expect(loadProfile(writeProfile((d) => { delete d.models; d.styles[0].enabled = false; d.upscale.enabled = false; })).models).toEqual([]);
     // Fields the web does not need are not copied.
     expect(Object.keys(loadProfile(shipped).models[0]!)).toEqual(["file", "size_bytes"]);

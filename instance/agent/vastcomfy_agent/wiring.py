@@ -75,7 +75,8 @@ def build(
     flow = DestroyFlow(states, destroyer, make_stop_comfy(cfg, run))
     idle = IdleWatcher(states, deadlines, now, cfg.idle_minutes, cfg.idle_warn_minutes)
     video = VideoModels(
-        load_profile=lambda: load_profile(Path(cfg.repo_dir) / "instance" / "profiles" / f"{cfg.profile}.yaml"),
+        load_profile=lambda: load_profile(Path(cfg.repo_dir) / "instance" / "profiles" / f"{cfg.profile}.yaml",
+                                          video_enabled=cfg.video_enabled),
         comfy=comfy,
         comfy_dir=Path(cfg.comfy_dir),
         free_bytes_fn=free_bytes_of,

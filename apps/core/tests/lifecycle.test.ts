@@ -1222,7 +1222,22 @@ describe("overall download progress", () => {
       { file: "vae/qwen_image_2.1_vae_bf16.safetensors", size_bytes: 675509688 },
       { file: "Qwen2.1_Anything2RealCharacters.safetensors", size_bytes: 318820200 },
       { file: "RealESRGAN_x4plus.safetensors", size_bytes: 66857836 },
+      { file: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", size_bytes: 9999658848 },
+      { file: "split_files/vae/wan2.2_vae.safetensors", size_bytes: 1409400960 },
+      { file: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", size_bytes: 6735906897 },
     ]);
+  });
+
+  it("an image-only boot of the shipped profile counts only the image files (about 15 GB), one with video all (about 33 GB)", async () => {
+    const shippedProfile = loadProfile(shipped);
+    const { life, vast, agent } = setup({ models: shippedProfile.models, videoFiles: shippedProfile.videoFiles });
+    await life.start();
+    vast.instances[0]!.actual_status = "running";
+    const prog = { phase: "models", file: "qwen-image-2.1-UC-Q4_K_M.gguf", bytes_done: 5, bytes_total: 1 };
+    agent.statusImpl = async () => status("downloading", { progress: prog });
+    expect((await life.view()).download).toMatchObject({ files_total: 5, bytes_total: 15_016_544_196 });
+    agent.statusImpl = async () => status("downloading", { progress: prog, video_models: { state: "not_installed", boot: true, bytes_done: 0, bytes_total: 1 } });
+    expect((await life.view()).download).toMatchObject({ files_total: 8, bytes_total: 15_016_544_196 + 18_144_966_705 });
   });
 
   it("sums earlier files, the current file's bytes (clamped) and nothing after it", () => {
@@ -2163,20 +2178,29 @@ describe("video models at Start and on demand", () => {
     expect(big.vast.requests[0]!.disk).toBe(60); // never less than VAST_DISK_GB
   });
 
-  it("a link travels as VIDEO_MODEL_URL with the video models only, and the link rules with every start of a profile with video", async () => {
+  it("a link travels as VIDEO_MODEL_URL with the video models only; VIDEO_ENABLED and the link rules with every start while video is on", async () => {
     const link = "https://huggingface.co/o/r/resolve/main/m.safetensors"; // config-lint: ok (test fixture)
-    const rules = { videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["huggingface.co", "hf.co"], videoModelLinkMaxBytes: 1000 };
+    const rules = { videoEnabled: true, videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["huggingface.co", "hf.co"], videoModelLinkMaxBytes: 1000 };
     const withVideo = setup({ cfg: { vastVideoDiskGb: 80, ...rules }, videoFiles: ["v.safetensors"] });
     await withVideo.life.start(undefined, null, { videoModels: true, videoModelUrl: link });
     expect(withVideo.vast.requests[0]!.env).toMatchObject({
-      VIDEO_MODEL_URL: link, VIDEO_MODEL_LINK_HOSTS: "huggingface.co", VIDEO_MODEL_LINK_REDIRECT_DOMAINS: "huggingface.co,hf.co", VIDEO_MODEL_LINK_MAX_BYTES: "1000",
+      VIDEO_ENABLED: "true", VIDEO_MODEL_URL: link, VIDEO_MODEL_LINK_HOSTS: "huggingface.co", VIDEO_MODEL_LINK_REDIRECT_DOMAINS: "huggingface.co,hf.co", VIDEO_MODEL_LINK_MAX_BYTES: "1000",
     });
     const noVideoBox = setup({ cfg: rules, videoFiles: ["v.safetensors"] });
     await noVideoBox.life.start(undefined, null, { videoModelUrl: link });
     expect(noVideoBox.vast.requests[0]!.env).not.toHaveProperty("VIDEO_MODEL_URL");
-    expect(noVideoBox.vast.requests[0]!.env).toHaveProperty("VIDEO_MODEL_LINK_HOSTS");
+    expect(noVideoBox.vast.requests[0]!.env).toMatchObject({ VIDEO_ENABLED: "true", VIDEO_MODEL_LINK_HOSTS: "huggingface.co" });
     const bad = setup({ cfg: { ...rules, videoModelLinkHosts: ["evil host"] }, videoFiles: ["v.safetensors"] });
     expect(((await errorOf(bad.life.start())) as StartError).reason).toBe("config_invalid");
+  });
+
+  it("with VIDEO_ENABLED off nothing about video reaches the instance, even with its files in the profile", async () => {
+    for (const cfgOver of [{}, { videoEnabled: false }]) {
+      const off = setup({ cfg: cfgOver, videoFiles: ["v.safetensors"] });
+      await off.life.start();
+      const env = off.vast.requests[0]!.env;
+      expect(Object.keys(env).filter((k) => k.startsWith("VIDEO_") || k === "INCLUDE_VIDEO_MODELS")).toEqual([]);
+    }
   });
 
   it("the estimate and the offer lists search the disk of the chosen boot", async () => {

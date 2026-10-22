@@ -64,7 +64,8 @@ async function main(): Promise<void> {
   const profileName = str(cfg, "profile");
   if (!PROFILE_NAME.test(profileName)) throw new Error("PROFILE is not a valid profile name");
   const repoDir = str(cfg, "webRepoDir");
-  const profile = loadProfile(join(repoDir, "instance", "profiles", `${profileName}.yaml`));
+  // Video is switched by VIDEO_ENABLED, never by the profile (which is refused if it still says `enabled:`).
+  const profile = loadProfile(join(repoDir, "instance", "profiles", `${profileName}.yaml`), { videoEnabled: cfg["videoEnabled"] === true });
   const template: unknown = JSON.parse(
     readFileSync(join(repoDir, "instance", "workflows", profile.generate.workflow), "utf8"),
   );
@@ -148,7 +149,7 @@ async function main(): Promise<void> {
     tsAuthKey,
     profileModels: profile.models,
     // An image-only boot skips these; the overall download progress must leave them out too.
-    videoModelFiles: profile.video?.models.map((m) => m.file) ?? [],
+    videoModelFiles: profile.videoFiles,
     consoleStore,
     usage,
     log,
