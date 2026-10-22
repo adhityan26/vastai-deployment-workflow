@@ -147,6 +147,8 @@ async function main(): Promise<void> {
     clock: () => Date.now() / 1000,
     tsAuthKey,
     profileModels: profile.models,
+    // An image-only boot skips these; the overall download progress must leave them out too.
+    videoModelFiles: profile.video?.models.map((m) => m.file) ?? [],
     consoleStore,
     usage,
     log,

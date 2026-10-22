@@ -2619,6 +2619,19 @@ describe("video", () => {
     json(res, 404, {});
   };
   const ok = { prompt: "a fox runs through snow", size: "Landscape", duration: "About 3 s" };
+  const VM_READY = { state: "ready", boot: true, bytes_done: 50, bytes_total: 50, reason: null };
+  /** The fake agent's answer with the instance's video models in `models` (null leaves them out). */
+  const agentWith = (models: unknown): Handler => (s, res) => {
+    if (s.url === "/status") return json(res, 200, agentStatus("ready", models === null ? {} : { video_models: models }));
+    if (s.url === "/video-models") return json(res, 202, { state: "downloading", boot: false, bytes_done: 0, bytes_total: 50, reason: null });
+    json(res, 404, {});
+  };
+  /** A harness whose instance has its video models (booted with them). */
+  const vharness = async (opts: Parameters<typeof harness>[0]) => {
+    const made = await harness(opts);
+    made.setAgent(agentWith(VM_READY));
+    return made;
+  };
   const sentPrompt = () => JSON.parse(h.comfySeen.find((x) => x.url === "/prompt")!.body).prompt;
 
   it("is off with the shipped profile: state.video is null, the entry is unavailable and POST /api/video is 404 with nothing sent", async () => {
@@ -2634,7 +2647,7 @@ describe("video", () => {
   });
 
   it("lists sizes, durations in seconds and the start image limits only, when enabled", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     const body = (await call("GET", "/api/state", await member())).json();
     expect(body.video).toEqual({
       sizes: [
@@ -2644,6 +2657,8 @@ describe("video", () => {
         { name: "Portrait, faster", width: 480, height: 832 },
       ],
       durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
+      download_bytes: 3000,
+      models: { state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null },
       max_bytes: 4096,
       max_pixels: 1_000_000,
       types: ["png", "jpeg", "webp"],
@@ -2654,7 +2669,7 @@ describe("video", () => {
   });
 
   it("text to video: submits the filled workflow, polls to done and serves the mp4 checked by its first bytes", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const m = await member();
     const res = await post("/api/video", m, { ...ok, seed: 9 });
@@ -2681,7 +2696,7 @@ describe("video", () => {
   });
 
   it("image to video: uploads the one start image and wires a LoadImage node; the label says so", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const m = await member("ayu");
     const res = await post("/api/video", m, { ...ok, size: "Portrait, faster", duration: "About 5 s", image: REF_A.toString("base64") });
@@ -2705,7 +2720,7 @@ describe("video", () => {
     ["an extra key", { ...ok, frames: 999 }, "invalid_body"],
   ];
   it.each(bad)("400 for %s, and nothing reaches ComfyUI", async (_n, body, code) => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const res = await post("/api/video", await member(), body);
     expect(res.statusCode).toBe(400);
@@ -2715,7 +2730,7 @@ describe("video", () => {
 
   it("refuses a result that is not an mp4 or WebM by its first bytes, whatever its content type says", async () => {
     for (const [body, type] of [[Buffer.from("<!doctype html><script>alert(1)</script>"), "video/mp4"], [pngOf(8, 8), "video/mp4"], [MP4.subarray(0, 8), "video/mp4"]] as const) {
-      h = await harness({ profile: videoProfile() });
+      h = await vharness({ profile: videoProfile() });
       h.setComfy(comfyVideo(true, body, type));
       const m = await member();
       const id = (await post("/api/video", m, ok)).json().id as string;
@@ -2728,7 +2743,7 @@ describe("video", () => {
   });
 
   it("refuses a result over VIDEO_MAX_BYTES; images keep their own limit", async () => {
-    h = await harness({ profile: videoProfile(), cfg: { videoMaxBytes: 1024 } });
+    h = await vharness({ profile: videoProfile(), cfg: { videoMaxBytes: 1024 } });
     h.setComfy(comfyVideo(true, Buffer.concat([MP4, Buffer.alloc(2000)])));
     const m = await member();
     const id = (await post("/api/video", m, ok)).json().id as string;
@@ -2739,7 +2754,7 @@ describe("video", () => {
   });
 
   it("a video job's file is never served as an image and cannot be saved to the gallery; an image job is no video", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const m = await member();
     const id = (await post("/api/video", m, ok)).json().id as string;
@@ -2757,7 +2772,7 @@ describe("video", () => {
   });
 
   it("only the owner (or an admin) can read a video job and its file", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const id = (await post("/api/video", await member("ayu"), ok)).json().id as string;
     const other = await member("bob");
@@ -2768,7 +2783,7 @@ describe("video", () => {
   });
 
   it("410 for the file once the instance that made it is gone, and nothing is fetched", async () => {
-    h = await harness({ profile: videoProfile() });
+    h = await vharness({ profile: videoProfile() });
     h.setComfy(comfyVideo());
     const m = await member();
     const id = (await post("/api/video", m, ok)).json().id as string;
@@ -2780,7 +2795,7 @@ describe("video", () => {
   });
 
   it("a video job runs until VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S", async () => {
-    h = await harness({ profile: videoProfile(), cfg: { generateTimeoutS: 600, videoTimeoutS: 1800 } });
+    h = await vharness({ profile: videoProfile(), cfg: { generateTimeoutS: 600, videoTimeoutS: 1800 } });
     h.setComfy(comfyVideo(false));
     const m = await member();
     const id = (await post("/api/video", m, ok)).json().id as string;
@@ -2800,12 +2815,89 @@ describe("video", () => {
     await expect(harness({ cfg: { videoTimeoutS: 0, videoMaxBytes: "x" } })).resolves.toBeDefined();
   });
 
-  it("needs a session and a ready instance; the page may play blob videos (CSP media-src)", async () => {
+  it.each([
+    ["not installed", { state: "not_installed", boot: false, bytes_done: 0, bytes_total: 3000, reason: null }, /not installed/],
+    ["downloading", { state: "downloading", boot: false, bytes_done: 1500, bytes_total: 3000, reason: null }, /still downloading \(50%\)/],
+    ["failed", { state: "failed", boot: false, bytes_done: 0, bytes_total: 3000, reason: "download failed" }, /download failed/],
+    ["not reported", null, /does not report/],
+  ])("refuses a video job while the video models are %s, and nothing reaches ComfyUI", async (_n, models, message) => {
     h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith(models));
+    h.setComfy(comfyVideo());
+    const res = await post("/api/video", await member(), ok);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("video_models_not_ready");
+    expect(res.json().error.message).toMatch(message);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("shows the instance's video model state, its progress and a scrubbed reason; null when the agent does not say", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ state: "downloading", boot: false, bytes_done: 750, bytes_total: 3000, reason: null }));
+    expect((await call("GET", "/api/state", await member())).json().video.models).toEqual({ state: "downloading", bytes_done: 750, bytes_total: 3000, percent: 25, reason: null });
+    h.setAgent(agentWith({ state: "failed", boot: false, bytes_done: 0, bytes_total: 3000, reason: `download failed from https://hf.example/x on ${HOST}` }));
+    const failed = (await call("GET", "/api/state", await member())).json().video.models;
+    expect(failed.state).toBe("failed");
+    expect(failed.reason).not.toContain(HOST);
+    expect(failed.reason).not.toContain("https://");
+    h.setAgent(agentWith(null));
+    expect((await call("GET", "/api/state", await member())).json().video.models).toBeNull();
+  });
+
+  it("Download video models: admins only; it asks the agent and answers with the state", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent(agentWith({ state: "not_installed", boot: false, bytes_done: 0, bytes_total: 3000, reason: null }));
+    expect((await post("/api/video-models", await member(), {})).statusCode).toBe(403);
+    const res = await post("/api/video-models", await admin(), {});
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ models: { state: "downloading", bytes_done: 0, bytes_total: 50, percent: 0, reason: null } });
+    expect(h.agentSeen.some((x) => x.method === "POST" && x.url === "/video-models")).toBe(true);
+    expect((await post("/api/video-models", await admin(), { now: true })).statusCode).toBe(400);
+  });
+
+  it("passes the agent's refusal (code and scrubbed text) and needs video and an instance", async () => {
+    h = await harness({ profile: videoProfile() });
+    h.setAgent((s, res) => {
+      if (s.url === "/video-models") return json(res, 409, { detail: { code: "disk_insufficient", message: `too small on ${HOST}` } });
+      return json(res, 200, agentStatus("ready"));
+    });
+    const res = await post("/api/video-models", await admin(), {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("disk_insufficient");
+    expect(res.json().error.message).toMatch(/^too small on /);
+    expect(res.body).not.toContain(HOST);
+    h.setAgent((s, res2) => (s.url === "/video-models" ? json(res2, 500, { detail: "boom" }) : json(res2, 200, agentStatus("ready"))));
+    expect((await post("/api/video-models", await admin(), {})).json().error.code).toBe("agent_unavailable");
+    h = await harness(); // video off
+    expect((await post("/api/video-models", await admin(), {})).json().error.code).toBe("video_unavailable");
+    h = await harness({ profile: videoProfile(), ready: false });
+    expect((await post("/api/video-models", await admin(), {})).json().error.code).toBe("no_instance");
+  });
+
+  it("Start with video_models: the larger disk and INCLUDE_VIDEO_MODELS; refused where video is off", async () => {
+    h = await harness({ profile: videoProfile(), ready: false, cfg: { vastVideoDiskGb: 80 } });
+    const a = await admin();
+    expect((await call("GET", "/api/estimate?video_models=true", a)).statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)).toMatchObject({ diskGb: 80 });
+    expect((await call("GET", "/api/estimate?video_models=yes", a)).statusCode).toBe(400);
+    expect((await post("/api/start", a, { confirm: true, video_models: "true" })).statusCode).toBe(400);
+    const started = await post("/api/start", a, { confirm: true, video_models: true });
+    expect(started.statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)).toMatchObject({ diskGb: 80 });
+    h = await harness({ ready: false });
+    const off = await post("/api/start", await admin(), { confirm: true, video_models: true });
+    expect(off.statusCode).toBe(400);
+    expect(off.json().error.code).toBe("video_unavailable");
+    expect(h.vast.creates).toBe(0);
+    expect((await post("/api/start", await admin(), { confirm: true, video_models: false })).statusCode).toBe(200);
+  });
+
+  it("needs a session and a ready instance; the page may play blob videos (CSP media-src)", async () => {
+    h = await vharness({ profile: videoProfile() });
     expect((await post("/api/video", {}, ok)).statusCode).toBe(401);
     const page = await call("GET", "/api/state", await member());
     expect(String(page.headers["content-security-policy"])).toContain("media-src 'self' blob:");
-    h = await harness({ profile: videoProfile(), ready: false });
+    h = await vharness({ profile: videoProfile(), ready: false });
     expect((await post("/api/video", await member(), ok)).statusCode).toBe(409);
   });
 });

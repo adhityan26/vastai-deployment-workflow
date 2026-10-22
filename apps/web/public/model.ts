@@ -26,6 +26,7 @@ export const API = {
   edit: "/api/edit",
   upscale: "/api/upscale",
   video: "/api/video",
+  videoModels: "/api/video-models",
   credit: "/api/credit",
   offers: "/api/offers",
   history: "/api/history",
@@ -116,8 +117,21 @@ export interface AdvancedInfo { generate: Knobs; edit: Knobs; negativeMaxChars: 
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 /** One video length the server offers: its name and about how many seconds it lasts. */
 export interface VideoDurationInfo { name: string; seconds: number }
+export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
+/** The video model files on the running instance (GET /api/state video.models). */
+export interface VideoModelsView { state: VideoModelsState; bytes_done: number; bytes_total: number; percent: number | null; reason: string | null }
 /** What the server offers for video (null in the state when video is off); the start image is optional. */
-export interface VideoInfo { sizes: Size[]; durations: VideoDurationInfo[]; max_bytes: number; max_pixels: number; types: string[] }
+export interface VideoInfo {
+  sizes: Size[];
+  durations: VideoDurationInfo[];
+  max_bytes: number;
+  max_pixels: number;
+  types: string[];
+  /** Size of all video model files (what "Download video models" may fetch). */
+  download_bytes: number;
+  /** The instance's video model files; null without an instance or when it does not say. */
+  models: VideoModelsView | null;
+}
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -323,7 +337,31 @@ function parseVideo(v: unknown): VideoInfo | null {
     if (!isObj(d) || typeof d["name"] !== "string" || d["name"] === "" || !Number.isInteger(seconds) || (seconds as number) < 0 || (seconds as number) > MAX_VIDEO_SECONDS) return null;
     durationList.push({ name: d["name"], seconds: seconds as number });
   }
-  return { sizes: sizeList, durations: durationList, max_bytes: v["max_bytes"], max_pixels: v["max_pixels"], types: types as string[] };
+  const download = v["download_bytes"];
+  return {
+    sizes: sizeList,
+    durations: durationList,
+    max_bytes: v["max_bytes"],
+    max_pixels: v["max_pixels"],
+    types: types as string[],
+    download_bytes: Number.isSafeInteger(download) && (download as number) >= 0 ? (download as number) : 0,
+    models: parseVideoModels(v["models"]),
+  };
+}
+
+const VIDEO_MODEL_STATES: readonly VideoModelsState[] = ["unavailable", "not_installed", "downloading", "ready", "failed"];
+const count = (v: unknown): number => (Number.isSafeInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+
+function parseVideoModels(v: unknown): VideoModelsView | null {
+  if (!isObj(v) || !(VIDEO_MODEL_STATES as readonly unknown[]).includes(v["state"])) return null;
+  const pct = v["percent"];
+  return {
+    state: v["state"] as VideoModelsState,
+    bytes_done: count(v["bytes_done"]),
+    bytes_total: count(v["bytes_total"]),
+    percent: Number.isInteger(pct) && (pct as number) >= 0 && (pct as number) <= 100 ? (pct as number) : null,
+    reason: typeof v["reason"] === "string" && v["reason"] !== "" ? v["reason"] : null,
+  };
 }
 
 function parseGuidance(v: unknown): GuidanceInfo | null {
@@ -861,7 +899,8 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canGenerate: s !== null && GENERATE_STATES.has(state) && !jobPending,
     canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
     canUpscale: s !== null && s.upscale !== null && GENERATE_STATES.has(state) && !jobPending,
-    canVideo: s !== null && s.video !== null && GENERATE_STATES.has(state) && !jobPending,
+    // Video also needs its model files on the instance (never a job that would only wait for them).
+    canVideo: s !== null && s.video !== null && s.video.models?.state === "ready" && GENERATE_STATES.has(state) && !jobPending,
   };
 }
 
@@ -1255,6 +1294,48 @@ export function durationLabel(d: VideoDurationInfo): string {
 /** The job label, the way the server labels the same job. */
 export function videoLabel(size: string, duration: string, fromImage: boolean): string {
   return `Video: ${size}, ${duration}${fromImage ? ", from an image" : ""}`;
+}
+
+// Where the Start dialog's "Include video models" choice is remembered in this browser ("1" or "0", a preference).
+export const START_VIDEO_STORAGE_KEY = "vast-comfy.start-video"; // config-lint: ok (browser storage key, not configuration)
+
+/** "18.0 GB" for a download size (decimal units, like the boot download). */
+function gigabytes(bytes: number): string {
+  return `${(bytes / BYTES_PER_GB).toFixed(1)} GB`;
+}
+
+/** The label of the admin's download button. */
+export function videoDownloadLabel(v: VideoInfo): string {
+  return v.download_bytes > 0 ? `Download video models (about ${gigabytes(v.download_bytes)}, several minutes)` : "Download video models (several minutes)";
+}
+
+/**
+ * What the Video panel says about the instance's video model files, and whether this user gets the download button
+ * (admins only, while they are missing or after a failed download). Empty text when they are ready.
+ */
+export function videoModelsNote(v: VideoInfo, admin: boolean): { text: string; download: boolean } {
+  const m = v.models;
+  if (m === null) return { text: "The instance does not report its video models yet. Start an instance, or wait until it is ready.", download: false };
+  switch (m.state) {
+    case "ready":
+      return { text: "", download: false };
+    case "downloading": {
+      const pct = m.percent === null ? "" : ` (${m.percent}%)`;
+      const size = m.bytes_total > 0 ? `: ${gigabytes(m.bytes_done)} of ${gigabytes(m.bytes_total)}${pct}` : pct;
+      return { text: `Downloading the video models${size}. Images keep working meanwhile; Make video unlocks when it is done.`, download: false };
+    }
+    case "failed":
+      return {
+        text: `The video model download failed${m.reason === null ? "" : `: ${m.reason}`}.${admin ? "" : " Ask an admin to try again."}`,
+        download: admin,
+      };
+    case "unavailable":
+      return { text: "This instance has no video models.", download: false };
+    default:
+      return admin
+        ? { text: "This instance was started without the video models.", download: true }
+        : { text: "The video models are not installed on this instance. Ask an admin to download them.", download: false };
+  }
 }
 
 /** Shown while a video runs: it takes minutes, and the page must stay open for the result to appear. */

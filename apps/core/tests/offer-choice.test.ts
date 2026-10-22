@@ -147,3 +147,12 @@ describe("publicOffer", () => {
     expect(publicOffer({ id: 8, dph_total: 0.2 })).toEqual({ id: 8, gpu_name: null, dph: 0.2, vram_gb: null, location: null, region: null, down_mbps: null, reliability: null });
   });
 });
+
+
+describe("video_models at Start", () => {
+  it("true asks for the video models; false, null and absent are the image-only boot; anything else is refused", () => {
+    expect(parseStartFilters({ video_models: true }, LIMITS)).toEqual({ videoModels: true });
+    for (const off of [{ video_models: false }, { video_models: null }, {}]) expect(parseStartFilters(off, LIMITS)).toEqual({});
+    for (const bad of ["true", 1, [true]]) expect(() => parseStartFilters({ video_models: bad }, LIMITS)).toThrow(StartFilterError);
+  });
+});

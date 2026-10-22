@@ -1683,6 +1683,8 @@ describe("video", () => {
     max_bytes: 1000,
     max_pixels: 1_000_000,
     types: ["png", "jpeg"],
+    download_bytes: 18_000_000_000,
+    models: { state: "ready", bytes_done: 1, bytes_total: 1, percent: 100, reason: null },
   };
   const menu = {
     categories: [{ id: "create", title: "Create" }],
@@ -1826,6 +1828,60 @@ describe("video", () => {
     await submit();
     expect(q("#form-error")!.textContent).toBe("Attach at most one start image for a video.");
     expect(posts("/api/video")).toHaveLength(0);
+  });
+
+  describe("video models on the instance", () => {
+    const at = (models: unknown) => ({ ...video, models });
+    const missing = { state: "not_installed", bytes_done: 0, bytes_total: 18_000_000_000, percent: 0, reason: null };
+
+    it("an admin gets the download button while they are missing; it asks the server and follows the state", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 202, body: { models: { ...missing, state: "downloading" } } },
+      });
+      chooseTool("video");
+      expect(q("#video-models")!.hidden).toBe(false);
+      expect(q("#video-models-text")!.textContent).toBe("This instance was started without the video models.");
+      const btn = q<HTMLButtonElement>("#video-models-download")!;
+      expect(btn.hidden).toBe(false);
+      expect(btn.textContent).toBe("Download video models (about 18.0 GB, several minutes)");
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      expect(q("#gen-hint")!.textContent).toContain("unlocks when the video models are on the instance");
+      routes["GET /api/state"] = { body: apiState({ role: "admin", menu, video: at({ state: "downloading", bytes_done: 9_000_000_000, bytes_total: 18_000_000_000, percent: 50, reason: null }) }) };
+      btn.click();
+      await flush();
+      expect(posts("/api/video-models")).toHaveLength(1);
+      expect(posts("/api/video-models")[0]!.body).toEqual({});
+      expect(q("#video-models-text")!.textContent).toBe("Downloading the video models: 9.0 GB of 18.0 GB (50%). Images keep working meanwhile; Make video unlocks when it is done.");
+      expect(btn.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      routes["GET /api/state"] = { body: apiState({ role: "admin", menu, video }) };
+      await app!.refresh();
+      expect(q("#video-models")!.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+    });
+
+    it("shows the server's refusal of the download, for example a disk that is too small", async () => {
+      await mount({ role: "admin", menu, video: at(missing) }, {
+        "POST /api/video-models": { status: 409, body: { error: { code: "disk_insufficient", message: "the instance disk is too small for the video models" } } },
+      });
+      chooseTool("video");
+      q<HTMLButtonElement>("#video-models-download")!.click();
+      await flush();
+      expect(q("#video-models-error")!.hidden).toBe(false);
+      expect(q("#video-models-error")!.textContent).toBe("the instance disk is too small for the video models");
+    });
+
+    it("a member is told to ask an admin and gets no button; nothing is shown outside the Video tool", async () => {
+      await mount({ menu, video: at(missing) });
+      expect(q("#video-models")!.hidden).toBe(true);
+      chooseTool("video");
+      expect(q("#video-models-text")!.textContent).toBe("The video models are not installed on this instance. Ask an admin to download them.");
+      expect(q("#video-models-download")!.hidden).toBe(true);
+      expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+      q<HTMLTextAreaElement>("#prompt")!.value = "x";
+      await submit();
+      expect(posts("/api/video")).toHaveLength(0);
+    });
   });
 
   it("continues an image result into video: Make a video switches the tool and attaches it as the start image", async () => {
@@ -2332,5 +2388,55 @@ describe("edit output size", () => {
     chooseTool("edit");
     expect(q("#edit-size-box img")).toBeNull();
     expect(sizeSel().options[1]!.textContent).toContain('<img src=x onerror="alert(1)">');
+  });
+});
+
+
+describe("start dialog: Include video models", () => {
+  const video = { sizes: [{ name: "L", width: 1280, height: 704 }], durations: [{ name: "About 3 s", seconds: 3 }], max_bytes: 1000, max_pixels: 1000, types: ["png"], download_bytes: 18_000_000_000, models: null };
+  const routesWithVideo: Record<string, Handler> = {
+    ...START_ROUTES,
+    "GET /api/gpus?video_models=true": { body: GPUS },
+    "GET /api/estimate?gpu=RTX%20A5000&video_models=true": est("RTX A5000", 0.27),
+  };
+
+  it("is offered only where the server offers video, unticked by default, and an unticked start is unchanged", async () => {
+    await mount({ role: "admin", state: "none" }, START_ROUTES);
+    await openStart();
+    expect(q("#start-video")!.closest("label")!.hidden).toBe(true);
+    app?.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const box = q<HTMLInputElement>("#start-video")!;
+    expect(box.closest("label")!.hidden).toBe(false);
+    expect(box.checked).toBe(false);
+    expect(box.closest("label")!.textContent).toContain("about 18.0 GB more");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).not.toHaveProperty("video_models");
+  });
+
+  it("ticked: the lists and the estimate are for the larger disk, the start asks for the video models, and it is remembered", async () => {
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    const box = q<HTMLInputElement>("#start-video")!;
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    await flush();
+    expect(calls.some((c) => c.path === "/api/gpus?video_models=true")).toBe(true);
+    expect(estimateCalls().at(-1)).toBe("/api/estimate?gpu=RTX%20A5000&video_models=true");
+    expect(q("#modal")!.textContent).toContain("$0.27/hour");
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toMatchObject({ confirm: true, gpu: "RTX A5000", video_models: true });
+    expect(window.localStorage.getItem("vast-comfy.start-video")).toBe("1");
+    app?.stop();
+    calls = [];
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    await mount({ role: "admin", state: "none", video }, routesWithVideo);
+    await openStart();
+    expect(q<HTMLInputElement>("#start-video")!.checked).toBe(true);
+    expect(calls.some((c) => c.path === "/api/gpus?video_models=true")).toBe(true);
   });
 });

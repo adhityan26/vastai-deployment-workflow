@@ -55,6 +55,7 @@ import {
   type ServerInfo,
   type StatusView,
   type UsageItem,
+  type VideoModelsStatus,
 } from "@vast-comfy/core";
 import { CreditCache, JobStore, LiveProgress, RateLimiter, type Job, type JobKind } from "./store.js";
 import { sendError } from "./reply.js";
@@ -168,6 +169,39 @@ function hostnamesOf(view: StatusView): string[] {
   return out;
 }
 
+/** The video model files of the instance as the browser may see them; null when the agent does not say. */
+function publicVideoModels(v: VideoModelsStatus | null | undefined, scrub: (t: string) => string) {
+  if (v === null || v === undefined) return null;
+  const total = Number.isSafeInteger(v.bytes_total) && v.bytes_total > 0 ? v.bytes_total : 0;
+  const done = Number.isSafeInteger(v.bytes_done) ? Math.min(Math.max(v.bytes_done, 0), total) : 0;
+  return {
+    state: v.state,
+    bytes_done: done,
+    bytes_total: total,
+    percent: total > 0 ? Math.floor((done / total) * 100) : null,
+    reason: typeof v.reason === "string" && v.reason !== "" ? scrub(v.reason) : null,
+  };
+}
+
+/** Why a video job cannot run yet (null when the instance has its video models). */
+function videoModelsRefusal(v: VideoModelsStatus | null | undefined): string | null {
+  if (v?.state === "ready") return null;
+  switch (v?.state) {
+    case "not_installed":
+      return "the video models are not installed on this instance yet; an admin can download them (Download video models)";
+    case "downloading": {
+      const pct = v.bytes_total > 0 ? ` (${Math.floor((Math.min(v.bytes_done, v.bytes_total) / v.bytes_total) * 100)}%)` : "";
+      return `the video models are still downloading${pct}; try again when they are ready`;
+    }
+    case "failed":
+      return "the video model download failed; an admin can try it again";
+    case "unavailable":
+      return "this instance has no video models";
+    default:
+      return "the instance does not report its video models yet";
+  }
+}
+
 /** One usage history entry as the browser may see it: an explicit allowlist (no hostname). */
 function publicUsage(e: UsageItem) {
   return {
@@ -267,6 +301,7 @@ const FILTER_QUERY_PROPS = {
   min_down_mbps: { type: "string", pattern: "^[0-9]{1,9}$" },
   sort: { type: "string", maxLength: 16 },
   offer_id: { type: "string", pattern: "^[0-9]{1,15}$" },
+  video_models: { type: "string", enum: ["true", "false"] },
 } as const;
 const FILTER_BODY_PROPS = {
   region: { type: ["string", "null"], maxLength: 32 },
@@ -274,8 +309,9 @@ const FILTER_BODY_PROPS = {
   min_down_mbps: { type: ["integer", "null"] },
   sort: { type: ["string", "null"], maxLength: 16 },
   offer_id: { type: ["integer", "null"] },
+  video_models: { type: ["boolean", "null"] },
 } as const;
-const FILTER_KEYS = ["region", "max_dph", "min_down_mbps", "sort", "offer_id"] as const;
+const FILTER_KEYS = ["region", "max_dph", "min_down_mbps", "sort", "offer_id", "video_models"] as const;
 const START_BODY = {
   type: "object",
   additionalProperties: false,
@@ -418,6 +454,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   if (videoTimeoutMs !== null && videoTimeoutMs >= intCfg(cfg, "webJobTtlS", "WEB_JOB_TTL_S") * 1000) {
     throw new Error("VIDEO_TIMEOUT_S must be shorter than WEB_JOB_TTL_S");
   }
+  // The size of the video model files (profile `models` entries the video section lists).
+  const videoDownloadBytes =
+    videoSpec === null
+      ? 0
+      : deps.profile.models
+          .filter((m) => videoSpec.models.some((v) => v.file === m.file.split("/").pop()))
+          .reduce((sum, m) => sum + m.size_bytes, 0);
   /** How long a job of this kind may run before it is given up. */
   const timeoutOf = (kind: JobKind): number => (kind === "video" && videoTimeoutMs !== null ? videoTimeoutMs : generateTimeoutMs);
   // Live progress and previews: one ComfyUI websocket per job, open at most as long as a job may run.
@@ -613,8 +656,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     const isAdmin = req.role === "admin";
     // The view passes agent-provided text (reason) through unscrubbed: remove the token too.
     const token = (await deps.registry.active())?.agent_token ?? "";
+    const scrub = scrubber(deps, [token, ...hostnamesOf(view)]);
     return {
-      ...publicView(view, isAdmin, scrubber(deps, [token, ...hostnamesOf(view)])),
+      ...publicView(view, isAdmin, scrub),
       role: req.role,
       presets: deps.profile.generate.qualityPresets.map((p) => ({ name: p.name, steps: p.steps })),
       sizes: deps.profile.generate.sizes.map((s) => ({ name: s.name, width: s.width, height: s.height })),
@@ -682,6 +726,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           : {
               sizes: videoSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
               durations: videoSpec.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+              // What "Download video models" fetches (all of them; the instance fetches only the missing ones).
+              download_bytes: videoDownloadBytes,
+              // The instance's own state of its video model files; null without an instance or an answer.
+              models: publicVideoModels(view.agent?.video_models, scrub),
               max_bytes: videoLimits.maxBytes,
               max_pixels: videoLimits.maxPixels,
               types: [...videoLimits.types],
@@ -725,10 +773,17 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     for (const key of FILTER_KEYS) {
       const v = from[key];
       if (v === undefined) continue;
-      raw[key] = fromQuery && typeof v === "string" && key !== "region" && key !== "sort" ? Number(v) : v;
+      if (fromQuery && key === "video_models") raw[key] = v === "true";
+      else raw[key] = fromQuery && typeof v === "string" && key !== "region" && key !== "sort" ? Number(v) : v;
     }
     try {
-      return deps.lifecycle.parseFilters(raw);
+      const parsed = deps.lifecycle.parseFilters(raw);
+      // The video files can only be included where this server offers video.
+      if (parsed.videoModels === true && videoLimits === null) {
+        sendError(reply, 400, "video_unavailable", "video is not available on this server");
+        return null;
+      }
+      return parsed;
     } catch (err) {
       // A malformed VAST_* value is a server configuration problem, reported like the lifecycle's config_invalid.
       if (err instanceof VastError) {
@@ -1065,6 +1120,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
         return sendError(reply, 409, "not_ready", "the instance is not ready");
       }
+      // Never queue a video the instance cannot run: its model files must be there (boot or on-demand download).
+      const missing = videoModelsRefusal(view.agent?.video_models);
+      if (missing !== null) return sendError(reply, 409, "video_models_not_ready", missing);
       if (!generateLimiter.take(identity.subject)) {
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
@@ -1095,6 +1153,30 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return reply.code(202).send({ id: promptId });
     },
   );
+
+  // Download the video model files onto the running instance (admin: it uses the instance's disk and network for
+  // several minutes). The agent checks the instance state, the node classes and the disk first, and runs the download
+  // in the background; GET /api/state video.models shows its progress.
+  const VIDEO_MODEL_REFUSALS = new Set(["video_unavailable", "not_ready", "video_nodes_missing", "disk_insufficient", "comfy_unavailable"]);
+  app.post("/api/video-models", { ...admin, schema: { body: EMPTY_BODY } }, async (req, reply) => {
+    if (videoLimits === null || typeof deps.lifecycle.downloadVideoModels !== "function") {
+      return sendError(reply, 404, "video_unavailable", "video is not available on this server");
+    }
+    log("info", `video model download requested by ${userLabel(req.identity?.username) ?? "?"}`);
+    try {
+      const status = await deps.lifecycle.downloadVideoModels();
+      return reply.code(202).send({ models: publicVideoModels(status, await activeScrubber()) });
+    } catch (err) {
+      if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
+      if (err instanceof AgentError && err.code !== undefined && VIDEO_MODEL_REFUSALS.has(err.code)) {
+        const text = err.message.replace(/^video models failed with HTTP \d+:\s*/, "");
+        return sendError(reply, 409, err.code, (await activeScrubber())(text));
+      }
+      if (err instanceof ResponseTooLarge) return tooLarge(reply);
+      log("warn", `video model download failed: ${errorName(err)}`);
+      return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+    }
+  });
 
   app.get("/api/generate/:id", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {
     const { id } = req.params as { id: string };

@@ -143,3 +143,26 @@ describe("AgentClient response cap", () => {
     await expect(client.status()).rejects.toBeInstanceOf(ResponseTooLarge);
   });
 });
+
+
+describe("AgentClient video models", () => {
+  it("accepts a status with video_models and starts the download with POST /video-models", async () => {
+    const vm = { state: "downloading", boot: false, bytes_done: 1, bytes_total: 9, reason: null };
+    const { client, seen } = await fake((s, res) => (s.url === "/video-models" ? json(res, 202, vm) : json(res, 200, { ...STATUS, video_models: vm })));
+    expect((await client.status()).video_models).toEqual(vm);
+    expect(await client.startVideoModels()).toEqual(vm);
+    expect(seen[1]).toMatchObject({ method: "POST", url: "/video-models", auth: `Bearer ${TOKEN}` });
+  });
+
+  it("keeps the agent's refusal code and refuses an unusable answer", async () => {
+    const { client } = await fake((_s, res) => json(res, 409, { detail: { code: "disk_insufficient", message: "too small" } }));
+    await expect(client.startVideoModels()).rejects.toMatchObject({ status: 409, code: "disk_insufficient" });
+    const odd = await fake((_s, res) => json(res, 202, ["x"]));
+    await expect(odd.client.startVideoModels()).rejects.toThrow(/not a status/);
+  });
+
+  it("refuses a status whose video_models breaks the schema", async () => {
+    const { client } = await fake((_s, res) => json(res, 200, { ...STATUS, video_models: { state: "maybe", boot: false, bytes_done: 0, bytes_total: 0 } }));
+    await expect(client.status()).rejects.toThrow(/status schema/);
+  });
+});

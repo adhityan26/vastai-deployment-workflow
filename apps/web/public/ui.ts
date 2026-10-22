@@ -120,6 +120,9 @@ import {
   usableDefaults,
   upscaleAsEdit,
   VIDEO_WAIT_TEXT,
+  START_VIDEO_STORAGE_KEY,
+  videoDownloadLabel,
+  videoModelsNote,
   durationLabel,
   videoAsEdit,
   videoHint,
@@ -163,6 +166,8 @@ import { iconNode, uiIconNode } from "./icons.js";
 // never innerHTML. Decisions live in model.ts.
 
 const CONSOLE_REVOKE_MS = 1_000; // the browser needs a moment to start the download
+// The instance states in which jobs (and an on-demand video model download) can run.
+const GENERATE_READY = new Set(["ready", "idle-warning"]);
 
 export interface Env {
   fetch: typeof fetch;
@@ -553,6 +558,22 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  // "Include video models" in the Start dialog: remembered per browser; only "1" means ticked.
+  function readStartVideo(): boolean {
+    try {
+      return doc.defaultView?.localStorage.getItem(START_VIDEO_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+  function writeStartVideo(on: boolean): void {
+    try {
+      doc.defaultView?.localStorage.setItem(START_VIDEO_STORAGE_KEY, on ? "1" : "0");
+    } catch {
+      // Storage unavailable: the choice is just not remembered.
+    }
+  }
+
   function writeRemembered(name: string): void {
     try {
       doc.defaultView?.localStorage.setItem(GPU_STORAGE_KEY, name);
@@ -639,6 +660,21 @@ export function mountApp(doc: Document, env: Env): App {
         offerNote,
         offerList,
       );
+      // Only where the server offers video: the video model files at boot (a larger disk and a longer boot), else
+      // an image-only boot whose video files can still be downloaded later from the Video tool.
+      const offersVideo = state?.video != null;
+      let includeVideo = offersVideo && readStartVideo();
+      const videoRow = make("label", undefined, "check");
+      const videoBox = make("input");
+      videoBox.type = "checkbox";
+      videoBox.id = "start-video";
+      videoBox.checked = includeVideo;
+      const videoSize = state?.video?.download_bytes ?? 0;
+      videoRow.append(videoBox, make("span", ` Include video models (about ${(videoSize / 1e9).toFixed(1)} GB more to download, a larger disk; the boot takes longer)`));
+      videoRow.hidden = !offersVideo;
+      /** The query of the estimate and the lists: the filters, plus the video choice when it is ticked. */
+      const startQuery = (offer: number | null): string =>
+        [filterQueryString(filters, offer), includeVideo ? "video_models=true" : ""].filter((p) => p !== "").join("&");
       const estBox = make("div", undefined, "estimate");
       estBox.setAttribute("aria-live", "polite");
       const errBox = make("div", undefined, "alert bad");
@@ -649,7 +685,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, advanced, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -694,7 +730,7 @@ export function mountApp(doc: Document, env: Env): App {
         modalOk.disabled = true;
         if (select.value === "") return;
         try {
-          const est = parseEstimate(await call("GET", estimatePath(select.value, filterQueryString(filters, chosenOffer))));
+          const est = parseEstimate(await call("GET", estimatePath(select.value, startQuery(chosenOffer))));
           if (seq !== estimateSeq || token !== dialogToken) return;
           if (est === null) throw new ApiError("The cost estimate was not understood. Nothing was started.");
           estimate = est;
@@ -732,7 +768,12 @@ export function mountApp(doc: Document, env: Env): App {
         clearMessages();
         render();
         try {
-          const res = await call("POST", API.start, { confirm: true, gpu: chosen, ...filterBodyMembers(filters, chosenOffer) });
+          const res = await call("POST", API.start, {
+            confirm: true,
+            gpu: chosen,
+            ...filterBodyMembers(filters, chosenOffer),
+            ...(includeVideo ? { video_models: true } : {}),
+          });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
           const started = parseEstimate(res !== null && typeof res === "object" ? (res as Record<string, unknown>)["estimate"] : null);
@@ -764,7 +805,7 @@ export function mountApp(doc: Document, env: Env): App {
       modalCancel.focus();
 
       const gpusPath = (): string => {
-        const q = filterQueryString(filters, null);
+        const q = startQuery(null);
         return q === "" ? API.gpus : `${API.gpus}?${q}`;
       };
 
@@ -836,6 +877,12 @@ export function mountApp(doc: Document, env: Env): App {
         if (await populateGpus(select.value === "" ? null : select.value)) await loadEstimate();
       };
       for (const control of [regionSel, sortSel, priceIn, speedIn]) control.addEventListener("change", () => void onFiltersChanged());
+      // The disk (and so the price and the offers) follow the video choice.
+      videoBox.addEventListener("change", () => {
+        includeVideo = videoBox.checked;
+        writeStartVideo(includeVideo);
+        void onFiltersChanged();
+      });
 
       const loadOffers = async (): Promise<void> => {
         if (!takeFilters() || select.value === "") return;
@@ -843,7 +890,7 @@ export function mountApp(doc: Document, env: Env): App {
         offerNote.textContent = "Loading servers…";
         showOffers.disabled = true;
         try {
-          const query = [`gpu=${encodeURIComponent(select.value)}`, filterQueryString(filters, null)].filter((p) => p !== "").join("&");
+          const query = [`gpu=${encodeURIComponent(select.value)}`, startQuery(null)].filter((p) => p !== "").join("&");
           const list = parseOffers(await call("GET", `${API.offers}?${query}`));
           if (token !== dialogToken) return;
           if (list === null) throw new ApiError("The server list was not understood. Nothing was started.");
@@ -1193,6 +1240,38 @@ export function mountApp(doc: Document, env: Env): App {
   const videoSizeSelect = $<HTMLSelectElement>("video-size");
   const videoDurationSelect = $<HTMLSelectElement>("video-duration");
   const qualityBox = $("quality-box");
+  const videoModelsBox = $("video-models");
+  const videoModelsBtn = $<HTMLButtonElement>("video-models-download");
+  const videoModelsError = $("video-models-error");
+  let videoModelsAsking = false;
+
+  /** The Video panel's line about the instance's video model files, and the admin's download button. */
+  function renderVideoModels(s: ApiState, filming: boolean): void {
+    const note = s.video === null ? { text: "", download: false } : videoModelsNote(s.video, s.role === "admin");
+    $("video-models-text").textContent = note.text;
+    videoModelsBtn.hidden = !note.download;
+    videoModelsBtn.textContent = s.video === null ? "" : videoDownloadLabel(s.video);
+    videoModelsBtn.disabled = videoModelsAsking || !GENERATE_READY.has(s.state);
+    videoModelsBox.hidden = !filming || (note.text === "" && videoModelsError.hidden);
+  }
+
+  videoModelsBtn.addEventListener("click", () => void downloadVideoModels());
+  async function downloadVideoModels(): Promise<void> {
+    if (videoModelsAsking || state?.role !== "admin") return;
+    videoModelsAsking = true;
+    videoModelsError.hidden = true;
+    if (state) renderForm(state);
+    try {
+      await call("POST", API.videoModels, {});
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+      videoModelsError.textContent = err instanceof Error ? err.message : "The download could not be started.";
+      videoModelsError.hidden = false;
+    } finally {
+      videoModelsAsking = false;
+    }
+    if (active) await refresh();
+  }
   const sizeOption = (z: { name: string; width: number; height: number }): HTMLOptionElement => {
     const o = make("option", sizeLabel(z));
     o.value = z.name;
@@ -1309,6 +1388,7 @@ export function mountApp(doc: Document, env: Env): App {
     samplingBox.hidden = upscaling;
     // A video has its own size and length; only the seed of the sampling box applies.
     qualityBox.hidden = filming;
+    renderVideoModels(s, filming);
     sizeBox.hidden = editing || upscaling || filming;
     promptBox.placeholder = notes
       ? "Optional notes for this style"
@@ -1327,6 +1407,8 @@ export function mountApp(doc: Document, env: Env): App {
         ? filming
           ? VIDEO_WAIT_TEXT
           : ""
+        : filming && s.video !== null && s.video.models?.state !== "ready" && GENERATE_READY.has(s.state)
+          ? "Make video unlocks when the video models are on the instance (see above)."
         : s.state === "none"
           ? "No instance is running. An admin needs to start one."
           : "Generating is available when the instance is ready.";

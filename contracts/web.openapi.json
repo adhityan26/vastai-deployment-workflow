@@ -1167,6 +1167,8 @@
                 "required": [
                   "sizes",
                   "durations",
+                  "download_bytes",
+                  "models",
                   "max_bytes",
                   "max_pixels",
                   "types"
@@ -1232,6 +1234,65 @@
                         "webp"
                       ]
                     }
+                  },
+                  "download_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Size of all video model files (what Download video models may fetch)"
+                  },
+                  "models": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "state",
+                          "bytes_done",
+                          "bytes_total",
+                          "percent",
+                          "reason"
+                        ],
+                        "properties": {
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "unavailable",
+                              "not_installed",
+                              "downloading",
+                              "ready",
+                              "failed"
+                            ]
+                          },
+                          "bytes_done": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "bytes_total": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "percent": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Why a download failed (scrubbed agent text)"
+                          }
+                        }
+                      }
+                    ],
+                    "description": "The video model files on the running instance: ready after a boot with Include video models or a finished on-demand download; null without an instance or when its agent does not say"
                   }
                 }
               }
@@ -2196,6 +2257,19 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
       }
@@ -2344,6 +2418,19 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
       }
@@ -3055,6 +3142,13 @@
                       "null"
                     ],
                     "description": "Rent exactly this offer from GET /api/offers instead of the first of the sort order; 409 offer_gone when it vanished or no longer passes the filters (nothing is rented, nothing billed)."
+                  },
+                  "video_models": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "true: include the video model files in the boot (rents max(VAST_DISK_GB, VAST_VIDEO_DISK_GB) of disk and sets INCLUDE_VIDEO_MODELS=true on the instance). Refused with 400 video_unavailable where video is off. Absent, null or false: the image-only boot"
                   }
                 }
               }
@@ -3112,7 +3206,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed); video_models where video is off (code video_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4728,6 +4822,19 @@
               "minimum": 1
             },
             "description": "A specific offer from GET /api/offers; 409 offer_gone when it is no longer available."
+          },
+          {
+            "in": "query",
+            "name": "video_models",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
           }
         ]
       }
@@ -4854,7 +4961,7 @@
             }
           },
           "409": {
-            "description": "The instance is not ready (code not_ready)",
+            "description": "The instance is not ready (code not_ready), or its video model files are not there (code video_models_not_ready: not installed, still downloading, failed or not reported; never queued)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4995,6 +5102,171 @@
           },
           "502": {
             "description": "Unsafe reference, a body that is not an mp4 or WebM video, a body over VIDEO_MAX_BYTES, or ComfyUI unavailable (codes video_rejected, video_too_large, video_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video-models": {
+      "post": {
+        "operationId": "videoModels",
+        "summary": "Download the video model files onto the running instance (admin). The agent checks that the instance serves, that ComfyUI has the video node classes and that the disk holds the files, then downloads only the missing files in the background (single-flight; a second call changes nothing). Image jobs keep running; the download counts as activity for the idle shutdown. Progress: video.models in /api/state.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "models"
+                  ],
+                  "properties": {
+                    "models": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "bytes_done",
+                            "bytes_total",
+                            "percent",
+                            "reason"
+                          ],
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "unavailable",
+                                "not_installed",
+                                "downloading",
+                                "ready",
+                                "failed"
+                              ]
+                            },
+                            "bytes_done": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "bytes_total": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "percent": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Why a download failed (scrubbed agent text)"
+                            }
+                          }
+                        }
+                      ],
+                      "description": "The video model files on the running instance: ready after a boot with Include video models or a finished on-demand download; null without an instance or when its agent does not say"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is not an empty object (code invalid_body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video is not available on this server (code video_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No active instance (code no_instance), or the agent refused: codes video_unavailable, not_ready, video_nodes_missing (ComfyUI lacks the node classes), disk_insufficient (the instance disk is too small: start with Include video models), comfy_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The agent could not be reached or answered with an error (code agent_unavailable), or an oversized answer (code upstream_too_large)",
             "content": {
               "application/json": {
                 "schema": {

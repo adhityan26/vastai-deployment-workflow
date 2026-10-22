@@ -110,6 +110,8 @@ import {
   videoHint,
   videoLabel,
   videoUrl,
+  videoDownloadLabel,
+  videoModelsNote,
 } from "../../public/model.js";
 import {
   PANEL_STORAGE_KEY,
@@ -1209,6 +1211,8 @@ describe("video", () => {
     max_bytes: 2 * 1024 * 1024,
     max_pixels: 1_000_000,
     types: ["png", "jpeg"],
+    download_bytes: 18_000_000_000,
+    models: { state: "ready" as const, bytes_done: 5, bytes_total: 5, percent: 100, reason: null },
   };
   const state = (over: Record<string, unknown> = {}) => parseState({ ...base, ...over })!;
   const entry = (over: Partial<MenuEntry> = {}): MenuEntry => ({ id: "t", title: "T", description: null, icon: "image", category: "create", tool: "generate", style: null, available: true, ...over });
@@ -1235,6 +1239,39 @@ describe("video", () => {
     expect(controls(state({ video }), false, true).canVideo).toBe(false);
     expect(controls(state({ video, state: "booting" }), false, false).canVideo).toBe(false);
     expect(controls(state(), false, false).canVideo).toBe(false);
+    // Not while the instance lacks its video models (or does not say).
+    for (const models of [null, { ...video.models, state: "downloading" }, { ...video.models, state: "not_installed" }, { ...video.models, state: "failed" }]) {
+      expect(controls(state({ video: { ...video, models } }), false, false).canVideo).toBe(false);
+    }
+  });
+
+  it("reads the video model state strictly; anything odd is 'not reported'", () => {
+    expect(state({ video: { ...video, models: { state: "downloading", bytes_done: 3, bytes_total: 9, percent: 33, reason: null } } }).video!.models).toEqual({
+      state: "downloading", bytes_done: 3, bytes_total: 9, percent: 33, reason: null,
+    });
+    expect(state({ video: { ...video, models: { state: "maybe" } } }).video!.models).toBeNull();
+    expect(state({ video: { ...video, models: { state: "failed", bytes_done: -1, percent: 101, reason: "" } } }).video!.models).toEqual({
+      state: "failed", bytes_done: 0, bytes_total: 0, percent: null, reason: null,
+    });
+    expect(state({ video: { ...video, download_bytes: -5 } }).video!.download_bytes).toBe(0);
+  });
+
+  it("words the video model state for admins (with the download button) and members (ask an admin)", () => {
+    const at = (models: unknown) => ({ ...video, models } as typeof video);
+    expect(videoModelsNote(video, true)).toEqual({ text: "", download: false });
+    expect(videoModelsNote(at({ state: "not_installed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), true)).toEqual({ text: "This instance was started without the video models.", download: true });
+    expect(videoModelsNote(at({ state: "not_installed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), false)).toEqual({
+      text: "The video models are not installed on this instance. Ask an admin to download them.", download: false,
+    });
+    expect(videoModelsNote(at({ state: "downloading", bytes_done: 4_500_000_000, bytes_total: 18_000_000_000, percent: 25, reason: null }), false).text).toBe(
+      "Downloading the video models: 4.5 GB of 18.0 GB (25%). Images keep working meanwhile; Make video unlocks when it is done.",
+    );
+    expect(videoModelsNote(at({ state: "failed", bytes_done: 0, bytes_total: 1, percent: 0, reason: "disk full" }), true)).toEqual({ text: "The video model download failed: disk full.", download: true });
+    expect(videoModelsNote(at({ state: "failed", bytes_done: 0, bytes_total: 1, percent: 0, reason: null }), false).text).toBe("The video model download failed. Ask an admin to try again.");
+    expect(videoModelsNote(at(null), true).download).toBe(false);
+    expect(videoModelsNote(at({ state: "unavailable", bytes_done: 0, bytes_total: 0, percent: null, reason: null }), true)).toEqual({ text: "This instance has no video models.", download: false });
+    expect(videoDownloadLabel(video)).toBe("Download video models (about 18.0 GB, several minutes)");
+    expect(videoDownloadLabel({ ...video, download_bytes: 0 })).toBe("Download video models (several minutes)");
   });
 
   it("offers the video entry only while video is on, never with a style, and continues a result into it", () => {

@@ -17,6 +17,8 @@ export interface StartFilters {
   sort?: SortKey;
   /** A specific offer from the listing instead of the first of the sort order. */
   offerId?: number;
+  /** Include the profile's video model files in the boot (a larger disk, INCLUDE_VIDEO_MODELS on the instance). */
+  videoModels?: true;
 }
 
 export class StartFilterError extends Error {
@@ -50,7 +52,7 @@ export function regionOfLocation(location: string | null): Region | null {
   return m === null ? null : (REGION_OF.get(m[1]!.toUpperCase()) ?? null);
 }
 
-const KEYS = new Set(["region", "max_dph", "min_down_mbps", "sort", "offer_id"]);
+const KEYS = new Set(["region", "max_dph", "min_down_mbps", "sort", "offer_id", "video_models"]);
 
 /** Strictly check the filter members of a request. `limits.maxDph` is VAST_MAX_DPH: a request may only lower it. */
 export function parseStartFilters(raw: unknown, limits: { maxDph: number }): StartFilters {
@@ -84,6 +86,10 @@ export function parseStartFilters(raw: unknown, limits: { maxDph: number }): Sta
     const v = r["offer_id"];
     if (typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0) throw new StartFilterError("offer_id must be a positive whole number");
     out.offerId = v;
+  }
+  if (set(r["video_models"])) {
+    if (typeof r["video_models"] !== "boolean") throw new StartFilterError("video_models must be true or false");
+    if (r["video_models"]) out.videoModels = true; // false is the plain image-only boot
   }
   return out;
 }
