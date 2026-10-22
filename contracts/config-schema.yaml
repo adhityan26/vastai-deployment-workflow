@@ -14,6 +14,7 @@ keys:
   - {name: REPO_COMMIT, components: [instance, apps], type: str, secret: false, required: true, default: null, description: "Pinned commit that bootstrap checks out"}
   - {name: PROFILE, components: [instance, apps], type: str, secret: false, required: true, default: null, description: "Profile name, e.g. image"}
   - {name: KEEP_ON_FAILURE, components: [instance], type: bool, secret: false, required: false, default: false, description: "Do not self-destroy on boot failure (debugging only)"}
+  - {name: INCLUDE_VIDEO_MODELS, components: [instance], type: bool, secret: false, required: false, default: false, description: "Download the profile's video model files at boot and require the video node classes before ready (set by the web app from the Start dialog's Include video models). false: the boot is image-only; the video files can still be fetched later on demand through the agent's POST /video-models"}
   # --- paths ---
   - {name: STATE_DIR, components: [instance], type: str, secret: false, required: false, default: "/var/lib/vastcomfy", description: "Persistent state directory"}
   - {name: ENV_FILE_PATH, components: [instance], type: str, secret: false, required: false, default: "/etc/vastcomfy/.env", description: "Where bootstrap writes the instance .env"}

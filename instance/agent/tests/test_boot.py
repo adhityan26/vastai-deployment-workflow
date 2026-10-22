@@ -672,3 +672,78 @@ def test_install_models_downloads_over_download_connections_ranges(tmp_path, con
     assert code == 0
     assert (tmp_path / "comfy" / "models" / "x" / "m.bin").read_bytes() == body
     assert len([s for s in seen if s[0] == "GET" and s[1] is not None]) == ranged
+
+
+# --- INCLUDE_VIDEO_MODELS: an image-only boot skips the video files and node classes ---
+
+VIDEO_PROFILE = """
+name: image
+requires: {vram_gb: 24, disk_gb: 40}
+nodes: []
+provides_node_classes: [UnetLoaderGGUF]
+models:
+  - {file: m.bin, repo: org/m, revision: r1, dest: models/x/, size_bytes: 10}
+  - {file: sub/v.bin, repo: org/v, revision: r1, dest: models/v/, size_bytes: 10}
+workflows: [flow.json, video.json]
+video:
+  enabled: true
+  workflow: video.json
+  models: [{file: v.bin, dest: models/v/}]
+  node_classes: [SaveVideo]
+"""
+
+
+def with_video_profile(tmp_path):
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True)
+    (prof / "image.yaml").write_text(VIDEO_PROFILE)
+
+
+def counting_client(seen):
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, content=b"x" * 10)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("include, files", [(None, ["m.bin"]), ("false", ["m.bin"]), ("true", ["m.bin", "v.bin"])])
+def test_install_models_downloads_the_video_files_only_when_the_boot_includes_them(tmp_path, include, files):
+    environ = prepared(tmp_path, **({} if include is None else {"INCLUDE_VIDEO_MODELS": include}))
+    with_video_profile(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    seen = []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(seen),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 0
+    assert [p.rsplit("/", 1)[-1] for p in seen] == files
+    assert (tmp_path / "comfy" / "models" / "v" / "v.bin").exists() == (include == "true")
+
+
+def test_an_image_only_boot_does_not_need_disk_for_the_video_files(tmp_path):
+    environ = prepared(tmp_path, DISK_MARGIN_MB="0")
+    with_video_profile(tmp_path)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=ok_client(),
+                       free_bytes_fn=lambda p: 15)  # room for the image file, not for both
+    assert code == 0
+    environ = prepared(tmp_path, DISK_MARGIN_MB="0", INCLUDE_VIDEO_MODELS="true")
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=ok_client(),
+                       free_bytes_fn=lambda p: 5)
+    assert code == 12 and states(tmp_path).get().reason == "disk_insufficient"
+
+
+@pytest.mark.parametrize("include, asked", [("false", ["UnetLoaderGGUF"]), ("true", ["UnetLoaderGGUF", "SaveVideo"])])
+def test_verify_nodes_checks_the_video_classes_only_when_the_boot_includes_video(tmp_path, include, asked):
+    environ = prepared(tmp_path, INCLUDE_VIDEO_MODELS=include)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    states(tmp_path).set(State.DOWNLOADING)
+    with_video_profile(tmp_path)
+    seen = []
+    code, _ = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                       http_client=fake_comfy({"UnetLoaderGGUF"}, seen))
+    assert seen == [f"/object_info/{c}" for c in asked]
+    assert code == (0 if include == "false" else 12)

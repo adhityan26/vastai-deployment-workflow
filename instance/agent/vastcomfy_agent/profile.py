@@ -99,9 +99,12 @@ class Profile:
     models: tuple[ModelSpec, ...]
     workflows: tuple[str, ...]
     generate: GenerateSpec | None = None
-    # Declared classes, plus the video section's when video is enabled (boot checks them all).
+    # Node classes boot always checks (the video section's are added only for a boot that includes video).
     provides_node_classes: tuple[str, ...] = ()
     video_enabled: bool = False
+    # With video enabled: the plain file names of its model files (entries of `models`) and its node classes.
+    video_models: tuple[str, ...] = ()
+    video_node_classes: tuple[str, ...] = ()
 
 
 def _relative(value: str, what: str) -> str:
@@ -205,12 +208,12 @@ def _dest_folder(dest: str) -> str:
     return dest.rstrip("/")
 
 
-def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
-    """(enabled, node classes boot must find). The web app owns the rest of `video:` (apps/core/src/video.ts);
+def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...]) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+    """(enabled, its model file names, its node classes). The web app owns the rest of `video:` (apps/core/src/video.ts);
     this checks what decides downloads and the boot check, also while video is off, so a broken section fails
     at boot and never mid-job. Enabled video needs each of its model files pinned in `models:` with its dest."""
     if raw is None:
-        return False, ()
+        return False, (), ()
     video = _mapping(raw, "video")
     enabled = video.get("enabled")
     if not isinstance(enabled, bool):
@@ -233,14 +236,14 @@ def _parse_video(raw: object, models: list[ModelSpec], workflows: tuple[str, ...
         wanted.append((name, dest))
     classes = _parse_node_classes(video.get("node_classes"), "video node_classes")
     if not enabled:
-        return False, ()
+        return False, (), ()
     for name, dest in wanted:
         entry = next((m for m in models if PurePosixPath(m.file).name == name), None)
         if entry is None:
             raise ProfileError(f"video model {name} is not listed in models (pin it with scripts/pin_model.py)")
         if _dest_folder(entry.dest) != _dest_folder(dest):
             raise ProfileError(f"video model {name} must have dest {_dest_folder(dest)}/")
-    return True, classes
+    return True, tuple(name for name, _ in wanted), classes
 
 
 _STYLE_KINDS = ("lora", "preset")
@@ -303,7 +306,7 @@ def load_profile(path: Path) -> Profile:
         _check_styles(raw.get("styles"))
         workflows = tuple(_relative(w, "workflow") for w in raw.get("workflows", []))
         declared = _parse_node_classes(raw.get("provides_node_classes"))
-        video_enabled, video_classes = _parse_video(raw.get("video"), models, workflows)
+        video_enabled, video_files, video_classes = _parse_video(raw.get("video"), models, workflows)
         return Profile(
             name=_required(raw["name"], "name"),
             requires_vram_gb=int(raw["requires"]["vram_gb"]),
@@ -312,8 +315,10 @@ def load_profile(path: Path) -> Profile:
             models=tuple(models),
             workflows=workflows,
             generate=_parse_generate(raw["generate"]) if raw.get("generate") is not None else None,
-            provides_node_classes=declared + tuple(c for c in video_classes if c not in declared),
+            provides_node_classes=declared,
             video_enabled=video_enabled,
+            video_models=video_files,
+            video_node_classes=video_classes,
         )
     except ProfileError as exc:
         raise ProfileError(f"{path}: {exc}") from None
@@ -325,17 +330,40 @@ def target_path(model: ModelSpec, comfy_dir: Path) -> Path:
     return Path(comfy_dir) / model.dest / PurePosixPath(model.file).name
 
 
-def missing_models(profile: Profile, comfy_dir: Path) -> list[ModelSpec]:
+def video_model_specs(profile: Profile) -> tuple[ModelSpec, ...]:
+    """The `models` entries of the video section (empty when video is not enabled)."""
+    return tuple(m for m in profile.models if PurePosixPath(m.file).name in profile.video_models)
+
+
+def boot_models(profile: Profile, include_video: bool) -> tuple[ModelSpec, ...]:
+    """What a boot downloads: every model, minus the video section's unless the boot includes video
+    (INCLUDE_VIDEO_MODELS). Profile order is kept."""
+    if include_video:
+        return profile.models
+    skip = set(video_model_specs(profile))
+    return tuple(m for m in profile.models if m not in skip)
+
+
+def boot_node_classes(profile: Profile, include_video: bool) -> tuple[str, ...]:
+    """What a boot requires from ComfyUI: the declared classes, plus the video section's when it includes video."""
+    extra = profile.video_node_classes if include_video else ()
+    return profile.provides_node_classes + tuple(c for c in extra if c not in profile.provides_node_classes)
+
+
+def missing_models(profile: Profile, comfy_dir: Path, models: tuple[ModelSpec, ...] | None = None) -> list[ModelSpec]:
+    """The given models (default: all of the profile) that are not on disk with their pinned size."""
     missing = []
-    for model in profile.models:
+    for model in profile.models if models is None else models:
         target = target_path(model, comfy_dir)
         if not target.is_file() or target.stat().st_size != model.size_bytes:
             missing.append(model)
     return missing
 
 
-def check_disk(profile: Profile, comfy_dir: Path, free_bytes: int, margin_mb: int) -> None:
-    needed = sum(m.size_bytes for m in missing_models(profile, comfy_dir)) + margin_mb * 1024 * 1024
+def check_disk(
+    profile: Profile, comfy_dir: Path, free_bytes: int, margin_mb: int, models: tuple[ModelSpec, ...] | None = None,
+) -> None:
+    needed = sum(m.size_bytes for m in missing_models(profile, comfy_dir, models)) + margin_mb * 1024 * 1024
     if free_bytes < needed:
         raise DiskInsufficient(f"need {needed} bytes, only {free_bytes} free")
 

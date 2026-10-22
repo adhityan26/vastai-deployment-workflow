@@ -34,7 +34,7 @@ class FakeFlow:
         return True
 
 
-def make(tmp_path, counts=(0, 0), ready=True):
+def make(tmp_path, counts=(0, 0), ready=True, busy=lambda: False):
     clock = Clock()
     states = StateStore(tmp_path, clock)
     states.set(State.BOOTING)
@@ -47,7 +47,7 @@ def make(tmp_path, counts=(0, 0), ready=True):
     idle.start()
     flow = FakeFlow()
     runner = Runner(states=states, idle=idle, comfy=FakeComfy(counts), flow=flow, state_dir=tmp_path,
-                    now=clock, destroy_failed_retry_s=RETRY_S)
+                    now=clock, destroy_failed_retry_s=RETRY_S, busy=busy)
     return clock, states, flow, runner
 
 
@@ -171,3 +171,15 @@ def test_other_states_are_never_retried(tmp_path):
             clock.t = T0 + offset
             runner.tick()
         assert flow.reasons == [], name
+
+
+def test_a_running_video_model_download_keeps_the_instance_alive(tmp_path):
+    flags = {"busy": True}
+    clock, states, flow, runner = make(tmp_path, busy=lambda: flags["busy"])
+    clock.t += 31 * 60
+    runner.tick()
+    assert flow.reasons == [] and states.get().state == State.READY
+    flags["busy"] = False
+    clock.t += 31 * 60
+    runner.tick()
+    assert flow.reasons == ["idle_timeout"]

@@ -6,7 +6,8 @@ import pytest
 from vastcomfy_agent.files import read_json
 from vastcomfy_agent.profile import (
     Downloader, DiskInsufficient, DownloadError, ModelSpec, NodeInstallError, NodeSpec, Profile,
-    ProfileError, ProgressWriter, check_disk, install_nodes, load_profile, missing_models, target_path,
+    ProfileError, ProgressWriter, boot_models, boot_node_classes, check_disk, install_nodes, load_profile,
+    missing_models, target_path, video_model_specs,
 )
 
 PROFILE_YAML = """
@@ -591,16 +592,45 @@ def test_the_shipped_video_section_is_off_and_adds_no_boot_requirement():
     assert {m["file"] for m in video["models"]} <= used
 
 
-def test_enabled_video_requires_its_node_classes_at_boot(tmp_path):
+def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only_when_asked(tmp_path):
     raw = _video_raw()
     raw["models"] += VIDEO_PINS
     raw["video"]["enabled"] = True
     profile = load_profile(_write_raw(tmp_path, raw))
     assert profile.video_enabled is True
-    assert profile.provides_node_classes[:3] == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
-    assert set(profile.provides_node_classes[3:]) == set(raw["video"]["node_classes"])
-    assert "Wan22ImageToVideoLatent" in profile.provides_node_classes and "SaveVideo" in profile.provides_node_classes
-    assert len(set(profile.provides_node_classes)) == len(profile.provides_node_classes)
+    assert profile.video_models == tuple(m["file"] for m in raw["video"]["models"])
+    assert profile.video_node_classes == tuple(raw["video"]["node_classes"])
+    image_classes = ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
+    # An image-only boot is exactly as before: no video file, no video node class.
+    assert profile.provides_node_classes == image_classes
+    assert boot_node_classes(profile, False) == image_classes
+    image_only = boot_models(profile, False)
+    assert [m.file for m in image_only] == [m.file for m in profile.models[:-3]]
+    assert [m.file for m in video_model_specs(profile)] == [p["file"] for p in VIDEO_PINS]
+    # A boot that includes video downloads every file and also requires the video classes, once each.
+    assert boot_models(profile, True) == profile.models
+    with_video = boot_node_classes(profile, True)
+    assert with_video[:3] == image_classes and set(with_video[3:]) == set(raw["video"]["node_classes"])
+    assert "SaveVideo" in with_video and len(set(with_video)) == len(with_video)
+
+
+def test_video_off_means_nothing_is_skipped_or_added(tmp_path):
+    raw = _video_raw()
+    raw["models"] += VIDEO_PINS  # pinned, but the section is off: they are ordinary models
+    profile = load_profile(_write_raw(tmp_path, raw))
+    assert profile.video_models == () and video_model_specs(profile) == ()
+    assert boot_models(profile, False) == profile.models
+    assert boot_node_classes(profile, True) == profile.provides_node_classes
+
+
+def test_missing_models_and_the_disk_check_can_be_limited_to_some_models(tmp_path):
+    profile = load_profile(write_profile(tmp_path))
+    comfy = tmp_path / "comfy"
+    only = (profile.models[1],)
+    assert missing_models(profile, comfy, only) == [profile.models[1]]
+    check_disk(profile, comfy, 50 + 1024 * 1024, 1, only)  # 50 bytes plus the margin fits
+    with pytest.raises(DiskInsufficient):
+        check_disk(profile, comfy, 50 + 1024 * 1024, 1)  # all models: 150 bytes do not
 
 
 def test_enabled_video_without_its_pinned_models_fails_loudly(tmp_path):

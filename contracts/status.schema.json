@@ -134,6 +134,54 @@
       ],
       "title": "State",
       "type": "string"
+    },
+    "VideoModelsStatus": {
+      "description": "The video model files on this instance (vastcomfy_agent.video_models).",
+      "properties": {
+        "boot": {
+          "title": "Boot",
+          "type": "boolean"
+        },
+        "bytes_done": {
+          "title": "Bytes Done",
+          "type": "integer"
+        },
+        "bytes_total": {
+          "title": "Bytes Total",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "state": {
+          "enum": [
+            "unavailable",
+            "not_installed",
+            "downloading",
+            "ready",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "boot",
+        "bytes_done",
+        "bytes_total"
+      ],
+      "title": "VideoModelsStatus",
+      "type": "object"
     }
   },
   "properties": {
@@ -260,6 +308,17 @@
         }
       ],
       "title": "Uptime S"
+    },
+    "video_models": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VideoModelsStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

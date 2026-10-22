@@ -18,8 +18,8 @@ from .config import ConfigError, KeySpec, _coerce, default_text, load_config, lo
 from .deadlines import DeadlineStore
 from .files import atomic_write
 from .profile import (
-    DiskInsufficient, DownloadError, Downloader, NodeInstallError, ProfileError, ProgressWriter, check_disk,
-    free_bytes_of, install_nodes, load_profile, missing_models,
+    DiskInsufficient, DownloadError, Downloader, NodeInstallError, ProfileError, ProgressWriter, boot_models,
+    boot_node_classes, check_disk, free_bytes_of, install_nodes, load_profile, missing_models,
 )
 from .state import InvalidTransition, State, StateStore
 from .comfy_args import image_env_file, render_args, write_image_env
@@ -141,7 +141,9 @@ def cmd_install_models(b: Boot) -> int:
     comfy_dir = Path(b.cfg.comfy_dir)
     try:
         profile = b.profile()
-        check_disk(profile, comfy_dir, b.free_bytes_fn(comfy_dir), b.cfg.disk_margin_mb)
+        # An image-only boot (INCLUDE_VIDEO_MODELS false) neither downloads nor counts the video files.
+        wanted = boot_models(profile, b.cfg.include_video_models)
+        check_disk(profile, comfy_dir, b.free_bytes_fn(comfy_dir), b.cfg.disk_margin_mb, wanted)
     except DiskInsufficient as exc:
         print(f"boot: {exc}", file=sys.stderr)
         return b.fail("disk_insufficient")
@@ -154,7 +156,7 @@ def cmd_install_models(b: Boot) -> int:
         on_progress=ProgressWriter(Path(b.cfg.state_dir), "models"), connections=b.cfg.download_connections,
     )
     try:
-        for model in missing_models(profile, comfy_dir):
+        for model in missing_models(profile, comfy_dir, wanted):
             downloader.fetch(model, comfy_dir)
     except DownloadError as exc:
         print(f"boot: {exc}", file=sys.stderr)
@@ -220,7 +222,7 @@ def cmd_verify_nodes(b: Boot) -> int:
     """After the ComfyUI restart answers: every node class the profile provides must be registered, so a node
     whose import failed (e.g. a missing Python dependency) never ends in a healthy-looking `ready`."""
     try:
-        names = b.profile().provides_node_classes
+        names = boot_node_classes(b.profile(), b.cfg.include_video_models)
         missing = [name for name in names if not b.wired.comfy.node_class_registered(name)]
     except (ProfileError, ComfyUnavailable) as exc:
         print(f"boot: node verification failed: {exc}", file=sys.stderr)

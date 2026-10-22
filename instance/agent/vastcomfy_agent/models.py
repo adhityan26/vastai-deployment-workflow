@@ -29,6 +29,16 @@ class DestroyInfo(BaseModel):
     last_error: str | None = None
 
 
+class VideoModelsStatus(BaseModel):
+    """The video model files on this instance (vastcomfy_agent.video_models)."""
+    state: Literal["unavailable", "not_installed", "downloading", "ready", "failed"]
+    # Whether this boot downloads them itself (INCLUDE_VIDEO_MODELS).
+    boot: bool
+    bytes_done: int
+    bytes_total: int
+    reason: str | None = None
+
+
 class Status(BaseModel):
     schema_version: Literal[1] = 1
     state: State | None
@@ -46,6 +56,7 @@ class Status(BaseModel):
     commit: str
     failsafe_alive: bool
     destroy: DestroyInfo
+    video_models: VideoModelsStatus | None = None
 
 
 class ExtendRequest(BaseModel):

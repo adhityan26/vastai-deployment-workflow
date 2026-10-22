@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from .comfy import ComfyClient
 from .deadlines import DeadlineStore
 from .files import read_int, read_json
-from .models import DestroyInfo, Gpu, Progress, QueueCounts, Status
+from .models import DestroyInfo, Gpu, Progress, QueueCounts, Status, VideoModelsStatus
 from .paths import StatePaths
 from .state import State, StateStore
 
@@ -52,6 +52,7 @@ class StatusBuilder:
         profile: str,
         commit: str,
         now: Callable[[], int],
+        video: Callable[[], VideoModelsStatus | None] = lambda: None,
     ):
         self._p = StatePaths(state_dir)
         self._states = states
@@ -61,6 +62,7 @@ class StatusBuilder:
         self._profile = profile
         self._commit = commit
         self._now = now
+        self._video = video
 
     def _progress(self, state: State | None) -> Progress | None:
         if state != State.DOWNLOADING:
@@ -103,4 +105,12 @@ class StatusBuilder:
             commit=self._commit,
             failsafe_alive=_pid_alive(read_int(self._p.failsafe_pid)),
             destroy=self._destroy_info(),
+            video_models=self._video_status(),
         )
+
+    def _video_status(self) -> VideoModelsStatus | None:
+        # Best effort: the video files must never break the status the watchdog and the web app depend on.
+        try:
+            return self._video()
+        except Exception:
+            return None
