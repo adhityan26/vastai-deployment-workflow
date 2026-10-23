@@ -1,5 +1,5 @@
 import { camelCase, type AppsConfig } from "./config.js";
-import type { AgentStatus, VideoModelsStatus } from "./agent.js";
+import type { AgentStatus, VideoFamilyStatus, VideoModelsStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError } from "./tailscale.js";
@@ -48,6 +48,8 @@ const PORTAL_PORT = 8188; // config-lint: ok (vastai/comfy portal port, protocol
 const READY_STATES = new Set(["ready", "idle-warning"]);
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
+// Vast counts disk in decimal gigabytes.
+const BYTES_PER_GB = 1_000_000_000;
 const VANISH_CONFIRMATIONS = 2; // consecutive lists without the instance before it counts as gone
 const MB_PER_GIB = 1024; // Vast reports gpu_ram in MiB; shown as whole GiB (24564 -> 24)
 const DOWNLOAD_STATE = "downloading";
@@ -185,6 +187,7 @@ export interface AgentLike {
   status(): Promise<AgentStatus>;
   extend(kind: "idle" | "failsafe", minutes: number): Promise<Record<string, unknown>>;
   startVideoModels?(url?: string): Promise<VideoModelsStatus>;
+  startVideoFamily?(family: string, opts?: { mode?: "text" | "image"; links?: Record<string, string> }): Promise<VideoFamilyStatus>;
   destroy(reason: "manual" | "watchdog"): Promise<void>;
 }
 
@@ -220,6 +223,11 @@ export interface LifecycleDeps {
    * include video (the agent's video_models.boot) does not download them, so the overall progress leaves them out.
    */
   videoModelFiles?: readonly string[];
+  /**
+   * The plain file names of every video family of the profile by id (the base section's too). A boot downloads only
+   * the families the agent marks `boot` (video_families), so the overall progress and the disk count only those.
+   */
+  videoFamilyFiles?: Readonly<Record<string, readonly string[]>>;
   /** Where the boot console persists (BOOT_LOG_PATH); without it the console lives in memory only. */
   consoleStore?: ConsoleStoreLike;
   /** The usage history (USAGE_LOG_PATH); without it nothing is recorded and history() is empty. */
@@ -605,7 +613,24 @@ export class Lifecycle {
    */
   private diskFor(choice: StartFilters): number {
     const disk = intCfg(this.cfg, "vastDiskGb", "VAST_DISK_GB", 1);
-    return choice.videoModels === true ? Math.max(disk, intCfg(this.cfg, "vastVideoDiskGb", "VAST_VIDEO_DISK_GB", 1)) : disk;
+    if (choice.videoModels !== true) return disk;
+    const video = Math.max(disk, intCfg(this.cfg, "vastVideoDiskGb", "VAST_VIDEO_DISK_GB", 1));
+    // Chosen families: their pinned files (a shared file once) on top of the image disk, never below the video disk.
+    const families = choice.videoFamilies ?? [];
+    if (families.length === 0) return video;
+    const names = new Set(families.flatMap((id) => this.deps.videoFamilyFiles?.[id] ?? []));
+    const bytes = (this.deps.profileModels ?? []).filter((m) => names.has(baseName(m.file))).reduce((sum, m) => sum + m.size_bytes, 0);
+    return Math.max(video, disk + Math.ceil(bytes / BYTES_PER_GB));
+  }
+
+  /** VIDEO_FAMILIES of this web app for the instance (nothing when it lists none). */
+  private familiesEnv(): Record<string, string> {
+    const v = this.cfg["videoFamilies"];
+    if (v === undefined || v === null || (Array.isArray(v) && v.length === 0)) return {};
+    if (!Array.isArray(v) || !v.every((id) => typeof id === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(id))) {
+      throw new Error("VIDEO_FAMILIES must list video family ids");
+    }
+    return { VIDEO_FAMILIES: v.join(",") };
   }
 
   /** VIDEO_MODEL_LINK_* of this web app for the instance (its own checks of a link use them). */
@@ -627,9 +652,18 @@ export class Lifecycle {
   /** The models this boot downloads, in order: every profile model, minus the video files unless it includes them. */
   private bootModels(agent: AgentStatus | null): readonly ModelSpec[] {
     const all = this.deps.profileModels ?? [];
-    const video = new Set(this.deps.videoModelFiles ?? []);
-    if (video.size === 0 || agent?.video_models?.boot === true) return all;
-    return all.filter((m) => !video.has(baseName(m.file)));
+    const byFamily = this.deps.videoFamilyFiles ?? {};
+    const video = new Set([...(this.deps.videoModelFiles ?? []), ...Object.values(byFamily).flat()]);
+    if (video.size === 0) return all;
+    // The agent says which families this boot downloads (video_families), else whether it includes the base one.
+    const keep = new Set(
+      Array.isArray(agent?.video_families)
+        ? agent.video_families.filter((f) => f.boot === true).flatMap((f) => byFamily[f.id] ?? [])
+        : agent?.video_models?.boot === true
+          ? (this.deps.videoModelFiles ?? [])
+          : [],
+    );
+    return all.filter((m) => !video.has(baseName(m.file)) || keep.has(baseName(m.file)));
   }
 
   /**
@@ -772,11 +806,13 @@ export class Lifecycle {
         : {}),
       // Only when asked (Start dialog "Include video models"): without it the instance boots image-only (default).
       ...(choice.videoModels === true ? { INCLUDE_VIDEO_MODELS: "true" } : {}),
+      // The families this boot downloads (checked by the route against the enabled ones); none: the base section.
+      ...(choice.videoModels === true && (choice.videoFamilies ?? []).length > 0 ? { VIDEO_BOOT_FAMILIES: choice.videoFamilies!.join(",") } : {}),
       // A link that replaces the pinned diffusion model (already checked by the route; the instance checks again).
       ...(choice.videoModels === true && choice.videoModelUrl !== undefined ? { VIDEO_MODEL_URL: choice.videoModelUrl } : {}),
       // Video on (VIDEO_ENABLED): the instance gets the switch and the link rules, so an on-demand link is checked the
       // same way. Off: nothing is sent and an image-only instance env is unchanged.
-      ...(cfg["videoEnabled"] === true ? { VIDEO_ENABLED: "true", ...this.linkRules() } : {}),
+      ...(cfg["videoEnabled"] === true ? { VIDEO_ENABLED: "true", ...this.linkRules(), ...this.familiesEnv() } : {}),
     };
   }
 
@@ -1063,6 +1099,23 @@ export class Lifecycle {
     if (typeof agent.startVideoModels !== "function") throw new NoActiveInstanceError();
     try {
       return await agent.startVideoModels(url);
+    } catch (err) {
+      if (err instanceof Error) err.message = this.scrub(err.message);
+      throw err;
+    }
+  }
+
+  /** Ask the active instance's agent to download a video family (admin action); like downloadVideoModels. */
+  async downloadVideoFamily(family: string, opts: { mode?: "text" | "image"; links?: Record<string, string> } = {}): Promise<VideoFamilyStatus> {
+    const record = await this.deps.registry.active();
+    if (record === null || record.vast_instance_id === null || record.status === "stopping") {
+      throw new NoActiveInstanceError();
+    }
+    this.secrets.add(record.agent_token);
+    const agent = this.deps.agentFor(record);
+    if (typeof agent.startVideoFamily !== "function") throw new NoActiveInstanceError();
+    try {
+      return await agent.startVideoFamily(family, opts);
     } catch (err) {
       if (err instanceof Error) err.message = this.scrub(err.message);
       throw err;

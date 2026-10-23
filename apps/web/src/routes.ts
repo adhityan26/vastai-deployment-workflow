@@ -26,7 +26,10 @@ import {
   upscale as runUpscale,
   video as runVideo,
   checkVideoTemplate,
+  checkVideoFamily,
   sniffVideo,
+  type VideoFamily,
+  type VideoFamilyStatus,
   ModelLinkError,
   isLinkedModelName,
   parseModelLink,
@@ -195,6 +198,15 @@ function publicVideoModel(v: VideoModelsStatus | null | undefined) {
   return { file: m.file, linked: m.linked === true, sha256: sha };
 }
 
+/** A video family's experts as the instance reports them, for admins (file names and sha256 checked first). */
+function publicExperts(v: VideoFamilyStatus | null | undefined) {
+  if (v === null || v === undefined || !Array.isArray(v.experts)) return [];
+  return v.experts
+    .filter((e) => (e.mode === "text" || e.mode === "image") && typeof e.slot === "string" && /^[a-z][a-z0-9]{0,15}$/.test(e.slot)
+      && typeof e.file === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(e.file))
+    .map((e) => ({ mode: e.mode, slot: e.slot, file: e.file, linked: e.linked === true, sha256: typeof e.sha256 === "string" && /^[0-9a-f]{64}$/.test(e.sha256) ? e.sha256 : null }));
+}
+
 /** Why a video job cannot run yet (null when the instance has its video models). */
 function videoModelsRefusal(v: VideoModelsStatus | null | undefined): string | null {
   if (v?.state === "ready") return null;
@@ -314,6 +326,8 @@ const FILTER_QUERY_PROPS = {
   sort: { type: "string", maxLength: 16 },
   offer_id: { type: "string", pattern: "^[0-9]{1,15}$" },
   video_models: { type: "string", enum: ["true", "false"] },
+  // Comma separated video family ids (only with video_models): the disk is sized for their files.
+  video_families: { type: "string", pattern: "^[a-z0-9_,]{0,300}$" },
 } as const;
 const FILTER_BODY_PROPS = {
   region: { type: ["string", "null"], maxLength: 32 },
@@ -322,6 +336,8 @@ const FILTER_BODY_PROPS = {
   sort: { type: ["string", "null"], maxLength: 16 },
   offer_id: { type: ["integer", "null"] },
   video_models: { type: ["boolean", "null"] },
+  // The video families whose files the boot downloads (only with video_models); none: the base section.
+  video_families: { type: ["array", "null"], maxItems: 8, items: { type: "string", maxLength: 32 } },
 } as const;
 const FILTER_KEYS = ["region", "max_dph", "min_down_mbps", "sort", "offer_id", "video_models"] as const;
 const START_BODY = {
@@ -339,7 +355,13 @@ const START_BODY = {
 const VIDEO_MODELS_BODY = {
   type: "object",
   additionalProperties: false,
-  properties: { url: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS } },
+  properties: {
+    url: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS },
+    // A video family other than the base section; `links` (every expert slot of `mode`) replace that mode's experts.
+    family: { type: ["string", "null"], maxLength: 32 },
+    mode: { type: ["string", "null"], maxLength: 16 },
+    links: { type: ["object", "null"], maxProperties: 4, additionalProperties: { type: "string", maxLength: MODEL_LINK_MAX_CHARS } },
+  },
 } as const;
 const ESTIMATE_QUERY = {
   type: "object",
@@ -417,7 +439,7 @@ const VIDEO_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "size", "duration"],
-  properties: { prompt: {}, size: {}, duration: {}, seed: {}, image: {} },
+  properties: { prompt: {}, size: {}, duration: {}, seed: {}, image: {}, family: { type: "string", maxLength: 32 } },
 } as const;
 // JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
 const EDIT_JSON_OVERHEAD = 8;
@@ -484,6 +506,27 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       : deps.profile.models
           .filter((m) => videoSpec.models.some((v) => v.file === m.file.split("/").pop()))
           .reduce((sum, m) => sum + m.size_bytes, 0);
+  /** The size of the profile `models` entries of these video files. */
+  const bytesOf = (files: readonly { file: string }[]): number =>
+    deps.profile.models.filter((m) => files.some((v) => v.file === m.file.split("/").pop())).reduce((sum, m) => sum + m.size_bytes, 0);
+  // More video families (VIDEO_FAMILIES): a workflow per mode, each checked now like the base section's.
+  const baseFamily = deps.profile.videoFamilies.find((f) => f.base) ?? null;
+  const extraFamilies: { family: VideoFamily; templates: { text: unknown; image: unknown }; downloadBytes: number }[] =
+    videoLimits === null
+      ? []
+      : deps.profile.videoFamilies.filter((f) => !f.base).map((family) => {
+          const load = (name: string): unknown => {
+            const t = deps.videoFamilyTemplates?.[name];
+            if (t === undefined || t === null) throw new Error(`video family ${family.id}: its workflow ${name} did not load`);
+            return t;
+          };
+          const templates = { text: load(family.text.workflow), image: load(family.image.workflow) };
+          checkVideoFamily(family, templates);
+          return { family, templates, downloadBytes: bytesOf(family.models) };
+        });
+  /** The family a request names: null for the base section (no family, or its id), undefined for an unknown one. */
+  const familyOf = (id: unknown): (typeof extraFamilies)[number] | null | undefined =>
+    id === undefined || id === null || (baseFamily !== null && id === baseFamily.id) ? null : extraFamilies.find((x) => x.family.id === id);
   // The hosts a video model link may name (read only while video is on).
   const linkHosts: string[] = (() => {
     if (videoLimits === null) return [];
@@ -625,14 +668,14 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
    * is off or the client cannot open one; never throws and never delays a submit by more than
    * PROGRESS_OPEN_WAIT_MS.
    */
-  const startLive = async (hostname: string, kind: JobKind): Promise<{ live: LiveProgress; clientId: string } | null> => {
+  const startLive = async (hostname: string, kind: JobKind, sampler: string | null = samplerNode(kind)): Promise<{ live: LiveProgress; clientId: string } | null> => {
     if (progressLimits === null) return null;
     const comfy = deps.comfyFor(hostname);
     if (typeof comfy.progress !== "function") return null;
     const clientId = randomBytes(CLIENT_ID_BYTES).toString("hex");
     const live = new LiveProgress(now);
     try {
-      const socket = comfy.progress(clientId, live, progressLimits, samplerNode(kind));
+      const socket = comfy.progress(clientId, live, progressLimits, sampler);
       live.socket = socket;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const waited = new Promise<void>((resolve) => (timer = setTimeout(resolve, PROGRESS_OPEN_WAIT_MS)));
@@ -778,6 +821,34 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               max_pixels: videoLimits.maxPixels,
               types: [...videoLimits.types],
             },
+      // The video families to choose from (the base section first); null unless VIDEO_FAMILIES adds one. The same
+      // public fields as video, plus the expert slots an admin may link; the expert file names for admins only.
+      video_families:
+        videoLimits === null || videoSpec === null || baseFamily === null || extraFamilies.length === 0
+          ? null
+          : [
+              {
+                id: baseFamily.id, title: baseFamily.title, base: true,
+                sizes: videoSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
+                durations: videoSpec.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+                download_bytes: videoDownloadBytes,
+                models: publicVideoModels(view.agent?.video_models, scrub),
+                slots: null,
+                experts: null,
+              },
+              ...extraFamilies.map(({ family, downloadBytes }) => {
+                const reported = view.agent?.video_families?.find((f) => f.id === family.id) ?? null;
+                return {
+                  id: family.id, title: family.title, base: false,
+                  sizes: family.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
+                  durations: family.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+                  download_bytes: downloadBytes,
+                  models: publicVideoModels(reported, scrub),
+                  slots: { text: family.text.experts.map((e) => e.slot), image: family.image.experts.map((e) => e.slot) },
+                  experts: isAdmin ? publicExperts(reported) : null,
+                };
+              }),
+            ],
       // What the page needs to offer edit; null when edit is off on this server.
       edit:
         limits === null || editSpec === null
@@ -826,6 +897,24 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (parsed.videoModels === true && videoLimits === null) {
         sendError(reply, 400, "video_unavailable", "video is not available on this server");
         return null;
+      }
+      // The families whose files the boot downloads: enabled ones, each once, only with the video files.
+      const rawFamilies = from["video_families"];
+      if (rawFamilies !== undefined && rawFamilies !== null) {
+        const list = fromQuery ? String(rawFamilies).split(",").filter((x) => x !== "") : (rawFamilies as string[]);
+        if (list.length > 0 && parsed.videoModels !== true) {
+          sendError(reply, 400, "invalid_filter", "video_families needs video_models");
+          return null;
+        }
+        if (new Set(list).size !== list.length) {
+          sendError(reply, 400, "invalid_filter", "video_families lists a family twice");
+          return null;
+        }
+        if (list.some((id) => familyOf(id) === undefined)) {
+          sendError(reply, 400, "unknown_family", "video_families names a video family this server does not offer");
+          return null;
+        }
+        if (list.length > 0) parsed.videoFamilies = list;
       }
       return parsed;
     } catch (err) {
@@ -903,6 +992,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     if (typeof link === "object" && link !== null) return link;
     if (link !== null && filters.videoModels !== true) {
       return sendError(reply, 400, "invalid_model_link", "a video model link needs Include video models");
+    }
+    if (link !== null && filters.videoFamilies !== undefined && !filters.videoFamilies.includes(baseFamily?.id ?? "")) {
+      return sendError(reply, 400, "invalid_model_link", "a video model link replaces the base video model: include its family");
     }
     if (link !== null) filters.videoModelUrl = link;
     // Every admitted attempt counts, failed or not: the limit protects Vast and the bill.
@@ -1166,28 +1258,50 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     async (req, reply) => {
       const identity = req.identity!;
       if (videoLimits === null) return sendError(reply, 404, "video_unavailable", "video is not available on this server");
+      const chosen = familyOf((req.body as { family?: unknown }).family);
+      if (chosen === undefined) return sendError(reply, 400, "unknown_family", "this video family is not offered here");
       const view = await deps.lifecycle.view();
       const hostname = view.record?.tailnet_hostname;
       if (!READY_STATES.has(view.state) || hostname === undefined || view.record?.status === "stopping") {
         return sendError(reply, 409, "not_ready", "the instance is not ready");
       }
-      // Never queue a video the instance cannot run: its model files must be there (boot or on-demand download).
-      const missing = videoModelsRefusal(view.agent?.video_models);
-      if (missing !== null) return sendError(reply, 409, "video_models_not_ready", missing);
-      // A linked diffusion model replaces the pinned file name in the workflow (the name is the agent's: checked).
-      const model = view.agent?.video_models?.model;
-      if (model?.linked === true && !isLinkedModelName(model.file)) {
-        return sendError(reply, 409, "video_models_not_ready", "the instance reports an unusable video model name");
+      let extra: Partial<VideoDeps> = {};
+      if (chosen === null) {
+        // Never queue a video the instance cannot run: its model files must be there (boot or on-demand download).
+        const missing = videoModelsRefusal(view.agent?.video_models);
+        if (missing !== null) return sendError(reply, 409, "video_models_not_ready", missing);
+        // A linked diffusion model replaces the pinned file name in the workflow (the name is the agent's: checked).
+        const model = view.agent?.video_models?.model;
+        if (model?.linked === true && !isLinkedModelName(model.file)) {
+          return sendError(reply, 409, "video_models_not_ready", "the instance reports an unusable video model name");
+        }
+        if (model?.linked === true) extra = { diffusionFile: model.file as string };
+      } else {
+        const reported = view.agent?.video_families?.find((f) => f.id === chosen.family.id);
+        const missing = videoModelsRefusal(reported);
+        if (missing !== null) return sendError(reply, 409, "video_models_not_ready", missing);
+        // The mode's linked experts as the instance reports them: all of them (checked names) or none.
+        const image = (req.body as { image?: unknown }).image;
+        const spec = image !== undefined && image !== null ? chosen.family.image : chosen.family.text;
+        const linked = (reported?.experts ?? []).filter((e) => e.linked === true && e.mode === (spec === chosen.family.image ? "image" : "text"));
+        if (linked.length > 0) {
+          const usable = linked.length === spec.experts.length && linked.every((e) => isLinkedModelName(e.file) && spec.experts.some((x) => x.slot === e.slot));
+          if (!usable) return sendError(reply, 409, "video_models_not_ready", "the instance reports unusable linked video models; an admin can download the family again");
+        }
+        extra = {
+          family: { text: { spec: chosen.family.text, template: chosen.templates.text }, image: { spec: chosen.family.image, template: chosen.templates.image } },
+          ...(linked.length > 0 ? { links: Object.fromEntries(linked.map((e) => [e.slot, e.file])) } : {}),
+        };
       }
-      const diffusionFile = model?.linked === true ? (model.file as string) : undefined;
       if (!generateLimiter.take(identity.subject)) {
         return sendError(reply, 429, "rate_limited", "too many generate requests this hour");
       }
       let submitted: Awaited<ReturnType<typeof runVideo>>;
-      const started = await startLive(hostname, "video");
+      // A family's two samplers each run part of the steps: any progress counts there.
+      const started = await startLive(hostname, "video", chosen === null ? samplerNode("video") : null);
       try {
         submitted = await runVideo(
-          { ...videoDeps(hostname), ...(started ? { clientId: started.clientId } : {}), ...(diffusionFile === undefined ? {} : { diffusionFile }) },
+          { ...videoDeps(hostname), ...(started ? { clientId: started.clientId } : {}), ...extra },
           req.body as VideoRequest,
         );
       } catch (err) {
@@ -1201,6 +1315,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       started?.live.socket?.setPromptId(promptId);
       const asked = req.body as VideoRequest;
+      const title = chosen === null ? "" : `, ${chosen.family.title}`;
       jobs.add({
         id: promptId,
         owner: identity.subject,
@@ -1208,7 +1323,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         live: started?.live ?? null,
         kind: "video",
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
-        label: `Video: ${String(asked.size)}, ${String(asked.duration)}${startImage ? ", from an image" : ""}`.slice(0, JOB_LABEL_KEPT),
+        label: `Video: ${String(asked.size)}, ${String(asked.duration)}${title}${startImage ? ", from an image" : ""}`.slice(0, JOB_LABEL_KEPT),
       });
       return reply.code(202).send({ id: promptId });
     },
@@ -1220,27 +1335,80 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   const VIDEO_MODEL_REFUSALS = new Set([
     "video_unavailable", "not_ready", "video_nodes_missing", "disk_insufficient", "comfy_unavailable",
     "invalid_model_link", "model_link_host_not_allowed", "model_link_unsupported_type", "model_link_name_clash",
-    "model_link_too_large", "model_link_unreachable", "model_link_redirect_not_allowed",
+    "model_link_too_large", "model_link_unreachable", "model_link_redirect_not_allowed", "video_gguf_loader_missing",
+    "video_download_busy",
   ]);
+  /** The reply for a failed download request (shared by the base section and the families). */
+  const videoModelsFailure = async (reply: FastifyReply, err: unknown): Promise<FastifyReply> => {
+    if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
+    if (err instanceof AgentError && err.code !== undefined && VIDEO_MODEL_REFUSALS.has(err.code)) {
+      const text = err.message.replace(/^video models failed with HTTP \d+:\s*/, "");
+      return sendError(reply, err.status === 400 ? 400 : 409, err.code, (await activeScrubber())(text));
+    }
+    if (err instanceof ResponseTooLarge) return tooLarge(reply);
+    log("warn", `video model download failed: ${errorName(err)}`);
+    return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+  };
   app.post("/api/video-models", { ...admin, schema: { body: VIDEO_MODELS_BODY } }, async (req, reply) => {
     if (videoLimits === null || typeof deps.lifecycle.downloadVideoModels !== "function") {
       return sendError(reply, 404, "video_unavailable", "video is not available on this server");
     }
-    const link = readModelLink(reply, (req.body as { url?: unknown } | undefined)?.url);
-    if (typeof link === "object" && link !== null) return link;
-    log("info", `video model download requested by ${userLabel(req.identity?.username) ?? "?"}${link === null ? "" : " (linked model)"}`);
+    const body = (req.body ?? {}) as { url?: unknown; family?: unknown; mode?: unknown; links?: Record<string, string> | null };
+    const chosen = familyOf(body.family);
+    if (chosen === undefined) return sendError(reply, 400, "unknown_family", "this video family is not offered here");
+    if (chosen === null) {
+      if ((body.mode !== undefined && body.mode !== null) || (body.links !== undefined && body.links !== null)) {
+        return sendError(reply, 400, "invalid_model_link", "the base video model takes one link (url), not expert links");
+      }
+      const link = readModelLink(reply, body.url);
+      if (typeof link === "object" && link !== null) return link;
+      log("info", `video model download requested by ${userLabel(req.identity?.username) ?? "?"}${link === null ? "" : " (linked model)"}`);
+      try {
+        const status = await deps.lifecycle.downloadVideoModels(...(link === null ? [] : [link]));
+        return reply.code(202).send({ models: publicVideoModels(status, await activeScrubber()) });
+      } catch (err) {
+        return videoModelsFailure(reply, err);
+      }
+    }
+    if (typeof deps.lifecycle.downloadVideoFamily !== "function") return sendError(reply, 404, "video_unavailable", "video is not available on this server");
+    if (body.url !== undefined && body.url !== null && String(body.url).trim() !== "") {
+      return sendError(reply, 400, "invalid_model_link", "a video family takes expert links (mode and links), not url");
+    }
+    // Expert links: every expert slot of the mode together (one-sided is refused), each checked like the base link.
+    let links: Record<string, string> | undefined;
+    let mode: "text" | "image" | undefined;
+    if (body.links !== undefined && body.links !== null) {
+      if (body.mode !== "text" && body.mode !== "image") return sendError(reply, 400, "invalid_model_link", "expert links need the mode they are for (text or image)");
+      mode = body.mode;
+      const slots = chosen.family[mode].experts.map((e) => e.slot);
+      const given = Object.keys(body.links);
+      if (given.length !== slots.length || !slots.every((x) => given.includes(x))) {
+        return sendError(reply, 400, "invalid_model_link", `link every expert of the mode together: ${slots.join(", ")}`);
+      }
+      const names = new Set<string>();
+      links = {};
+      for (const slot of slots) {
+        const raw = body.links[slot];
+        if (typeof raw !== "string" || raw.trim() === "") return sendError(reply, 400, "invalid_model_link", `the ${slot} expert link is missing`);
+        try {
+          const parsed = parseModelLink(raw.trim(), linkHosts);
+          if (names.has(parsed.name)) return sendError(reply, 400, "model_link_name_clash", "two expert links name the same file");
+          names.add(parsed.name);
+          links[slot] = parsed.url;
+        } catch (err) {
+          if (err instanceof ModelLinkError) return sendError(reply, 400, err.code, err.message);
+          throw err;
+        }
+      }
+    } else if (body.mode !== undefined && body.mode !== null && body.mode !== "text" && body.mode !== "image") {
+      return sendError(reply, 400, "invalid_model_link", "the mode must be text or image");
+    }
+    log("info", `video family download requested by ${userLabel(req.identity?.username) ?? "?"}${links === undefined ? "" : " (linked experts)"}`);
     try {
-      const status = await deps.lifecycle.downloadVideoModels(...(link === null ? [] : [link]));
+      const status = await deps.lifecycle.downloadVideoFamily(chosen.family.id, links === undefined ? {} : { mode: mode!, links });
       return reply.code(202).send({ models: publicVideoModels(status, await activeScrubber()) });
     } catch (err) {
-      if (err instanceof NoActiveInstanceError) return sendError(reply, 409, "no_instance", "no active instance");
-      if (err instanceof AgentError && err.code !== undefined && VIDEO_MODEL_REFUSALS.has(err.code)) {
-        const text = err.message.replace(/^video models failed with HTTP \d+:\s*/, "");
-        return sendError(reply, err.status === 400 ? 400 : 409, err.code, (await activeScrubber())(text));
-      }
-      if (err instanceof ResponseTooLarge) return tooLarge(reply);
-      log("warn", `video model download failed: ${errorName(err)}`);
-      return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+      return videoModelsFailure(reply, err);
     }
   });
 

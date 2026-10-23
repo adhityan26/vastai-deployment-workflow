@@ -2495,3 +2495,143 @@ describe("start dialog: Include video models", () => {
     expect(calls.some((c) => c.path === "/api/gpus?video_models=true")).toBe(true);
   });
 });
+
+describe("video families", () => {
+  const ready = { state: "ready", bytes_done: 1, bytes_total: 1, percent: 100, reason: null };
+  const missing = { state: "not_installed", bytes_done: 0, bytes_total: 60_000_000_000, percent: 0, reason: null };
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }],
+    durations: [{ name: "About 3 s", seconds: 3 }],
+    max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], download_bytes: 18_000_000_000, models: ready,
+  };
+  const baseFam = { id: "wan22_5b", title: "Fast (5B)", base: true, sizes: video.sizes, durations: video.durations, download_bytes: 18_000_000_000, models: ready, slots: null, experts: null };
+  const big = (models: unknown = ready, experts: unknown = null) => ({
+    id: "wan22_a14b", title: "Quality (14B, 4 steps)", base: false,
+    sizes: [{ name: "Landscape", width: 832, height: 480 }, { name: "Portrait", width: 480, height: 832 }],
+    durations: [{ name: "About 5 s", seconds: 5 }], download_bytes: 60_000_000_000, models,
+    slots: { text: ["high", "low"], image: ["high", "low"] }, experts,
+  });
+  const menu = {
+    categories: [{ id: "create", title: "Create" }],
+    items: [{ id: "video", title: "Video", description: "Make a short video.", icon: "film", category: "create", tool: "video", style: null, available: true }],
+  };
+  const pickFamily = async (id: string) => {
+    const sel = q<HTMLSelectElement>("#video-family")!;
+    sel.value = id;
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+  };
+
+  it("offers no model choice with only the base family", async () => {
+    await mount({ menu, video });
+    chooseTool("video");
+    expect(q("#video-family-box")!.hidden).toBe(true);
+  });
+
+  it("the model choice switches sizes and lengths, and the job names its family", async () => {
+    await mount({ menu, video, video_families: [baseFam, big()] }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": { body: { status: "pending" } } });
+    chooseTool("video");
+    expect(q("#video-family-box")!.hidden).toBe(false);
+    expect([...document.querySelectorAll("#video-family option")].map((o) => o.textContent)).toEqual(["Fast (5B)", "Quality (14B, 4 steps)"]);
+    expect([...document.querySelectorAll("#video-size option")].map((o) => o.textContent)).toEqual(["Landscape (1280×704)"]);
+    await pickFamily("wan22_a14b");
+    expect([...document.querySelectorAll("#video-size option")].map((o) => o.textContent)).toEqual(["Landscape (832×480)", "Portrait (480×832)"]);
+    expect([...document.querySelectorAll("#video-duration option")].map((o) => o.textContent)).toEqual(["About 5 s"]);
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    q<HTMLSelectElement>("#video-size")!.value = "Portrait";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "a fox", size: "Portrait", duration: "About 5 s", family: "wan22_a14b" });
+    expect(q(".job .muted")!.textContent).toBe("Video: Portrait, About 5 s, Quality (14B, 4 steps)");
+  });
+
+  it("a family that is not installed blocks Make video; a member is told to ask an admin", async () => {
+    await mount({ menu, video, video_families: [baseFam, big(missing)] });
+    chooseTool("video");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false); // the base family is ready
+    await pickFamily("wan22_a14b");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+    expect(q("#video-models-text")!.textContent).toBe("The video models are not installed on this instance. Ask an admin to download them.");
+    expect(q<HTMLButtonElement>("#video-models-download")!.hidden).toBe(true);
+    expect(q("#video-experts")!.hidden).toBe(true);
+  });
+
+  it("an admin downloads a family, with both expert links of a mode or none (one-sided is refused here)", async () => {
+    await mount({ role: "admin", menu, video, video_families: [baseFam, big(missing)] }, {
+      "POST /api/video-models": { status: 202, body: { models: { ...missing, state: "downloading" } } },
+    });
+    chooseTool("video");
+    await pickFamily("wan22_a14b");
+    expect(q("#video-models-link")!.hidden).toBe(true); // the base model's single link is not for a family
+    expect(q("#video-experts")!.hidden).toBe(false);
+    expect(q("#video-experts-note")!.textContent).toContain("UNVERIFIED");
+    expect(q<HTMLButtonElement>("#video-models-download")!.textContent).toBe("Download video models (about 60.0 GB, several minutes)");
+    const high = q<HTMLInputElement>("#video-expert-high")!;
+    const low = q<HTMLInputElement>("#video-expert-low")!;
+    expect(q("label[for=video-expert-high]")!.textContent).toBe("high noise expert link");
+    high.value = "https://huggingface.co/o/r/resolve/main/h.gguf";
+    q<HTMLButtonElement>("#video-models-download")!.click();
+    await flush();
+    expect(posts("/api/video-models")).toHaveLength(0);
+    expect(q("#video-models-error")!.textContent).toBe("Give a link for every expert (high and low), or none.");
+    const mode = q<HTMLSelectElement>("#video-experts-mode")!;
+    mode.value = "image";
+    mode.dispatchEvent(new Event("change"));
+    await flush();
+    q<HTMLInputElement>("#video-expert-high")!.value = " https://huggingface.co/o/r/resolve/main/h.gguf ";
+    low.value = "https://huggingface.co/o/r/resolve/main/l.gguf";
+    q<HTMLButtonElement>("#video-models-download")!.click();
+    await flush();
+    expect(posts("/api/video-models")[0]!.body).toEqual({
+      family: "wan22_a14b", mode: "image",
+      links: { high: "https://huggingface.co/o/r/resolve/main/h.gguf", low: "https://huggingface.co/o/r/resolve/main/l.gguf" },
+    });
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+  });
+
+  it("without links an admin downloads the pinned family; linked experts in use are shown to admins", async () => {
+    await mount({ role: "admin", menu, video, video_families: [baseFam, big(missing)] }, { "POST /api/video-models": { status: 202, body: { models: missing } } });
+    chooseTool("video");
+    await pickFamily("wan22_a14b");
+    q<HTMLButtonElement>("#video-models-download")!.click();
+    await flush();
+    expect(posts("/api/video-models")[0]!.body).toEqual({ family: "wan22_a14b" });
+    app?.stop();
+    document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
+    const experts = [{ mode: "text", slot: "high", file: "<b>h.gguf</b>", linked: true, sha256: null }, { mode: "text", slot: "low", file: "l.gguf", linked: true, sha256: null }];
+    await mount({ role: "admin", menu, video, video_families: [baseFam, big(ready, experts)] });
+    chooseTool("video");
+    await pickFamily("wan22_a14b");
+    expect(q("#video-models-text")!.textContent).toBe("Linked experts in use: text high: <b>h.gguf</b>; text low: l.gguf. Not integrity-pinned.");
+    expect(q("#video-models-text b")).toBeNull();
+  });
+
+  it("the Start dialog offers each family (the base one ticked) and sends the ticked ones with the video models", async () => {
+    const families = [baseFam, big(missing)];
+    const routes14: Record<string, Handler> = {
+      ...START_ROUTES,
+      "GET /api/gpus?video_models=true&video_families=wan22_5b": { body: GPUS },
+      "GET /api/gpus?video_models=true&video_families=wan22_5b%2Cwan22_a14b": { body: GPUS },
+      "GET /api/estimate?gpu=RTX%20A5000&video_models=true&video_families=wan22_5b": est("RTX A5000", 0.27),
+      "GET /api/estimate?gpu=RTX%20A5000&video_models=true&video_families=wan22_5b%2Cwan22_a14b": est("RTX A5000", 0.31),
+    };
+    await mount({ role: "admin", state: "none", video, video_families: families }, routes14);
+    await openStart();
+    const boxes = [...document.querySelectorAll<HTMLInputElement>("#modal-body input[data-family]")];
+    expect(boxes.map((b) => [b.dataset["family"], b.checked, b.disabled])).toEqual([["wan22_5b", true, true], ["wan22_a14b", false, true]]);
+    const include = q<HTMLInputElement>("#start-video")!;
+    include.checked = true;
+    include.dispatchEvent(new Event("change"));
+    await flush();
+    boxes[1]!.checked = true;
+    boxes[1]!.dispatchEvent(new Event("change"));
+    await flush();
+    expect(estimateCalls().at(-1)).toBe("/api/estimate?gpu=RTX%20A5000&video_models=true&video_families=wan22_5b%2Cwan22_a14b");
+    boxes[0]!.checked = false;
+    boxes[0]!.dispatchEvent(new Event("change"));
+    expect(q<HTMLInputElement>("#start-video-url")!.disabled).toBe(true); // the link replaces the base model
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")[0]!.body).toMatchObject({ video_models: true, video_families: ["wan22_a14b"] });
+  });
+});

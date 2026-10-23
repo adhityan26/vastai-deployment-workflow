@@ -10,9 +10,9 @@ continues without it.
 The URL is the profile's own pinned file (never a hardcoded one): the LARGEST pinned model, so the probe
 takes the repo and CDN path (Hugging Face's xet/LFS storage) that carries most of the boot download; only a
 small range of it is read. `present` tells bootstrap that every pinned file is already in place (a restart
-or a reused disk), in which case it does not probe at all. The files of the profile's `video:` section are left out
-of both: they are optional (downloaded only with VIDEO_ENABLED and "Include video models", or later on demand), so an
-image-only boot probes and skips exactly as before they were pinned.
+or a reused disk), in which case it does not probe at all. The files of the profile's `video:` section and of every
+`video_families:` entry are left out of both: they are optional (downloaded only with VIDEO_ENABLED and "Include
+video models", or later on demand), so an image-only boot probes and skips exactly as before they were pinned.
 """
 from __future__ import annotations
 
@@ -56,12 +56,13 @@ def _flow_models(text: str) -> list[dict]:
 
 
 def _flow_video_files(text: str) -> set[str]:
-    """The `file` values of the one-line `- {file: ..., dest: ...}` entries inside the top-level `video:` section."""
+    """The `file` values of the one-line `- {file: ..., dest: ...}` entries inside the top-level `video:` and
+    `video_families:` sections."""
     out: set[str] = set()
     inside = False
     for line in text.splitlines():
         if TOP_KEY.match(line):
-            inside = line.split(":", 1)[0].strip() == "video"
+            inside = line.split(":", 1)[0].strip() in ("video", "video_families")
             continue
         item = FLOW_ITEM.match(line) if inside else None
         if item:
@@ -76,7 +77,7 @@ def _without_video(models: list[dict], video_files: set[str]) -> list[dict]:
 
 
 def read_models(profile: Path) -> list[dict]:
-    """The pinned models a boot always downloads: `models:` minus the video section's files."""
+    """The pinned models a boot always downloads: `models:` minus the files of every video family."""
     text = profile.read_text()
     try:
         import yaml  # noqa: PLC0415 (optional on the system Python)
@@ -85,8 +86,13 @@ def read_models(profile: Path) -> list[dict]:
     data = yaml.safe_load(text)
     models = data.get("models") if isinstance(data, dict) else None
     video = data.get("video") if isinstance(data, dict) else None
-    entries = video.get("models") if isinstance(video, dict) else None
-    files = {str(e.get("file")) for e in entries if isinstance(e, dict)} if isinstance(entries, list) else set()
+    families = data.get("video_families") if isinstance(data, dict) else None
+    sections = [video] + (families if isinstance(families, list) else [])
+    files: set[str] = set()
+    for section in sections:
+        entries = section.get("models") if isinstance(section, dict) else None
+        if isinstance(entries, list):
+            files |= {str(e.get("file")) for e in entries if isinstance(e, dict)}
     return _without_video([m for m in models if isinstance(m, dict)] if isinstance(models, list) else [], files)
 
 

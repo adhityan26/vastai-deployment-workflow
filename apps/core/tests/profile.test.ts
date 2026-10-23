@@ -317,3 +317,38 @@ describe("styles in the profile", () => {
     expect(out["4"]!.inputs["model"]).toEqual(["style_lora", 0]);
   });
 });
+
+describe("video families in the profile", () => {
+  /** The shipped profile with every file of the 14B family pinned (pin-shaped entries; the real pins are the owner's). */
+  const pinned14 = () =>
+    writeProfile((d) => {
+      for (const m of d.video_families[0].models as Doc[]) {
+        if ((d.models as Doc[]).some((e) => e.file.split("/").pop() === m.file)) continue;
+        d.models.push({ file: `split_files/x/${m.file}`, repo: "o/r", revision: "a".repeat(40), dest: m.dest, size_bytes: 1000 });
+      }
+    });
+
+  it("names every family's files by id, also while video is off", () => {
+    const p = loadProfile(shipped);
+    expect(p.videoFamilies).toEqual([]);
+    expect(Object.keys(p.videoFamilyFiles)).toEqual(["wan22_5b", "wan22_a14b"]);
+    expect(p.videoFamilyFiles["wan22_5b"]).toEqual(p.videoFiles);
+    expect(p.videoFamilyFiles["wan22_a14b"]).toHaveLength(10);
+  });
+
+  it("VIDEO_ENABLED alone switches on the base family only; VIDEO_FAMILIES adds a pinned family after it", () => {
+    expect(loadProfile(shipped, { videoEnabled: true }).videoFamilies.map((f) => [f.id, f.base])).toEqual([["wan22_5b", true]]);
+    const base = loadProfile(shipped, { videoEnabled: true }).videoFamilies[0]!;
+    expect(base.text).toBe(base.image);
+    expect(base.title).toBe("Fast (5B)");
+    const both = loadProfile(pinned14(), { videoEnabled: true, videoFamilies: ["wan22_a14b"] });
+    expect(both.videoFamilies.map((f) => f.id)).toEqual(["wan22_5b", "wan22_a14b"]);
+    expect(both.video?.workflow).toBe("video-ti2v.json"); // the base section is unchanged
+    expect(loadProfile(pinned14(), { videoEnabled: false, videoFamilies: ["wan22_a14b"] }).videoFamilies).toEqual([]);
+  });
+
+  it("refuses VIDEO_FAMILIES naming an unpinned or unknown family", () => {
+    expect(() => loadProfile(shipped, { videoEnabled: true, videoFamilies: ["wan22_a14b"] })).toThrow(/is not listed in models/);
+    expect(() => loadProfile(shipped, { videoEnabled: true, videoFamilies: ["wan22_x"] })).toThrow(/unknown video family: wan22_x/);
+  });
+});

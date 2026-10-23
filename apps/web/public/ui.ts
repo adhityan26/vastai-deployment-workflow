@@ -125,6 +125,10 @@ import {
   START_VIDEO_STORAGE_KEY,
   videoDownloadLabel,
   videoModelsNote,
+  EXPERT_LINK_NOTICE,
+  expertsNote,
+  familyDownloadBody,
+  familyVideo,
   durationLabel,
   videoAsEdit,
   videoHint,
@@ -158,6 +162,8 @@ import {
   pillView,
   windowSpeed,
   type ApiState,
+  type VideoFamilyInfo,
+  type VideoInfo,
   type Estimate,
   type GpuOption,
   type Sample,
@@ -259,6 +265,7 @@ export function mountApp(doc: Document, env: Env): App {
   let tickHandle: unknown = null;
   let selectedPreset = "";
   let formKey = "";
+  let videoFamilyKey = "";
   let adminBuilt = false;
   let unknownKey = "";
   let restoreFocus: HTMLElement | null = null;
@@ -688,9 +695,31 @@ export function mountApp(doc: Document, env: Env): App {
       linkIn.placeholder = "huggingface.co/<owner>/<repo>/resolve/<revision>/<file>";
       linkIn.disabled = !includeVideo;
       linkRow.append(linkLabel, linkIn, make("p", LINK_NOTICE, "muted"));
+      // With more than one video family: which ones the boot downloads (the base one ticked by default). The disk is
+      // sized for the ticked families' files; the link above replaces the base model, so it needs that family.
+      const familyRow = make("fieldset", undefined, "start-field");
+      familyRow.hidden = !offersVideo || (state?.video_families ?? null) === null;
+      familyRow.append(make("legend", "Video models to include"));
+      const familyBoxes = (state?.video_families ?? []).map((f) => {
+        const row = make("label", undefined, "check");
+        const box = make("input");
+        box.type = "checkbox";
+        box.dataset["family"] = f.id;
+        box.checked = f.base;
+        box.disabled = !includeVideo;
+        row.append(box, make("span", ` ${f.title} (about ${(f.download_bytes / 1e9).toFixed(1)} GB)`));
+        familyRow.append(row);
+        return box;
+      });
+      const chosenFamilies = (): string[] => familyBoxes.filter((b) => b.checked).map((b) => b.dataset["family"] ?? "");
+      const baseChosen = (): boolean => familyBoxes.length === 0 || familyBoxes.some((b) => b.checked && state?.video_families?.find((f) => f.id === b.dataset["family"])?.base === true);
       /** The query of the estimate and the lists: the filters, plus the video choice when it is ticked. */
       const startQuery = (offer: number | null): string =>
-        [filterQueryString(filters, offer), includeVideo ? "video_models=true" : ""].filter((p) => p !== "").join("&");
+        [
+          filterQueryString(filters, offer),
+          includeVideo ? "video_models=true" : "",
+          includeVideo && familyBoxes.length > 0 ? `video_families=${encodeURIComponent(chosenFamilies().join(","))}` : "",
+        ].filter((p) => p !== "").join("&");
       const estBox = make("div", undefined, "estimate");
       estBox.setAttribute("aria-live", "polite");
       const errBox = make("div", undefined, "alert bad");
@@ -701,7 +730,7 @@ export function mountApp(doc: Document, env: Env): App {
         "Disk storage is billed separately, per hour, for as long as the instance exists.",
         "You pay while the instance exists, even if nobody generates anything.",
       ].map((t) => make("p", t));
-      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, linkRow, advanced, estBox, errBox, ...notes);
+      $("modal-body").replaceChildren(loading, gpuLabel, select, gpuNote, videoRow, familyRow, linkRow, advanced, estBox, errBox, ...notes);
       modalOk.textContent = "Start and pay";
       modalOk.className = "primary";
       modalOk.disabled = true;
@@ -789,7 +818,8 @@ export function mountApp(doc: Document, env: Env): App {
             gpu: chosen,
             ...filterBodyMembers(filters, chosenOffer),
             ...(includeVideo ? { video_models: true } : {}),
-            ...(includeVideo && linkIn.value.trim() !== "" ? { video_model_url: linkIn.value.trim() } : {}),
+            ...(includeVideo && familyBoxes.length > 0 ? { video_families: chosenFamilies() } : {}),
+            ...(includeVideo && baseChosen() && linkIn.value.trim() !== "" ? { video_model_url: linkIn.value.trim() } : {}),
           });
           writeRemembered(chosen);
           // Start may share an attempt for another model: show what the server really rented.
@@ -897,10 +927,17 @@ export function mountApp(doc: Document, env: Env): App {
       // The disk (and so the price and the offers) follow the video choice.
       videoBox.addEventListener("change", () => {
         includeVideo = videoBox.checked;
-        linkIn.disabled = !includeVideo;
+        linkIn.disabled = !includeVideo || !baseChosen();
+        for (const box of familyBoxes) box.disabled = !includeVideo;
         writeStartVideo(includeVideo);
         void onFiltersChanged();
       });
+      for (const box of familyBoxes) {
+        box.addEventListener("change", () => {
+          linkIn.disabled = !includeVideo || !baseChosen();
+          void onFiltersChanged();
+        });
+      }
 
       const loadOffers = async (): Promise<void> => {
         if (!takeFilters() || select.value === "") return;
@@ -1263,28 +1300,94 @@ export function mountApp(doc: Document, env: Env): App {
   const videoModelsError = $("video-models-error");
   let videoModelsAsking = false;
 
+  const videoFamilySelect = $<HTMLSelectElement>("video-family");
+  const expertsModeSelect = $<HTMLSelectElement>("video-experts-mode");
+  /** The chosen video family (null: the base one, or the server offers no choice). */
+  function chosenFamily(s: ApiState): VideoFamilyInfo | null {
+    const f = s.video_families?.find((x) => x.id === videoFamilySelect.value) ?? null;
+    return f === null || f.base ? null : f;
+  }
+  /** The video offer as the chosen family sees it (sizes, lengths, model state). */
+  function currentVideo(s: ApiState): VideoInfo | null {
+    return s.video === null ? null : familyVideo(s.video, s.video_families, videoFamilySelect.value);
+  }
+  /** One link input per expert slot of the chosen mode (labels by textContent; slots are checked names). */
+  function renderExpertInputs(f: VideoFamilyInfo): void {
+    const slots = f.slots?.[expertsModeSelect.value === "image" ? "image" : "text"] ?? [];
+    const box = $("video-experts-inputs");
+    const have = [...box.querySelectorAll("input")].map((i) => i.dataset["slot"]);
+    if (have.length === slots.length && have.every((x, i) => x === slots[i])) return;
+    box.replaceChildren(
+      ...slots.flatMap((slot) => {
+        const label = make("label", `${slot} noise expert link`);
+        label.htmlFor = `video-expert-${slot}`;
+        const input = make("input");
+        input.id = `video-expert-${slot}`;
+        input.dataset["slot"] = slot;
+        input.type = "url";
+        input.maxLength = MODEL_LINK_MAX_CHARS;
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.placeholder = "huggingface.co/<owner>/<repo>/resolve/<revision>/<file>";
+        return [label, input];
+      }),
+    );
+  }
+
   /** The Video panel's line about the instance's video model files, and the admin's download button. */
   function renderVideoModels(s: ApiState, filming: boolean): void {
-    const note = s.video === null ? { text: "", download: false } : videoModelsNote(s.video, s.role === "admin");
-    $("video-models-text").textContent = note.text;
+    const v = currentVideo(s);
+    const family = chosenFamily(s);
+    const admin = s.role === "admin";
+    const note = v === null ? { text: "", download: false } : videoModelsNote(v, admin);
+    // A family's linked experts, for admins, when it is ready (the base model has its own line).
+    const text = note.text === "" && admin && family !== null ? expertsNote(family) : note.text;
+    $("video-models-text").textContent = text;
     videoModelsBtn.hidden = !note.download;
-    $("video-models-link").hidden = !note.download;
+    // The base model takes one link; a family's experts take one link each (both of a mode together).
+    $("video-models-link").hidden = !note.download || family !== null;
+    $("video-experts").hidden = !note.download || family === null;
+    if (family !== null) renderExpertInputs(family);
+    $("video-experts-note").textContent = EXPERT_LINK_NOTICE;
     $("video-models-link-note").textContent = LINK_NOTICE;
-    videoModelsBtn.textContent = s.video === null ? "" : videoDownloadLabel(s.video);
+    videoModelsBtn.textContent = v === null ? "" : videoDownloadLabel(v);
     videoModelsBtn.disabled = videoModelsAsking || !GENERATE_READY.has(s.state);
-    videoModelsBox.hidden = !filming || (note.text === "" && videoModelsError.hidden);
+    videoModelsBox.hidden = !filming || (text === "" && videoModelsError.hidden);
   }
 
   videoModelsBtn.addEventListener("click", () => void downloadVideoModels());
+  videoFamilySelect.addEventListener("change", () => {
+    videoModelsError.hidden = true;
+    if (state) renderForm(state);
+  });
+  expertsModeSelect.addEventListener("change", () => {
+    if (state) renderForm(state);
+  });
   async function downloadVideoModels(): Promise<void> {
     if (videoModelsAsking || state?.role !== "admin") return;
+    // The links are sent once and never stored in the browser.
+    const family = chosenFamily(state);
+    let body: Record<string, unknown>;
+    if (family === null) {
+      const url = $<HTMLInputElement>("video-models-url").value.trim();
+      body = url === "" ? {} : { url };
+    } else {
+      const links: Record<string, string> = {};
+      for (const input of $("video-experts-inputs").querySelectorAll("input")) links[input.dataset["slot"] ?? ""] = input.value;
+      const built = familyDownloadBody(family, expertsModeSelect.value === "image" ? "image" : "text", links);
+      if ("error" in built) {
+        videoModelsError.textContent = built.error;
+        videoModelsError.hidden = false;
+        if (state) renderForm(state);
+        return;
+      }
+      body = built.body;
+    }
     videoModelsAsking = true;
     videoModelsError.hidden = true;
     if (state) renderForm(state);
-    // The link is sent once and never stored in the browser.
-    const url = $<HTMLInputElement>("video-models-url").value.trim();
     try {
-      await call("POST", API.videoModels, url === "" ? {} : { url });
+      await call("POST", API.videoModels, body);
     } catch (err) {
       if (err instanceof AuthLostError) return;
       videoModelsError.textContent = err instanceof Error ? err.message : "The download could not be started.";
@@ -1313,7 +1416,24 @@ export function mountApp(doc: Document, env: Env): App {
     $("gen-title").textContent = entry?.title ?? "Generate";
     setText("tool-desc", entry?.description ?? "");
     // Rebuild options only when the API's lists change, so a poll never resets the user's choice.
-    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale, s.video]);
+    // The family choice comes first: the video sizes and lengths are the chosen family's.
+    const families = s.video_families?.map((f) => [f.id, f.title, f.sizes, f.durations]) ?? null;
+    const familyKey = JSON.stringify(families);
+    if (familyKey !== videoFamilyKey) {
+      videoFamilyKey = familyKey;
+      const keep = videoFamilySelect.value;
+      videoFamilySelect.replaceChildren(
+        ...(s.video_families ?? []).map((f) => {
+          const o = make("option", f.title);
+          o.value = f.id;
+          return o;
+        }),
+      );
+      if (s.video_families?.some((f) => f.id === keep)) videoFamilySelect.value = keep;
+    }
+    $("video-family-box").hidden = s.video_families === null;
+    const shown = currentVideo(s);
+    const key = JSON.stringify([s.presets, s.sizes, s.edit, s.styles, s.upscale, s.video, families, videoFamilySelect.value]);
     if (key !== formKey) {
       formKey = key;
       if (!s.presets.some((p) => p.name === selectedPreset)) selectedPreset = s.presets[0]?.name ?? "";
@@ -1371,17 +1491,17 @@ export function mountApp(doc: Document, env: Env): App {
       );
       if (s.upscale?.scales.includes(keepScale)) scaleSelect.value = keepScale;
       const keepVideoSize = videoSizeSelect.value;
-      videoSizeSelect.replaceChildren(...(s.video?.sizes ?? []).map(sizeOption));
-      if (s.video?.sizes.some((z) => z.name === keepVideoSize)) videoSizeSelect.value = keepVideoSize;
+      videoSizeSelect.replaceChildren(...(shown?.sizes ?? []).map(sizeOption));
+      if (shown?.sizes.some((z) => z.name === keepVideoSize)) videoSizeSelect.value = keepVideoSize;
       const keepDuration = videoDurationSelect.value;
       videoDurationSelect.replaceChildren(
-        ...(s.video?.durations ?? []).map((d) => {
+        ...(shown?.durations ?? []).map((d) => {
           const o = make("option", durationLabel(d));
           o.value = d.name;
           return o;
         }),
       );
-      if (s.video?.durations.some((d) => d.name === keepDuration)) videoDurationSelect.value = keepDuration;
+      if (shown?.durations.some((d) => d.name === keepDuration)) videoDurationSelect.value = keepDuration;
     }
     // The picker follows the mode: edit takes several images, upscale exactly one, video one at most.
     const refRules = refLimits(s);
@@ -1420,7 +1540,9 @@ export function mountApp(doc: Document, env: Env): App {
           ? "Describe what happens, e.g. a red fox trots through fresh snow, the camera follows it slowly"
           : "";
     const c = controls(s, busy, jobPending);
-    const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : filming ? c.canVideo : c.canGenerate;
+    // Video: the chosen family's model files must be on the instance.
+    const videoReady = shown?.models?.state === "ready";
+    const allowed = upscaling ? c.canUpscale : editing ? c.canEdit : filming ? c.canVideo && videoReady : c.canGenerate;
     generateBtn.disabled = !allowed;
     generateBtn.textContent = jobPending ? "Generating…" : upscaling ? "Upscale" : editing ? "Edit" : filming ? "Make video" : "Generate";
     $("gen-hint").textContent = jobPending
@@ -1429,7 +1551,7 @@ export function mountApp(doc: Document, env: Env): App {
         ? filming
           ? VIDEO_WAIT_TEXT
           : ""
-        : filming && s.video !== null && s.video.models?.state !== "ready" && GENERATE_READY.has(s.state)
+        : filming && shown !== null && !videoReady && GENERATE_READY.has(s.state)
           ? "Make video unlocks when the video models are on the instance (see above)."
         : s.state === "none"
           ? "No instance is running. An admin needs to start one."
@@ -2148,7 +2270,8 @@ export function mountApp(doc: Document, env: Env): App {
 
   async function submitVideo(): Promise<void> {
     formError.hidden = true;
-    if (!controls(state, busy, jobPending).canVideo) return;
+    if (!controls(state, busy, jobPending).canVideo || state === null || currentVideo(state)?.models?.state !== "ready") return;
+    const family = chosenFamily(state);
     const prompt = promptBox.value;
     if (prompt.trim() === "") return formFail("Describe the video first.");
     if (references.length > 1) return formFail("Attach at most one start image for a video.");
@@ -2162,12 +2285,13 @@ export function mountApp(doc: Document, env: Env): App {
     if (state) renderForm(state);
     try {
       const body: Record<string, unknown> = { prompt, size, duration };
+      if (family !== null) body["family"] = family.id;
       if (seed.value !== undefined) body["seed"] = seed.value;
       if (file !== null) body["image"] = await readBase64(file);
       const res = await call("POST", API.video, body);
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
-      const entry = addEntry(id, "video", prompt, videoLabel(size, duration, file !== null));
+      const entry = addEntry(id, "video", prompt, videoLabel(size, duration, file !== null, family?.title ?? null));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;

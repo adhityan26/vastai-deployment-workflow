@@ -10,13 +10,13 @@ import httpx
 
 from .comfy import ComfyUnavailable
 from .model_link import (
-    ActiveLink, LinkError, ModelLink, check_model_file, clear_active, diffusion_slot, linked_spec, read_active,
-    required_loader, sha256_of, write_active,
+    ActiveLink, LinkError, ModelLink, check_model_file, clear_active, diffusion_slot, expert_spec, linked_spec,
+    parse_link, read_active, read_family_links, required_loader, sha256_of, write_active, write_family_links,
 )
-from .models import VideoModelInfo, VideoModelsStatus
+from .models import VideoExpertInfo, VideoFamilyStatus, VideoModelInfo, VideoModelsStatus
 from .profile import (
-    DiskInsufficient, DownloadError, Downloader, ModelSpec, Profile, ProfileError, check_disk, missing_models,
-    target_path, video_model_specs,
+    DiskInsufficient, DownloadError, Downloader, ModelSpec, Profile, ProfileError, VideoFamilySpec, check_disk,
+    family_model_specs, missing_models, target_path, video_model_specs,
 )
 from .state import State, StateStore
 
@@ -62,6 +62,7 @@ class VideoModels:
         free_bytes_fn: Callable[[Path], int],
         disk_margin_mb: int,
         include_at_boot: bool,
+        boot_families: tuple[str, ...] | list[str] = (),
         make_downloader: Callable[[Callable[[str, int, int], None]], Downloader],
         states: StateStore,
         state_dir: Path,
@@ -77,6 +78,7 @@ class VideoModels:
         self._free = free_bytes_fn
         self._margin_mb = disk_margin_mb
         self._boot = include_at_boot
+        self._boot_families = tuple(boot_families)
         self._make_downloader = make_downloader
         self._states = states
         self._spawn = spawn
@@ -89,7 +91,10 @@ class VideoModels:
         self._profile: Profile | None = None
         self._profile_error = False
         self._running = False
+        # The family a running download is for (None: the base section).
+        self._running_family: str | None = None
         self._failure: str | None = None
+        self._family_failure: dict[str, str] = {}
         self._done = 0
         self._total = 0
 
@@ -122,6 +127,9 @@ class VideoModels:
         slot = diffusion_slot(profile)
         return None if slot is None else VideoModelInfo(file=slot.file.rsplit("/", 1)[-1], linked=False, sha256=None)
 
+    def _boot_of_base(self) -> bool:
+        return self._base_boot(self._profile)
+
     def busy(self) -> bool:
         with self._lock:
             return self._running
@@ -130,23 +138,31 @@ class VideoModels:
         with self._lock:
             return self._view()
 
+    def _base_boot(self, profile: Profile | None) -> bool:
+        """Whether this boot downloads the base section's files: INCLUDE_VIDEO_MODELS, and VIDEO_BOOT_FAMILIES names it
+        (or nothing)."""
+        if not self._boot or profile is None or not self._boot_families:
+            return self._boot
+        return profile.video_base_id in self._boot_families
+
     def _view(self) -> VideoModelsStatus:
-        if self._running:
-            return VideoModelsStatus(state="downloading", boot=self._boot, bytes_done=self._done, bytes_total=self._total)
+        if self._running and self._running_family is None:
+            return VideoModelsStatus(state="downloading", boot=self._boot_of_base(), bytes_done=self._done, bytes_total=self._total)
         profile = self._video_profile()
         if profile is None:
             return VideoModelsStatus(state="unavailable", boot=self._boot, bytes_done=0, bytes_total=0)
+        boot = self._base_boot(profile)
         specs, active = self._required(profile)
         model = self._model_info(profile, active)
         missing = missing_models(profile, self._comfy_dir, specs)
         total = sum(m.size_bytes for m in specs)
         if self._failure is not None:
             left = sum(m.size_bytes for m in missing)
-            return VideoModelsStatus(state="failed", boot=self._boot, bytes_done=total - left, bytes_total=total,
+            return VideoModelsStatus(state="failed", boot=boot, bytes_done=total - left, bytes_total=total,
                                      reason=self._failure, model=model)
         if not missing:
-            return VideoModelsStatus(state="ready", boot=self._boot, bytes_done=total, bytes_total=total, model=model)
-        return VideoModelsStatus(state="not_installed", boot=self._boot, bytes_done=0,
+            return VideoModelsStatus(state="ready", boot=boot, bytes_done=total, bytes_total=total, model=model)
+        return VideoModelsStatus(state="not_installed", boot=boot, bytes_done=0,
                                  bytes_total=sum(m.size_bytes for m in missing), model=model)
 
     def start(self, url: str | None = None) -> VideoModelsStatus:
@@ -167,6 +183,7 @@ class VideoModels:
             except LinkError as err:
                 raise VideoModelsRefused(400 if err.code in LINK_BAD_REQUEST else 409, err.code, _clip(err.message)) from None
         with self._lock:
+            self._refuse_other(None)
             if self._running:
                 return self._view()
             profile = self._video_profile()
@@ -208,6 +225,7 @@ class VideoModels:
                     "free; start the next instance with Include video models (it rents a larger disk)",
                 ) from None
             self._running = True
+            self._running_family = None
             self._failure = None
             self._done = 0
             self._total = sum(m.size_bytes for m in missing)
@@ -268,3 +286,227 @@ class VideoModels:
             with self._lock:
                 self._running = False
                 self._failure = None if failure is None else _clip(failure)
+
+    # ---- the families of `video_families:` (the base section keeps the methods above, unchanged) ----
+
+    def _refuse_other(self, family: str | None) -> None:
+        """Single-flight across families: one video download at a time (call with the lock held)."""
+        if self._running and self._running_family != family:
+            raise VideoModelsRefused(409, "video_download_busy",
+                                     "another video model download is running on this instance; try again when it is done")
+
+    def _enabled_family(self, profile: Profile, family: str) -> VideoFamilySpec | None:
+        return next((f for f in profile.video_families if f.id == family and f.enabled), None)
+
+    def _family_required(self, profile: Profile, fam: VideoFamilySpec, replace: dict[str, ModelSpec] | None = None,
+                         ) -> tuple[ModelSpec, ...]:
+        """The family's files, each linked expert in place of its pinned file (`replace` by "<mode>.<slot>", else the
+        active links)."""
+        if replace is None:
+            replace = {key: ModelSpec(file=a.file, repo=a.repo, revision=a.revision, dest=a.dest, size_bytes=a.size_bytes)
+                       for key, a in read_family_links(self._state_dir, fam.id).items()}
+        by_file = {file: f"{mode}.{slot}" for mode, slot, file in fam.experts}
+        out = []
+        for m in family_model_specs(profile, fam.id):
+            key = by_file.get(m.file.rsplit("/", 1)[-1])
+            out.append(replace.get(key, m) if key is not None else m)
+        return tuple(out)
+
+    def _family_view(self, profile: Profile, fam: VideoFamilySpec) -> VideoFamilyStatus:
+        active = read_family_links(self._state_dir, fam.id)
+        experts = [
+            VideoExpertInfo(mode=mode, slot=slot, file=active[f"{mode}.{slot}"].name if f"{mode}.{slot}" in active else file,
+                            linked=f"{mode}.{slot}" in active,
+                            sha256=active[f"{mode}.{slot}"].sha256 if f"{mode}.{slot}" in active else None)
+            for mode, slot, file in fam.experts
+        ]
+        boot = self._boot and fam.id in self._boot_families
+        if self._running and self._running_family == fam.id:
+            return VideoFamilyStatus(id=fam.id, state="downloading", boot=boot, bytes_done=self._done, bytes_total=self._total,
+                                     experts=experts)
+        specs = self._family_required(profile, fam)
+        missing = missing_models(profile, self._comfy_dir, specs)
+        total = sum(m.size_bytes for m in specs)
+        left = sum(m.size_bytes for m in missing)
+        failure = self._family_failure.get(fam.id)
+        if failure is not None:
+            return VideoFamilyStatus(id=fam.id, state="failed", boot=boot, bytes_done=total - left, bytes_total=total,
+                                     reason=failure, experts=experts)
+        if not missing:
+            return VideoFamilyStatus(id=fam.id, state="ready", boot=boot, bytes_done=total, bytes_total=total, experts=experts)
+        return VideoFamilyStatus(id=fam.id, state="not_installed", boot=boot, bytes_done=0, bytes_total=left, experts=experts)
+
+    def _base_family_view(self, profile: Profile) -> VideoFamilyStatus:
+        base = self._view()
+        return VideoFamilyStatus(id=profile.video_base_id, state=base.state, boot=base.boot, bytes_done=base.bytes_done,
+                                 bytes_total=base.bytes_total, reason=base.reason)
+
+    def families_view(self) -> list[VideoFamilyStatus]:
+        """Every enabled family: the base section first, then each one VIDEO_FAMILIES lists (empty with video off)."""
+        with self._lock:
+            profile = self._video_profile()
+            if profile is None:
+                return []
+            return [self._base_family_view(profile)] + [self._family_view(profile, f) for f in profile.video_families if f.enabled]
+
+    def request(self, *, family: str | None = None, url: str | None = None, mode: str | None = None,
+                links: dict[str, str] | None = None) -> VideoModelsStatus | VideoFamilyStatus:
+        """POST /video-models: the base section (no family, or its id) with an optional `url`; another family with
+        optional `links` for both experts of `mode`."""
+        profile = self._video_profile()
+        if family is None or (profile is not None and family == profile.video_base_id):
+            if mode is not None or links:
+                raise VideoModelsRefused(400, "invalid_model_link", "the base video model takes one link (url), not expert links")
+            return self.start(url)
+        if url:
+            raise VideoModelsRefused(400, "invalid_model_link", "a video family takes expert links (mode, links), not a url")
+        return self.start_family(family, mode, links)
+
+    def start_family(self, family: str, mode: str | None = None, links: dict[str, str] | None = None) -> VideoFamilyStatus:
+        """Fetch the family's missing files. With `links` (every expert slot of `mode`, all together) those files
+        replace the mode's pinned experts (each validated, its size from a HEAD, before anything else); the other
+        mode's links are kept. Without links the pinned experts are used again (all of the family's links dropped)."""
+        profile = self._video_profile()
+        fam = None if profile is None else self._enabled_family(profile, family)
+        if fam is None:
+            raise VideoModelsRefused(404, "video_unavailable", "this video family is not switched on here")
+        new: dict[str, tuple[ModelSpec, ModelLink]] = {}
+        link_client: httpx.Client | None = None
+        if links:
+            if mode not in ("text", "image"):
+                raise VideoModelsRefused(400, "invalid_model_link", "expert links need the mode they are for (text or image)")
+            slots = {slot: file for m, slot, file in fam.experts if m == mode}
+            if set(links) != set(slots):
+                raise VideoModelsRefused(400, "invalid_model_link",
+                                         f"link every expert of the mode together: {', '.join(sorted(slots))}")
+            if self._make_link_client is None or self._make_link_downloader is None:
+                raise VideoModelsRefused(400, "invalid_model_link", "model links are not set up on this instance")
+            try:
+                # Every link is parsed before any request leaves; two links to one file name are refused.
+                parsed = {slot: parse_link(url, self._link_hosts) for slot, url in links.items()}
+                if len({p.name for p in parsed.values()}) != len(parsed):
+                    raise LinkError("model_link_name_clash", "the expert links name the same file")
+                kept = {k: a for k, a in read_family_links(self._state_dir, fam.id).items() if not k.startswith(f"{mode}.")}
+                taken = tuple(a.name for a in kept.values())
+                base_active = read_active(self._state_dir)
+                taken += (base_active.name,) if base_active is not None else ()
+                link_client = self._make_link_client()
+                for slot, url in sorted(links.items()):  # outside the lock: a HEAD must never hold up /status
+                    dest = next(m.dest for m in profile.models if m.file.rsplit("/", 1)[-1] == slots[slot])
+                    new[f"{mode}.{slot}"] = expert_spec(url, profile, dest, hosts=self._link_hosts, client=link_client,
+                                                        max_bytes=self._link_max, taken=taken)
+            except LinkError as err:
+                raise VideoModelsRefused(400 if err.code in LINK_BAD_REQUEST else 409, err.code, _clip(err.message)) from None
+        elif mode is not None and mode not in ("text", "image"):
+            raise VideoModelsRefused(400, "invalid_model_link", "the mode must be text or image")
+        with self._lock:
+            self._refuse_other(fam.id)
+            if self._running:
+                return self._family_view(profile, fam)
+            if self._states.get().state not in SERVING:
+                raise VideoModelsRefused(409, "not_ready", "the instance is not ready")
+            kept = {k: a for k, a in read_family_links(self._state_dir, fam.id).items()
+                    if new and not k.startswith(f"{mode}.")}
+            replace = {k: ModelSpec(file=a.file, repo=a.repo, revision=a.revision, dest=a.dest, size_bytes=a.size_bytes)
+                       for k, a in kept.items()}
+            replace.update({k: spec for k, (spec, _link) in new.items()})
+            required = self._family_required(profile, fam, replace)
+            missing = missing_models(profile, self._comfy_dir, required)
+            switching = bool(new) or bool(read_family_links(self._state_dir, fam.id))
+            if not missing and not switching:
+                self._family_failure.pop(fam.id, None)
+                return self._family_view(profile, fam)
+            loaders = {required_loader(link.name) for _spec, link in new.values()} | {
+                required_loader(a.name) for a in kept.values()}
+            loaders.discard(None)
+            classes = fam.node_classes + tuple(sorted(c for c in loaders if c not in fam.node_classes))
+            try:
+                absent = [c for c in classes if not self._comfy.node_class_registered(c)]
+            except ComfyUnavailable:
+                raise VideoModelsRefused(503, "comfy_unavailable", "ComfyUI could not be asked for its node classes") from None
+            gguf = [c for c in absent if c in loaders]
+            if gguf:
+                raise VideoModelsRefused(409, "video_gguf_loader_missing",
+                                         f"a .gguf video model needs the ComfyUI node class {gguf[0]}, which this instance does not have")
+            if absent:
+                raise VideoModelsRefused(409, "video_nodes_missing", _clip(
+                    f"ComfyUI on this instance lacks the node classes {', '.join(absent)}; a newer instance image is needed"))
+            free = self._free(self._comfy_dir)
+            try:
+                check_disk(profile, self._comfy_dir, free, self._margin_mb, tuple(missing))
+            except DiskInsufficient:
+                need = sum(m.size_bytes for m in missing) + self._margin_mb * 1024 * 1024
+                raise VideoModelsRefused(
+                    409, "disk_insufficient",
+                    f"the instance disk is too small for this video family: {need / GIB:.1f} GB needed, {free / GIB:.1f} GB "
+                    "free; start the next instance with this family included (it rents a larger disk)",
+                ) from None
+            self._running = True
+            self._running_family = fam.id
+            self._family_failure.pop(fam.id, None)
+            self._done = 0
+            self._total = sum(m.size_bytes for m in missing)
+            names = tuple(m.file.rsplit("/", 1)[-1] for m in required)
+            view = self._family_view(profile, fam)
+        self._spawn(lambda: self._run_family(fam.id, missing, names, classes, new, kept, link_client))
+        return view
+
+    def _run_family(self, family: str, missing: list[ModelSpec], names: tuple[str, ...], classes: tuple[str, ...],
+                    new: dict[str, tuple[ModelSpec, ModelLink]], kept: dict[str, ActiveLink],
+                    link_client: httpx.Client | None) -> None:
+        failure: str | None = None
+        before = 0
+        by_spec = {spec: link for spec, link in new.values()}
+
+        def on_progress(_file: str, done: int, _total: int) -> None:
+            with self._lock:
+                self._done = before + done
+
+        try:
+            downloader = self._make_downloader(on_progress)
+            for model in missing:
+                link = by_spec.get(model)
+                if link is not None:
+                    self._make_link_downloader(link_client, link, on_progress).fetch(model, self._comfy_dir)
+                else:
+                    downloader.fetch(model, self._comfy_dir)
+                before += model.size_bytes
+                with self._lock:
+                    self._done = before
+            unlisted = self._comfy.unlisted_files(classes, names)
+            if unlisted:
+                failure = (f"ComfyUI does not list {', '.join(unlisted)} yet; it needs a restart (or start the next "
+                           "instance with this family included)")
+            else:
+                active = dict(kept)
+                for key, (spec, link) in sorted(new.items()):
+                    target = target_path(spec, self._comfy_dir)
+                    try:
+                        check_model_file(target)  # GGUF magic bytes, or a sane safetensors header
+                    except LinkError:
+                        for other, _l in new.values():
+                            target_path(other, self._comfy_dir).unlink(missing_ok=True)
+                        raise
+                    # Not integrity-pinned: what arrived is hashed and reported, never checked against a pin.
+                    sha = sha256_of(target)
+                    active[key] = ActiveLink(url=link.url, repo=link.repo, revision=link.revision, file=link.file,
+                                             name=link.name, dest=spec.dest, size_bytes=spec.size_bytes, sha256=sha)
+                    log.info("linked video expert %s of %s: %s from %s@%s: sha256 %s (not pinned)", key, family, link.name,
+                             link.repo, link.revision, sha)
+                write_family_links(self._state_dir, family, active)
+        except LinkError as exc:
+            failure = f"{exc.code}: {exc.message}"
+        except DownloadError as exc:
+            failure = f"download failed: {exc}"
+        except ComfyUnavailable:
+            failure = "ComfyUI could not be asked whether it lists the new files"
+        except Exception as exc:  # the state must never stay "downloading"
+            failure = f"unexpected error ({type(exc).__name__})"
+        finally:
+            with self._lock:
+                self._running = False
+                self._running_family = None
+                if failure is None:
+                    self._family_failure.pop(family, None)
+                else:
+                    self._family_failure[family] = _clip(failure)

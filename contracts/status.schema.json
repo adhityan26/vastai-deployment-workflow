@@ -135,6 +135,112 @@
       "title": "State",
       "type": "string"
     },
+    "VideoExpertInfo": {
+      "description": "One diffusion expert of a video family mode: the pinned file, or a linked one (not integrity-pinned).",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "linked": {
+          "title": "Linked",
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "text",
+            "image"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "slot": {
+          "title": "Slot",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "slot",
+        "file",
+        "linked"
+      ],
+      "title": "VideoExpertInfo",
+      "type": "object"
+    },
+    "VideoFamilyStatus": {
+      "description": "The model files of one enabled video family on this instance (the base section's too, without experts).",
+      "properties": {
+        "boot": {
+          "title": "Boot",
+          "type": "boolean"
+        },
+        "bytes_done": {
+          "title": "Bytes Done",
+          "type": "integer"
+        },
+        "bytes_total": {
+          "title": "Bytes Total",
+          "type": "integer"
+        },
+        "experts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VideoExpertInfo"
+          },
+          "title": "Experts",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "state": {
+          "enum": [
+            "unavailable",
+            "not_installed",
+            "downloading",
+            "ready",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "boot",
+        "bytes_done",
+        "bytes_total"
+      ],
+      "title": "VideoFamilyStatus",
+      "type": "object"
+    },
     "VideoModelInfo": {
       "description": "The diffusion model the video workflow loads: the pinned one, or a linked one (not integrity-pinned).",
       "properties": {
@@ -350,6 +456,21 @@
         }
       ],
       "title": "Uptime S"
+    },
+    "video_families": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/VideoFamilyStatus"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Video Families"
     },
     "video_models": {
       "anyOf": [

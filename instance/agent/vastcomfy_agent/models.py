@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .state import State
 
@@ -39,6 +39,31 @@ class VideoModelInfo(BaseModel):
 class VideoModelsRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     url: str | None = None
+    # A video family other than the base section (its id); `mode` and `links` replace both experts of that mode.
+    family: str | None = Field(default=None, max_length=32)
+    mode: Literal["text", "image"] | None = None
+    links: dict[str, str] | None = Field(default=None, max_length=4)
+
+
+class VideoExpertInfo(BaseModel):
+    """One diffusion expert of a video family mode: the pinned file, or a linked one (not integrity-pinned)."""
+    mode: Literal["text", "image"]
+    slot: str
+    file: str
+    linked: bool
+    sha256: str | None = None
+
+
+class VideoFamilyStatus(BaseModel):
+    """The model files of one enabled video family on this instance (the base section's too, without experts)."""
+    id: str
+    state: Literal["unavailable", "not_installed", "downloading", "ready", "failed"]
+    # Whether this boot downloads them itself (INCLUDE_VIDEO_MODELS and VIDEO_BOOT_FAMILIES).
+    boot: bool
+    bytes_done: int
+    bytes_total: int
+    reason: str | None = None
+    experts: list[VideoExpertInfo] = []
 
 
 class VideoModelsStatus(BaseModel):
@@ -70,6 +95,7 @@ class Status(BaseModel):
     failsafe_alive: bool
     destroy: DestroyInfo
     video_models: VideoModelsStatus | None = None
+    video_families: list[VideoFamilyStatus] | None = None
 
 
 class ExtendRequest(BaseModel):

@@ -18,7 +18,31 @@ def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
     from_yaml = [{k: str(v) for k, v in m.items()} for m in raw["models"]]
     assert net_probe._flow_models(text) == from_yaml
     assert len(from_yaml) == 8  # five image files, three video files
-    assert net_probe._flow_video_files(text) == {m["file"] for m in raw["video"]["models"]}
+    families = {m["file"] for f in raw["video_families"] for m in f["models"]}
+    assert net_probe._flow_video_files(text) == {m["file"] for m in raw["video"]["models"]} | families
+
+
+def test_a_pinned_video_familys_files_are_left_out_with_and_without_pyyaml(tmp_path, monkeypatch):
+    import builtins
+
+    raw = yaml.safe_load((PROFILES / "image.yaml").read_text())
+    for m in raw["video_families"][0]["models"]:
+        raw["models"].append({"file": f"split_files/x/{m['file']}", "repo": "o/r", "revision": "a" * 40,
+                              "dest": m["dest"], "size_bytes": 10**11})
+    path = tmp_path / "image.yaml"
+    path.write_text(yaml.safe_dump(raw, default_flow_style=None, width=1000))
+    with_yaml = net_probe.read_models(path)
+    real_import = builtins.__import__
+
+    def no_yaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_yaml)
+    without_yaml = net_probe.read_models(path)
+    for found in (with_yaml, without_yaml):
+        assert len(found) == 5 and not any("14B" in m["file"] or "wan" in m["file"] for m in found)
 
 
 def test_the_video_files_are_left_out_with_and_without_pyyaml(monkeypatch):

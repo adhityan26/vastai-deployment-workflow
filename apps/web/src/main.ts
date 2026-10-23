@@ -64,8 +64,13 @@ async function main(): Promise<void> {
   const profileName = str(cfg, "profile");
   if (!PROFILE_NAME.test(profileName)) throw new Error("PROFILE is not a valid profile name");
   const repoDir = str(cfg, "webRepoDir");
-  // Video is switched by VIDEO_ENABLED, never by the profile (which is refused if it still says `enabled:`).
-  const profile = loadProfile(join(repoDir, "instance", "profiles", `${profileName}.yaml`), { videoEnabled: cfg["videoEnabled"] === true });
+  // Video is switched by VIDEO_ENABLED, never by the profile (which is refused if it still says `enabled:`); more
+  // video families by VIDEO_FAMILIES (each needs its files pinned).
+  const videoFamilies = Array.isArray(cfg["videoFamilies"]) ? (cfg["videoFamilies"] as string[]) : [];
+  const profile = loadProfile(join(repoDir, "instance", "profiles", `${profileName}.yaml`), {
+    videoEnabled: cfg["videoEnabled"] === true,
+    videoFamilies,
+  });
   const template: unknown = JSON.parse(
     readFileSync(join(repoDir, "instance", "workflows", profile.generate.workflow), "utf8"),
   );
@@ -88,6 +93,13 @@ async function main(): Promise<void> {
   const videoTemplate: unknown = profile.video
     ? JSON.parse(readFileSync(join(repoDir, "instance", "workflows", profile.video.workflow), "utf8"))
     : null;
+  // Each further video family's two workflows (by file name); they must load.
+  const videoFamilyTemplates: Record<string, unknown> = {};
+  for (const family of profile.videoFamilies.filter((f) => !f.base)) {
+    for (const name of [family.text.workflow, family.image.workflow]) {
+      videoFamilyTemplates[name] = JSON.parse(readFileSync(join(repoDir, "instance", "workflows", name), "utf8"));
+    }
+  }
 
   const allowedGpus = cfg["vastAllowedGpus"];
   if (!Array.isArray(allowedGpus) || allowedGpus.length === 0) {
@@ -150,6 +162,7 @@ async function main(): Promise<void> {
     profileModels: profile.models,
     // An image-only boot skips these; the overall download progress must leave them out too.
     videoModelFiles: profile.videoFiles,
+    videoFamilyFiles: profile.videoFamilyFiles,
     consoleStore,
     usage,
     log,
@@ -172,6 +185,7 @@ async function main(): Promise<void> {
     editTemplate,
     upscaleTemplate,
     videoTemplate,
+    videoFamilyTemplates,
     credit: () => vast.accountCredit(),
     gallery,
     login: { configured: auth.configured, oidc, sessions },

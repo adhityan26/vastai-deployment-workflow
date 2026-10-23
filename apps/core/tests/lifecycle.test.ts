@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppsConfig } from "../src/config.js";
-import type { AgentStatus, VideoModelsStatus } from "../src/agent.js";
+import type { AgentStatus, VideoFamilyStatus, VideoModelsStatus } from "../src/agent.js";
 import { AgentError } from "../src/agent.js";
 import { Unreachable } from "../src/http.js";
 import { AlreadyActiveError, Registry, type InstanceRecord, type NewRecord } from "../src/registry.js";
@@ -168,6 +168,12 @@ class FakeAgent implements AgentLike {
     this.calls.push("agent.video");
     return this.videoImpl();
   }
+  familyAsked: unknown[] = [];
+  async startVideoFamily(family: string, opts: unknown = {}): Promise<VideoFamilyStatus> {
+    this.calls.push("agent.videoFamily");
+    this.familyAsked.push([family, opts]);
+    return { id: family, state: "downloading", boot: false, bytes_done: 0, bytes_total: 9 };
+  }
   async destroy(reason: "manual" | "watchdog"): Promise<void> {
     this.calls.push(`agent.destroy:${reason}`);
     this.destroyCalls.push(reason);
@@ -194,6 +200,7 @@ function setup(
     cfg: Record<string, unknown>;
     models: readonly ModelSpec[];
     videoFiles: readonly string[];
+    familyFiles: Readonly<Record<string, readonly string[]>>;
     usage: UsageHistory;
   }> = {},
 ) {
@@ -217,6 +224,7 @@ function setup(
     clock,
     ...(over.models ? { profileModels: over.models } : {}),
     ...(over.videoFiles ? { videoModelFiles: over.videoFiles } : {}),
+    ...(over.familyFiles ? { videoFamilyFiles: over.familyFiles } : {}),
     ...(over.usage ? { usage: over.usage } : {}),
     tsAuthKey: over.authKey ?? (async () => AUTH_KEY),
     newToken: () => TOKEN,
@@ -2238,5 +2246,79 @@ describe("video models at Start and on demand", () => {
     const err = (await errorOf(life.downloadVideoModels())) as AgentError;
     expect(err.code).toBe("disk_insufficient");
     expect(err.message).not.toContain(TOKEN);
+  });
+});
+
+describe("video families at Start and on demand", () => {
+  const rules = { videoEnabled: true, videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["huggingface.co", "hf.co"], videoModelLinkMaxBytes: 1000 };
+  // The base family (5 GB) and a 14B-like family (60 GB) sharing the 2 GB text encoder.
+  const models = [
+    { file: "img.bin", size_bytes: 10_000_000_000 },
+    { file: "sub/small.bin", size_bytes: 3_000_000_000 },
+    { file: "sub/enc.bin", size_bytes: 2_000_000_000 },
+    { file: "sub/h.bin", size_bytes: 29_000_000_000 },
+    { file: "sub/l.bin", size_bytes: 29_000_000_000 },
+  ];
+  const familyFiles = { small: ["small.bin", "enc.bin"], big: ["h.bin", "l.bin", "enc.bin"] };
+  const make = (cfgOver: Record<string, unknown> = {}) =>
+    setup({ cfg: { vastVideoDiskGb: 80, vastDiskGb: 50, ...rules, ...cfgOver }, models, videoFiles: familyFiles.small, familyFiles });
+
+  it("the disk counts the chosen families' files once on top of VAST_DISK_GB (never below VAST_VIDEO_DISK_GB)", async () => {
+    const big = make();
+    await big.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    expect(big.vast.requests[0]!.disk).toBe(50 + 60); // 58 + 2 GB, the shared encoder once
+    expect(big.vast.searches[0]).toMatchObject({ diskGb: 110 });
+    const both = make();
+    await both.life.start(undefined, null, { videoModels: true, videoFamilies: ["small", "big"] });
+    expect(both.vast.requests[0]!.disk).toBe(50 + 63);
+    const small = make();
+    await small.life.start(undefined, null, { videoModels: true, videoFamilies: ["small"] });
+    expect(small.vast.requests[0]!.disk).toBe(80); // VAST_VIDEO_DISK_GB is larger than 50 + 5
+    const plain = make();
+    await plain.life.start(undefined, null, { videoModels: true });
+    expect(plain.vast.requests[0]!.disk).toBe(80); // as before families existed
+  });
+
+  it("tells the instance which families are on (VIDEO_FAMILIES) and which this boot downloads (VIDEO_BOOT_FAMILIES)", async () => {
+    const on = make({ videoFamilies: ["big"] });
+    await on.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    expect(on.vast.requests[0]!.env).toMatchObject({ VIDEO_ENABLED: "true", VIDEO_FAMILIES: "big", INCLUDE_VIDEO_MODELS: "true", VIDEO_BOOT_FAMILIES: "big" });
+    const imageOnly = make({ videoFamilies: ["big"] });
+    await imageOnly.life.start(undefined, null, { videoFamilies: ["big"] });
+    expect(imageOnly.vast.requests[0]!.env).toMatchObject({ VIDEO_FAMILIES: "big" });
+    expect(imageOnly.vast.requests[0]!.env).not.toHaveProperty("VIDEO_BOOT_FAMILIES");
+    expect(imageOnly.vast.requests[0]!.disk).toBe(50);
+    const none = make();
+    await none.life.start(undefined, null, { videoModels: true });
+    expect(none.vast.requests[0]!.env).not.toHaveProperty("VIDEO_FAMILIES");
+    expect(none.vast.requests[0]!.env).not.toHaveProperty("VIDEO_BOOT_FAMILIES");
+    const off = make({ videoEnabled: false, videoFamilies: ["big"] });
+    await off.life.start();
+    expect(Object.keys(off.vast.requests[0]!.env).filter((k) => k.startsWith("VIDEO_"))).toEqual([]);
+  });
+
+  it("the overall download counts the files of the families the agent says this boot downloads", async () => {
+    const { life, vast, agent } = make({ videoFamilies: ["big"] });
+    await life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    vast.instances[0]!.actual_status = "running";
+    const progress = { phase: "models", file: "img.bin", bytes_done: 5, bytes_total: 10 };
+    const fam = (id: string, boot: boolean) => ({ id, state: "not_installed" as const, boot, bytes_done: 0, bytes_total: 1 });
+    agent.statusImpl = async () =>
+      status("downloading", { progress, video_models: { state: "not_installed", boot: false, bytes_done: 0, bytes_total: 1 }, video_families: [fam("small", false), fam("big", true)] });
+    expect((await life.view()).download).toMatchObject({ files_total: 4, bytes_total: 70_000_000_000 });
+    agent.statusImpl = async () =>
+      status("downloading", { progress, video_models: { state: "not_installed", boot: true, bytes_done: 0, bytes_total: 1 }, video_families: [fam("small", true), fam("big", false)] });
+    expect((await life.view()).download).toMatchObject({ files_total: 3, bytes_total: 15_000_000_000 });
+    agent.statusImpl = async () => status("downloading", { progress });
+    expect((await life.view()).download).toMatchObject({ files_total: 1, bytes_total: 10_000_000_000 });
+  });
+
+  it("downloadVideoFamily forwards the family, its mode and links to the active instance's agent", async () => {
+    const { life, agent, calls } = make();
+    await expect(life.downloadVideoFamily("big")).rejects.toThrow(/no active instance/);
+    await life.start();
+    expect(await life.downloadVideoFamily("big", { mode: "text", links: { high: "h", low: "l" } })).toMatchObject({ id: "big", state: "downloading" });
+    expect(calls).toContain("agent.videoFamily");
+    expect(agent.familyAsked).toEqual([["big", { mode: "text", links: { high: "h", low: "l" } }]]);
   });
 });

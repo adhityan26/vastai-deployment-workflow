@@ -40,6 +40,8 @@ export interface AgentStatus {
   destroy: { pending: boolean; attempts: number; last_error?: string | null };
   /** The video model files on the instance; absent from an agent without video support. */
   video_models?: VideoModelsStatus | null;
+  /** Every enabled video family (the base section first); absent or null without families. */
+  video_families?: VideoFamilyStatus[] | null;
 }
 
 export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
@@ -52,6 +54,27 @@ export interface VideoModelsStatus {
   reason?: string | null;
   /** The diffusion model in use: the pinned one, or a linked one (not integrity-pinned) with the sha256 that arrived. */
   model?: { file: string; linked: boolean; sha256?: string | null } | null;
+}
+
+/** One diffusion expert of a video family mode: pinned, or linked (not integrity-pinned) with the sha256 that arrived. */
+export interface VideoExpertInfo {
+  mode: "text" | "image";
+  slot: string;
+  file: string;
+  linked: boolean;
+  sha256?: string | null;
+}
+
+/** The model files of one enabled video family on the instance (the base section's too, with no experts). */
+export interface VideoFamilyStatus {
+  id: string;
+  state: VideoModelsState;
+  /** This boot downloads them itself (INCLUDE_VIDEO_MODELS and VIDEO_BOOT_FAMILIES). */
+  boot: boolean;
+  bytes_done: number;
+  bytes_total: number;
+  reason?: string | null;
+  experts?: VideoExpertInfo[];
 }
 
 export class AgentClient {
@@ -134,6 +157,21 @@ export class AgentClient {
       throw new AgentError(reply.status, "video models: response is not a status");
     }
     return body;
+  }
+
+  /**
+   * Ask the agent to download a video family's missing files (POST /video-models with `family`); `links` (every expert
+   * slot of `mode`) replace that mode's experts.
+   */
+  async startVideoFamily(family: string, opts: { mode?: "text" | "image"; links?: Record<string, string> } = {}): Promise<VideoFamilyStatus> {
+    const body = { family, ...(opts.mode === undefined ? {} : { mode: opts.mode }), ...(opts.links === undefined ? {} : { links: opts.links }) };
+    const reply = await this.call("POST", "/video-models", body);
+    if (reply.status < 200 || reply.status >= 300) this.fail("video models", reply);
+    const got = parseJson(reply.body) as VideoFamilyStatus | null;
+    if (got === null || typeof got !== "object" || typeof got.state !== "string" || typeof got.id !== "string") {
+      throw new AgentError(reply.status, "video models: response is not a family status");
+    }
+    return got;
   }
 
   async destroy(reason: "manual" | "watchdog"): Promise<void> {

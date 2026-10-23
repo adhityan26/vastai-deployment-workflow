@@ -413,7 +413,8 @@ def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     profile = load_profile(instance / "profiles" / "image.yaml")
     # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
     assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
-    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json", "video-ti2v.json")
+    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json", "video-ti2v.json",
+                                 "video-14b-t2v.json", "video-14b-i2v.json")
 
 
 def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_another_model(tmp_path):

@@ -6,7 +6,7 @@ import { buildUpscalePrompt } from "./upscale.js";
 import { resolveTuning, type Tuning } from "./guidance.js";
 import { checkStyleReferences, resolveStyle, stylePrompt } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
-import { VIDEO_OUTPUT_CLASS, buildVideoPrompt } from "./video.js";
+import { VIDEO_OUTPUT_CLASS, buildVideoPrompt, type VideoSpec } from "./video.js";
 
 export class GenerateTimeout extends Error {
   constructor(message = "generation timed out") {
@@ -279,6 +279,13 @@ export interface VideoDeps {
   clientId?: string;
   /** The instance's linked diffusion model (its plain file name) when it uses one instead of the pinned model. */
   diffusionFile?: string;
+  /**
+   * A video family other than the base section: its spec and workflow per mode (text without, image with a start
+   * image). When set, `profile.video` and `template` are not read.
+   */
+  family?: { text: { spec: VideoSpec; template: unknown }; image: { spec: VideoSpec; template: unknown } };
+  /** The instance's linked experts of the chosen family mode, by slot (all or none). */
+  links?: Readonly<Record<string, string>>;
 }
 
 export interface VideoRequest {
@@ -298,8 +305,7 @@ export interface VideoRequest {
  * workflow. Nothing leaves for the instance before every check has passed.
  */
 export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ promptId: string; startImage: boolean }> {
-  const spec = deps.profile.video;
-  if (spec === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
+  if (deps.family === undefined && deps.profile.video === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
   const seed = checkPromptAndSeed(deps.cfg, deps.random, { prompt: input.prompt, seed: input.seed });
   if (typeof input.size !== "string") throw new GenerateInputError("unknown_size", "size is not offered for video");
   if (typeof input.duration !== "string") throw new GenerateInputError("unknown_duration", "duration is not offered for video");
@@ -309,17 +315,21 @@ export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ pro
     size: input.size,
     duration: input.duration,
     ...(deps.diffusionFile === undefined ? {} : { diffusionFile: deps.diffusionFile }),
+    ...(deps.links === undefined ? {} : { links: deps.links }),
   };
   const wanted = input.image !== undefined && input.image !== null;
+  const mode = deps.family === undefined ? null : wanted ? deps.family.image : deps.family.text;
+  const spec = mode === null ? deps.profile.video! : mode.spec;
+  const template = mode === null ? deps.template : mode.template;
   // Exactly one start image, decoded and checked like a reference (anything but a base64 string is refused).
   const [image] = wanted ? decodeReferences([input.image], referenceLimits(deps.cfg)) : [];
   // Dry run with a placeholder name: size, duration and workflow mismatches surface before the upload.
-  buildVideoPrompt(spec, deps.template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
-  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, deps.template, fields), deps.clientId)).promptId, startImage: false };
+  buildVideoPrompt(spec, template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
+  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, template, fields), deps.clientId)).promptId, startImage: false };
   const kind = FILE_TYPES[image.type];
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
   const stored = await deps.comfy.uploadImage(`video-${token()}.${kind.ext}`, image.bytes, kind.contentType);
-  const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, deps.template, { ...fields, startImage: stored.name }), deps.clientId);
+  const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, template, { ...fields, startImage: stored.name }), deps.clientId);
   return { promptId, startImage: true };
 }
 
