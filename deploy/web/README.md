@@ -788,8 +788,8 @@ base family's workflow.
    from `models:` or in another folder (same message as the base section), and refuse an id that names no family.
    With only `VIDEO_ENABLED=true` (and `VIDEO_FAMILIES` empty, the default) everything is as before: the base family
    only, and the 14B family is validated but never downloaded or offered.
-3. Disk: the family's own files are 62.5 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE, the
-   0.15 GB extra LoRA), 69.2 GB with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
+3. Disk: the family's own files are 62.8 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE, and
+   the extra LoRAs' 0.15 GB and 0.31 GB), 69.5 GB with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
    with both families 131 GB** (the 5B alone stays at `VAST_VIDEO_DISK_GB`, 80): the Start dialog rents
    max(`VAST_DISK_GB`, `VAST_VIDEO_DISK_GB`, `VAST_DISK_GB` + the ticked families' pinned files in GB, a shared file
    counted once), computed from the pins, so `VAST_VIDEO_DISK_GB` needs no change for it. An on-demand download onto
@@ -807,23 +807,34 @@ the same note as the base one: admins get "Download video models (about N GB, se
 that family's files are there. One video download runs at a time on an instance (`video_download_busy` otherwise).
 
 **Extra LoRA.** A family may offer optional extra LoRAs (profile `extra_loras:` of the family; one per job). The
-shipped one is "Calisthenic moves" (`calisthenic_moves`): `calisthenics_moves_high_noise.safetensors` from
-`Aisha-AI-Official/wan2.2-calisthenic-moves` (pinned by the owner 2026-10-24, 153 MB), a high-noise-only LoRA, so only
-the high branch gets it. Its file is part of the family's `models:` and is **downloaded with the family** (the
-simplest robust choice: no separate download state, and the family's disk and progress figures include it; it costs
-153 MB on a 69 GB family). With the 14B family chosen the Video tool shows "Extra LoRA" (None by default), a strength
-(0 to 1, step 0.05, starting at the entry's default 0.6) and a note with the description and the trigger words. The
-job then carries `extra_lora` (the entry's id) and `extra_lora_strength`; the web app adds a `LoraLoaderModelOnly`
-node (`video_lora_high`, `video_lora_low` for an entry with a low file) right after the branch's 4-step LoRA node
-(`lora_after:` of each mode names it) and before `ModelSamplingSD3`, with the file name from the profile only. It is
-refused (400) for the base family or a family without extra LoRAs (`extra_lora_unavailable`), for an unknown id
-(`unknown_extra_lora`), for a mode the entry does not list (`extra_lora_mode`) and for a strength outside 0 to 1 or
-without a LoRA (`invalid_strength`). An entry has `id`, `title`, `description`, `modes` (text and/or image), `high`
-and/or `low` (`{file}`, one of the family's `models` in `models/loras/`), `strength` (default 0.6) and
-`trigger_words`. **UNVERIFIED:** whether this LoRA suits text and/or image to video (both are offered until someone
-knows), how it stacks with the lightx2v 4-step LoRAs, the 0.6 default (the usual recommendation, not tested), and its
-trigger words: nobody here has read its model card, so `trigger_words` is empty; the owner should fill it from the
-card (and narrow `modes` if the card says so).
+14B family ships two, both **image to video only** (`modes: [image]`) and at strength 1.0, as read from the model card
+of `Aisha-AI-Official/wan2.2-calisthenic-moves` on 2026-10-26:
+
+- "Calisthenic moves" (`calisthenic_moves`): `calisthenics_moves_high_noise.safetensors` (pinned 2026-10-24, 153 MB)
+  on the high-noise branch only. The card says it is a LoRA for Wan 2.2 I2V A14B only, trained on the high-noise
+  expert only (3 clips of 80 frames), with scale 1.0 (and shift 4 in the author's own setup); it probably works only
+  at the camera angle it was trained on, may ignore very different prompts and may force the look of the training
+  characters. It gives no trigger words (`trigger_words` stays empty), only example prompts, one of which is in the
+  entry's description.
+- "Calisthenic moves + low-noise LoRA" (`calisthenic_moves_low`): the same high-noise LoRA plus
+  `DR34ML4Y_I2V_14B_LOW_V2.safetensors` from `Aisha-AI-Official/backups` (pinned 2026-10-26, 307 MB) on the
+  low-noise branch, a third-party LoRA its author describes for nudity. Same limits.
+
+**Neither repo states a licence**: the owner decides whether to use them. Both files are part of the family's
+`models:` and are **downloaded with the family** (no separate download state; the family's disk and progress figures
+include them: 460 MB on a 69.5 GB family). With the 14B family chosen the Video tool shows "Extra LoRA" (None by
+default), a strength (0 to 1, step 0.05, starting at the entry's default) and a note with the description and the
+trigger words. The job then carries `extra_lora` (the entry's id) and `extra_lora_strength`; the web app adds a
+`LoraLoaderModelOnly` node (`video_lora_high`, and `video_lora_low` for an entry with a low file) right after the
+branch's 4-step LoRA node (`lora_after:` of each mode names it) and before `ModelSamplingSD3`, with the file name from
+the profile only. It is refused (400) for the base family or a family without extra LoRAs
+(`extra_lora_unavailable`), for an unknown id (`unknown_extra_lora`), for a mode the entry does not list
+(`extra_lora_mode`: a text job, without a start image, with either shipped entry) and for a strength outside 0 to 1
+or without a LoRA (`invalid_strength`). An entry has `id`, `title`, `description`, `modes` (text and/or image),
+`high` and/or `low` (`{file}`, one of the family's `models` in `models/loras/`), `strength` (0.6 when left out) and
+`trigger_words`. **UNVERIFIED:** how these LoRAs stack with the lightx2v 4-step LoRAs (the card's scale 1.0 was for
+the author's own setup: lower the strength if results break), and the low-noise LoRA's effect together with the
+calisthenics one.
 
 **Expert links (GGUF).** For a family an admin may link both experts of one mode instead of the pinned fp8 files:
 choose "Text to video" or "Image to video" under "Expert links for", then give the high-noise and the low-noise link

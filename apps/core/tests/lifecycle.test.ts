@@ -1247,6 +1247,7 @@ describe("overall download progress", () => {
       { file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", size_bytes: 1226977424 },
       { file: "split_files/vae/wan_2.1_vae.safetensors", size_bytes: 253815318 },
       { file: "calisthenics_moves_high_noise.safetensors", size_bytes: 153453560 }, // its extra LoRA
+      { file: "DR34ML4Y_I2V_14B_LOW_V2.safetensors", size_bytes: 306807976 }, // the second extra LoRA's low side
     ]);
   });
 
@@ -1260,10 +1261,10 @@ describe("overall download progress", () => {
     expect((await life.view()).download).toMatchObject({ files_total: 5, bytes_total: 15_016_544_196 });
     agent.statusImpl = async () => status("downloading", { progress: prog, video_models: { state: "not_installed", boot: true, bytes_done: 0, bytes_total: 1 } });
     expect((await life.view()).download).toMatchObject({ files_total: 8, bytes_total: 15_016_544_196 + 18_144_966_705 });
-    // A boot of the 14B family alone: its ten own files and the shared text encoder (69.23 GB), none of the 5B's own.
+    // A boot of the 14B family alone: its eleven own files and the shared text encoder (69.54 GB), none of the 5B's own.
     const fam = (id: string, boot: boolean) => ({ id, state: "not_installed" as const, boot, bytes_done: 0, bytes_total: 1 });
     agent.statusImpl = async () => status("downloading", { progress: prog, video_families: [fam("wan22_5b", false), fam("wan22_a14b", true)] });
-    expect((await life.view()).download).toMatchObject({ files_total: 16, bytes_total: 15_016_544_196 + 69_228_418_399 });
+    expect((await life.view()).download).toMatchObject({ files_total: 17, bytes_total: 15_016_544_196 + 69_535_226_375 });
   });
 
   it("sums earlier files, the current file's bytes (clamped) and nothing after it", () => {
