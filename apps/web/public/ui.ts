@@ -89,6 +89,7 @@ import {
   downloadPercent,
   downloadText,
   errorCode,
+  errorDetail,
   errorReason,
   errorText,
   estimatePath,
@@ -199,7 +200,13 @@ export interface App {
 }
 
 class ApiError extends Error {
-  constructor(message: string, readonly reason: string | null = null, readonly status: number | null = null, readonly code: string | null = null) {
+  constructor(
+    message: string,
+    readonly reason: string | null = null,
+    readonly status: number | null = null,
+    readonly code: string | null = null,
+    readonly detail: string | null = null,
+  ) {
     super(message);
   }
 }
@@ -330,7 +337,7 @@ export function mountApp(doc: Document, env: Env): App {
       throw new AuthLostError(SESSION_EXPIRED_MESSAGE);
     }
     if (res.status === 403 && (await accessLost())) throw new AuthLostError("No access for this account");
-    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status, errorCode(json));
+    if (!res.ok) throw new ApiError(errorText(res.status, json), errorReason(json), res.status, errorCode(json), errorDetail(json));
     return json;
   }
 
@@ -742,7 +749,9 @@ export function mountApp(doc: Document, env: Env): App {
       const showError = (err: unknown): void => {
         const box = errBox;
         box.replaceChildren(make("p", err instanceof Error ? err.message : "Something went wrong."));
-        if (err instanceof ApiError && err.reason !== null) box.append(make("p", `Reason: ${err.reason}`, "small"));
+        if (err instanceof ApiError && err.reason !== null) {
+          box.append(make("p", `Reason: ${err.reason}${err.detail === null ? "" : ` (${err.detail})`}`, "small"));
+        }
         box.hidden = false;
       };
       const clearError = (): void => {

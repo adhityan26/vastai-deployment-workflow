@@ -397,8 +397,43 @@ describe("start dialog", () => {
     expect(posts("/api/start")).toHaveLength(1);
   });
 
+  it("a failed Tailscale mint shows the specific text, reason and detail in the dialog and Start can be retried", async () => {
+    const text = "The server could not reach the Tailscale API (a network problem at the server; it retried a few times). Nothing was rented. Check the server's internet connection and try again in a minute.";
+    await adminNone({
+      "POST /api/start": { status: 424, body: { error: { code: "start_failed", message: text, reason: "ts_key_mint_failed", detail: "tailscale_unavailable" } } },
+    });
+    await openStart();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    const alert = q('#modal-body [role="alert"]')!;
+    expect(alert.hidden).toBe(false);
+    expect(alert.textContent).toContain(text);
+    expect(alert.textContent).toContain("Reason: ts_key_mint_failed (tailscale_unavailable)");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(false);
+    routes["POST /api/start"] = START_ROUTES["POST /api/start"]!;
+    q("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/start")).toHaveLength(2);
+    expect(q("#modal")!.hidden).toBe(true);
+  });
+
+  it("a start answered by a proxy error page (no JSON) says so in the dialog instead of a bare HTTP line", async () => {
+    await adminNone({ "POST /api/start": { status: 502, body: null, raw: "<html>Bad gateway</html>", type: "text/html" } });
+    await openStart();
+    q("#modal-ok")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    const alert = q('#modal-body [role="alert"]')!;
+    expect(alert.textContent).toContain(
+      "The server could not be reached or a proxy replaced the answer (HTTP 502). Check the Status card and try again; the server log has the details.",
+    );
+    expect(alert.textContent).not.toContain("<html>");
+    expect(q<HTMLButtonElement>("#modal-ok")!.disabled).toBe(false);
+  });
+
   it("a failed start shows message and reason in the dialog, keeps it open and re-enables confirm", async () => {
-    await adminNone({ "POST /api/start": { status: 502, body: { error: { code: "start_failed", message: "the Tailscale auth key is missing or empty on the server", reason: "ts_key_missing" } } } });
+    await adminNone({ "POST /api/start": { status: 424, body: { error: { code: "start_failed", message: "the Tailscale auth key is missing or empty on the server", reason: "ts_key_missing" } } } });
     await openStart();
     q("#modal-ok")!.click();
     await flush();
@@ -987,7 +1022,7 @@ describe("Vast credit", () => {
   });
 
   it("shows 'unavailable' when the server cannot read it, and retries after the interval", async () => {
-    await mount({ role: "admin" }, { "GET /api/credit": { status: 502, body: { error: { code: "vast_unavailable", message: "could not read the Vast account credit" } } } });
+    await mount({ role: "admin" }, { "GET /api/credit": { status: 424, body: { error: { code: "vast_unavailable", message: "could not read the Vast account credit" } } } });
     await flush();
     expect(q("#f-credit")!.textContent).toBe("unavailable");
     expect(q("#banner")!.hidden).toBe(true); // a credit problem is not a page-level alert
@@ -1191,7 +1226,7 @@ describe("gallery: save, auto-save and the gallery card", () => {
       q("#gal-open")!.click();
       await flush();
       expect(q("#gal-empty")!.hidden).toBe(false);
-      routes["GET /api/gallery"] = { status: 502, body: { error: { code: "gallery_error", message: "the gallery storage could not be reached" } } };
+      routes["GET /api/gallery"] = { status: 424, body: { error: { code: "gallery_error", message: "the gallery storage could not be reached" } } };
       q("#gal-open")!.click();
       await flush();
       expect(q("#gal-error")!.hidden).toBe(false);
@@ -1803,7 +1838,7 @@ describe("video", () => {
   });
 
   it("says so when the file cannot be loaded, or is not a video", async () => {
-    for (const reply of [{ status: 502, body: { error: { code: "video_rejected", message: "ComfyUI did not return a video" } } }, { body: null, raw: "<html>", type: "text/html" }]) {
+    for (const reply of [{ status: 424, body: { error: { code: "video_rejected", message: "ComfyUI did not return a video" } } }, { body: null, raw: "<html>", type: "text/html" }]) {
       await mount({ menu, video }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": doneVideo, "GET /api/video/v-1/0": reply });
       chooseTool("video");
       q<HTMLTextAreaElement>("#prompt")!.value = "a fox";

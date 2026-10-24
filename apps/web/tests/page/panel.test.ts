@@ -317,7 +317,7 @@ describe("the header", () => {
     expect(q("#f-credit-tone").textContent).toBe("");
     app!.stop();
     document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
-    await mount({}, { "GET /api/credit": { status: 502, body: { error: { code: "vast_unavailable", message: "no" } } } });
+    await mount({}, { "GET /api/credit": { status: 424, body: { error: { code: "vast_unavailable", message: "no" } } } });
     expect(q("#f-credit").textContent).toBe("unavailable");
     expect(q("#f-credit-box").dataset["tone"]).toBe("neutral");
     expect(q("#f-credit-tone").textContent).toBe("");
@@ -787,7 +787,7 @@ describe("the Start dialog and the credit", () => {
     q("#modal-cancel").click();
     app!.stop();
     document.body.innerHTML = /<body>([\s\S]*)<\/body>/.exec(INDEX)![1]!;
-    await start({ status: 502, body: { error: { code: "vast_unavailable", message: "no" } } });
+    await start({ status: 424, body: { error: { code: "vast_unavailable", message: "no" } } });
     await openStart();
     expect(q("#modal-body").textContent).toContain("up to $1.08");
     expect(document.querySelector("#start-credit-warning")).toBeNull();

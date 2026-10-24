@@ -44,6 +44,7 @@ import {
   chooseGpu,
   downloadPercent,
   downloadText,
+  errorDetail,
   errorReason,
   estimatePath,
   etaSeconds,
@@ -248,6 +249,18 @@ describe("form helpers", () => {
     expect(errorText(500, "<html>")).toContain("500");
     expect(errorText(401, null)).toContain("sign in");
   });
+  it("says a proxy may have replaced the answer when a 5xx has no JSON body (a Cloudflare 502/504 page)", () => {
+    for (const status of [502, 504, 503, 500, 520]) {
+      expect(errorText(status, null)).toBe(
+        `The server could not be reached or a proxy replaced the answer (HTTP ${status}). Check the Status card and try again; the server log has the details.`,
+      );
+    }
+    expect(errorText(502, { error: { code: "x", message: "" } })).toContain("a proxy replaced the answer (HTTP 502)");
+    // A server JSON message always wins, whatever the status.
+    expect(errorText(424, { error: { code: "start_failed", message: "Tailscale refused the OAuth client." } })).toBe("Tailscale refused the OAuth client.");
+    // A 4xx without a body keeps the plain line.
+    expect(errorText(424, null)).toBe("The request failed (HTTP 424).");
+  });
   it("words the slow network failures, naming the measured speed only for slow_download", () => {
     const slow = "The rented machine's network is too slow";
     const retry = "It was released; try Start again, a different machine is chosen.";
@@ -363,6 +376,13 @@ describe("GPU choice", () => {
     expect(errorReason({ error: { reason: 5 } })).toBeNull();
     expect(errorReason({ error: { reason: "" } })).toBeNull();
     expect(errorReason(null)).toBeNull();
+  });
+  it("reads a plain detail only", () => {
+    expect(errorDetail({ error: { reason: "ts_key_mint_failed", detail: "tailscale_unavailable" } })).toBe("tailscale_unavailable");
+    expect(errorDetail({ error: { detail: "Not A Code" } })).toBeNull();
+    expect(errorDetail({ error: { detail: 5 } })).toBeNull();
+    expect(errorDetail({ error: {} })).toBeNull();
+    expect(errorDetail(null)).toBeNull();
   });
 });
 

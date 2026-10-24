@@ -767,6 +767,13 @@ export function errorCode(body: unknown): string | null {
   return typeof c === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(c) ? c : null;
 }
 
+/** The `detail` of an API error body (a fixed sub-cause), only when it is a short plain identifier. */
+export function errorDetail(body: unknown): string | null {
+  if (!isObj(body) || !isObj(body["error"])) return null;
+  const d = body["error"]["detail"];
+  return typeof d === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(d) ? d : null;
+}
+
 /** The `reason` of an API error body, only when it is a short plain string. */
 export function errorReason(body: unknown): string | null {
   if (!isObj(body) || !isObj(body["error"])) return null;
@@ -1578,13 +1585,20 @@ export function characterCount(text: string): string {
   return `${text.length} character${text.length === 1 ? "" : "s"}`;
 }
 
-/** Plain text for a failed request: the API's message, else a generic line. */
+/**
+ * Plain text for a failed request: the API's message, else a generic line. A 5xx without a usable
+ * JSON message most likely never came from this server's routes (they always send one): the server
+ * was unreachable, or a proxy in front (Cloudflare replaces an origin 502/504) sent its own page.
+ */
 export function errorText(status: number, body: unknown): string {
   if (isObj(body) && isObj(body["error"]) && typeof body["error"]["message"] === "string" && body["error"]["message"] !== "") {
     return body["error"]["message"];
   }
   if (status === 401) return "You are signed out. Reload the page to sign in again.";
   if (status === 403) return "Your account may not do this.";
+  if (status >= 500) {
+    return `The server could not be reached or a proxy replaced the answer (HTTP ${status}). Check the Status card and try again; the server log has the details.`;
+  }
   return `The request failed (HTTP ${status}).`;
 }
 
