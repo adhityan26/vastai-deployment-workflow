@@ -32,6 +32,7 @@ export const API = {
   history: "/api/history",
   gallery: "/api/gallery",
   galleryDelete: "/api/gallery/delete",
+  loras: "/api/loras",
   me: "/api/me",
 } as const;
 
@@ -144,7 +145,11 @@ export interface VideoExtraLoraView {
   modes: ("text" | "image")[];
   strength: number;
   trigger_words: string;
+  /** An added LoRA's files on the instance (absent for a profile entry or when the instance does not say). */
+  status?: LoraState;
 }
+export type LoraState = "not_installed" | "downloading" | "ready" | "failed";
+const LORA_STATES: readonly LoraState[] = ["not_installed", "downloading", "ready", "failed"];
 /** One video family to choose from (GET /api/state video_families; the base section first). */
 export interface VideoFamilyInfo {
   id: string;
@@ -439,7 +444,8 @@ function parseVideoFamilies(v: unknown, video: VideoInfo | null): VideoFamilyInf
           const modes = Array.isArray(e["modes"]) ? (e["modes"] as unknown[]).filter((m): m is "text" | "image" => m === "text" || m === "image") : [];
           const strength = num(e["strength"]);
           if (modes.length === 0 || strength === null || strength < 0 || strength > 1) return [];
-          return [{ id: e["id"], title: e["title"], description: typeof e["description"] === "string" ? e["description"] : "", modes, strength, trigger_words: typeof e["trigger_words"] === "string" ? e["trigger_words"] : "" }];
+          const status = (LORA_STATES as readonly unknown[]).includes(e["status"]) ? { status: e["status"] as LoraState } : {};
+          return [{ id: e["id"], title: e["title"], description: typeof e["description"] === "string" ? e["description"] : "", modes, strength, trigger_words: typeof e["trigger_words"] === "string" ? e["trigger_words"] : "", ...status }];
         })
       : [];
     out.push({ id: f["id"], title: f["title"], base: f["base"] === true, sizes: shape.sizes, durations: shape.durations, download_bytes: shape.download_bytes, models: shape.models, slots, experts, extra_loras: extraLoras });
@@ -2108,3 +2114,107 @@ export function panelActions(state: string | null): PanelActions {
     hint: retry ? "Destroy it in the danger zone below, then start again." : "",
   };
 }
+
+
+// ---- extra LoRAs added by admins (Manage LoRAs) ----
+
+/** The header the page sends with GET /api/state after the reveal gesture (the server honours it for admins only). */
+export const REVEAL_HEADER = "x-reveal-hidden";
+/** Taps on the tool's title that reveal hidden LoRAs, and the time they must fall in. */
+export const REVEAL_TAPS = 3;
+export const REVEAL_WINDOW_MS = 1000;
+
+/** Counts quick taps: true on the REVEAL_TAPS-th tap within REVEAL_WINDOW_MS (then it starts over). */
+export class TapCounter {
+  private taps: number[] = [];
+  tap(nowMs: number): boolean {
+    this.taps = [...this.taps.filter((t) => nowMs - t < REVEAL_WINDOW_MS), nowMs];
+    if (this.taps.length < REVEAL_TAPS) return false;
+    this.taps = [];
+    return true;
+  }
+}
+
+export interface AddedLoraSide { url: string; name: string; state: LoraState | null; size_bytes: number | null; sha256: string | null; reason: string | null }
+/** An added LoRA as GET /api/loras lists it (admins only). */
+export interface AddedLora {
+  id: string;
+  title: string;
+  description: string;
+  family: string;
+  modes: ("text" | "image")[];
+  strength: number;
+  hidden: boolean;
+  trigger_words: string;
+  status: LoraState | null;
+  sides: { high?: AddedLoraSide; low?: AddedLoraSide };
+}
+export interface LoraList { loras: AddedLora[]; families: string[]; max_entries: number }
+
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+const nullableStr = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
+const stateOf = (v: unknown): LoraState | null => ((LORA_STATES as readonly unknown[]).includes(v) ? (v as LoraState) : null);
+
+/** GET /api/loras; null when it is unusable. Entries with an odd shape are left out. */
+export function parseLoraList(v: unknown): LoraList | null {
+  if (!isObj(v) || !Array.isArray(v["loras"]) || !Array.isArray(v["families"]) || !posInt(v["max_entries"])) return null;
+  const loras = (v["loras"] as unknown[]).flatMap((e): AddedLora[] => {
+    if (!isObj(e) || typeof e["id"] !== "string" || !FAMILY_ID.test(e["id"]) || typeof e["title"] !== "string" || !isObj(e["sides"])) return [];
+    const modes = Array.isArray(e["modes"]) ? (e["modes"] as unknown[]).filter((m): m is "text" | "image" => m === "text" || m === "image") : [];
+    const strength = num(e["strength"]);
+    if (strength === null || modes.length === 0) return [];
+    const sides: AddedLora["sides"] = {};
+    for (const side of ["high", "low"] as const) {
+      const s = (e["sides"] as Record<string, unknown>)[side];
+      if (!isObj(s)) continue;
+      sides[side] = {
+        url: str(s["url"]), name: str(s["name"]), state: stateOf(s["state"]),
+        size_bytes: Number.isSafeInteger(s["size_bytes"]) ? (s["size_bytes"] as number) : null,
+        sha256: typeof s["sha256"] === "string" && /^[0-9a-f]{64}$/.test(s["sha256"]) ? s["sha256"] : null, reason: nullableStr(s["reason"]),
+      };
+    }
+    return [{ id: e["id"], title: e["title"], description: str(e["description"]), family: str(e["family"]), modes, strength, hidden: e["hidden"] === true, trigger_words: str(e["trigger_words"]), status: stateOf(e["status"]), sides }];
+  });
+  return { loras, families: (v["families"] as unknown[]).filter((f): f is string => typeof f === "string"), max_entries: v["max_entries"] as number };
+}
+
+/** What a LoRA's state means for the admin (and a not-ready entry in the Extra LoRA select). */
+export function loraStatusText(state: LoraState | null | undefined): string {
+  switch (state) {
+    case "ready": return "on the instance";
+    case "downloading": return "downloading";
+    case "failed": return "download failed";
+    case "not_installed": return "not on the instance yet";
+    default: return "no instance";
+  }
+}
+
+/** The Manage LoRAs form, as typed. */
+export interface LoraFormFields { title: string; description: string; family: string; text: boolean; image: boolean; strength: string; hidden: boolean; trigger_words: string; high: string; low: string }
+
+/**
+ * The body of POST /api/loras (`adding`) or PATCH /api/loras/{id}; the server checks everything again. Links are
+ * only part of an add (they cannot be changed: delete and add again).
+ */
+export function loraFormBody(f: LoraFormFields, adding: boolean): { body: Record<string, unknown> } | { error: string } {
+  const title = f.title.trim();
+  if (title === "" || title.length > 60) return { error: "Give a title of at most 60 characters." };
+  if (f.description.length > 400) return { error: "The description is longer than 400 characters." };
+  if (f.trigger_words.length > 200) return { error: "The trigger words are longer than 200 characters." };
+  const modes = [...(f.text ? ["text"] : []), ...(f.image ? ["image"] : [])];
+  if (modes.length === 0) return { error: "Choose text to video, image to video or both." };
+  const strength = Number(f.strength.trim() === "" ? "1" : f.strength.trim());
+  if (!Number.isFinite(strength) || strength < 0 || strength > 1) return { error: "The strength must be a number from 0 to 1." };
+  const body: Record<string, unknown> = { title, description: f.description, modes, strength, hidden: f.hidden, trigger_words: f.trigger_words };
+  if (!adding) return { body };
+  const high = f.high.trim();
+  const low = f.low.trim();
+  if (high === "" && low === "") return { error: "Give a link for the high-noise or the low-noise branch (or both)." };
+  if (high.length > MODEL_LINK_MAX_CHARS || low.length > MODEL_LINK_MAX_CHARS) return { error: "A link is too long." };
+  return { body: { ...body, family: f.family, ...(high === "" ? {} : { high }), ...(low === "" ? {} : { low }) } };
+}
+
+/** Shown next to the link fields: what an added LoRA is and is not. */
+export const LORA_LINK_NOTICE =
+  "A LoRA from a link is NOT integrity-pinned or licence-checked: only add a file you trust and may use. Hugging Face " +
+  ".safetensors file links only; the instance downloads it after it is ready and reports its sha256.";

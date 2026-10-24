@@ -15,7 +15,7 @@ def test_committed_generated_contracts_are_current():
 
 def test_openapi_lists_every_endpoint_of_the_spec():
     paths = json.loads((CONTRACTS / "agent.openapi.json").read_text())["paths"]
-    assert set(paths) == {"/health", "/status", "/extend", "/destroy", "/workflows", "/workflows/{name}", "/video-models"}
+    assert set(paths) == {"/health", "/status", "/extend", "/destroy", "/workflows", "/workflows/{name}", "/video-models", "/loras"}
     assert set(paths["/workflows/{name}"]) == {"get", "put"}
     assert json.loads((CONTRACTS / "agent.openapi.json").read_text())["openapi"].startswith("3.1")
 

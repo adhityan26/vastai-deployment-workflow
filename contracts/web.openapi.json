@@ -1571,7 +1571,7 @@
                     },
                     "extra_loras": {
                       "type": "array",
-                      "description": "The family's optional extra LoRAs (profile data; empty for the base family and a family without any). One may be added to a job (POST /api/video extra_lora). UNVERIFIED: their fit with text and image to video, how they stack with the 4-step LoRAs, the default strength, the trigger words",
+                      "description": "The family's optional extra LoRAs (profile data; empty for the base family and a family without any). One may be added to a job (POST /api/video extra_lora). UNVERIFIED: their fit with text and image to video, how they stack with the 4-step LoRAs, the default strength, the trigger words. Added ones follow the profile's",
                       "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -1582,7 +1582,9 @@
                           "modes",
                           "strength",
                           "trigger_words",
-                          "files"
+                          "files",
+                          "source",
+                          "status"
                         ],
                         "properties": {
                           "id": {
@@ -1628,6 +1630,33 @@
                               }
                             ],
                             "description": "Its LoRA file per expert branch (high, low): admins only, null for members"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "profile",
+                              "added"
+                            ],
+                            "description": "profile: the profile's extra_loras (downloaded with the family); added: added by an admin by link"
+                          },
+                          "status": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "not_installed",
+                              "downloading",
+                              "ready",
+                              "failed",
+                              null
+                            ],
+                            "description": "An added LoRA's files on the instance (a job needs ready); null for a profile entry or when the instance does not say"
+                          },
+                          "hidden": {
+                            "type": "boolean",
+                            "const": true,
+                            "description": "Present only on a hidden added LoRA, which only an admin who sent x-reveal-hidden: 1 gets"
                           }
                         }
                       }
@@ -2114,6 +2143,216 @@
             ]
           }
         }
+      },
+      "AddedLora": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description",
+          "family",
+          "modes",
+          "strength",
+          "hidden",
+          "trigger_words",
+          "created_at",
+          "status",
+          "sides"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{3,32}$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "family": {
+            "type": "string"
+          },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "text",
+                "image"
+              ]
+            }
+          },
+          "strength": {
+            "type": "number"
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "trigger_words": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "not_installed",
+              "downloading",
+              "ready",
+              "failed",
+              null
+            ],
+            "description": "All its files on the instance: ready when every one is, else the least advanced; null when no instance reports"
+          },
+          "sides": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "high": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "url",
+                  "repo",
+                  "revision",
+                  "path",
+                  "name",
+                  "state",
+                  "size_bytes",
+                  "sha256",
+                  "reason"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "The checked link (canonical resolve URL)"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "The file name on the instance, chosen by the server (xl_<id>_<side>.safetensors)"
+                  },
+                  "state": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "not_installed",
+                      "downloading",
+                      "ready",
+                      "failed",
+                      null
+                    ],
+                    "description": "On the running instance; null without one"
+                  },
+                  "size_bytes": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "From the instance's HEAD"
+                  },
+                  "sha256": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Of what arrived on the instance (NOT integrity-pinned)"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "low": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "url",
+                  "repo",
+                  "revision",
+                  "path",
+                  "name",
+                  "state",
+                  "size_bytes",
+                  "sha256",
+                  "reason"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "The checked link (canonical resolve URL)"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "The file name on the instance, chosen by the server (xl_<id>_<side>.safetensors)"
+                  },
+                  "state": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "not_installed",
+                      "downloading",
+                      "ready",
+                      "failed",
+                      null
+                    ],
+                    "description": "On the running instance; null without one"
+                  },
+                  "size_bytes": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "From the instance's HEAD"
+                  },
+                  "sha256": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Of what arrived on the instance (NOT integrity-pinned)"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -2440,7 +2679,18 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "x-reveal-hidden",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "1: an admin's state also lists hidden added LoRAs (the page sends it after the reveal gesture). Ignored for members: they never get hidden entries"
+          }
+        ]
       }
     },
     "/api/estimate": {
@@ -5285,7 +5535,7 @@
                       "string",
                       "null"
                     ],
-                    "description": "Only with a family that has extra LoRAs: the id of one of video_families[].extra_loras. The web app adds a LoraLoaderModelOnly node after the 4-step LoRA of each branch the LoRA has a file for (before ModelSamplingSD3); the file name comes from the profile only. Refused with 400 extra_lora_unavailable (base family or a family without any), unknown_extra_lora, extra_lora_mode (not offered for this mode). Absent or null: none"
+                    "description": "Only with a family that has extra LoRAs: the id of one of video_families[].extra_loras. The web app adds a LoraLoaderModelOnly node after the 4-step LoRA of each branch the LoRA has a file for (before ModelSamplingSD3); the file name comes from the profile only. Refused with 400 extra_lora_unavailable (base family or a family without any), unknown_extra_lora, extra_lora_mode (not offered for this mode). Absent or null: none Also an added LoRA's id (GET /api/loras); a hidden one only for an admin (a member gets unknown_extra_lora, the answer of an unknown id), and it needs its files on the instance (409 extra_lora_not_ready)."
                   },
                   "extra_lora_strength": {
                     "type": [
@@ -5371,7 +5621,7 @@
             }
           },
           "409": {
-            "description": "The instance is not ready (code not_ready), or its video model files are not there (code video_models_not_ready: not installed, still downloading, failed or not reported; never queued)",
+            "description": "The instance is not ready (code not_ready), or its video model files are not there (code video_models_not_ready: not installed, still downloading, failed or not reported; never queued) ; extra_lora_not_ready: an added extra LoRA whose files are not on the instance yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -5714,6 +5964,516 @@
           },
           "424": {
             "description": "The agent could not be reached or answered with an error (code agent_unavailable), or an oversized answer (code upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/loras": {
+      "get": {
+        "operationId": "listLoras",
+        "summary": "Extra LoRAs added by admins (admin only): all of them, hidden ones included, with their state per file on the running instance. 404 lora_unavailable where video or a family that takes extra LoRAs is off.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "loras",
+                    "families",
+                    "max_entries"
+                  ],
+                  "properties": {
+                    "loras": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AddedLora"
+                      }
+                    },
+                    "families": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The family ids an added LoRA may apply to"
+                    },
+                    "max_entries": {
+                      "type": "integer",
+                      "description": "LORA_MAX_ENTRIES"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not available on this server (code lora_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "addLora",
+        "summary": "Add an extra LoRA by link (admin only; writes share LORA_WRITE_RATE_LIMIT_PER_HOUR). The server chooses the id and the file names; the link is checked before anything is stored, then the whole set is sent to the running instance (POST /loras on its agent), which downloads it in the background (one download at a time with the video models). It joins the family's extra LoRAs (video_families[].extra_loras in /api/state).",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "title",
+                  "family",
+                  "modes"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 400
+                  },
+                  "modes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "image"
+                      ]
+                    }
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Default strength (1 when left out)"
+                  },
+                  "hidden": {
+                    "type": "boolean",
+                    "description": "Shown to admins only (enforced by the server): absent from /api/state for members, and for admins unless the request carries x-reveal-hidden: 1; a member's job naming it is refused exactly like an unknown id"
+                  },
+                  "trigger_words": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "family": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "description": "A video family that takes extra LoRAs (families in GET /api/loras)"
+                  },
+                  "high": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2048,
+                    "description": "Link for the high-noise branch: an https Hugging Face .safetensors file link (the model-link rules; .gguf is refused). Checked here and again on the instance; NOT integrity-pinned or licence-checked"
+                  },
+                  "low": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 2048,
+                    "description": "Link for the low-noise branch (same rules); at least one of high and low"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "lora"
+                  ],
+                  "properties": {
+                    "lora": {
+                      "$ref": "#/components/schemas/AddedLora"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A body that does not match (code invalid_body), invalid values or a family/mode that cannot take it (code invalid_lora), or a refused link (codes invalid_model_link, model_link_host_not_allowed, model_link_unsupported_type, model_link_name_clash)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not available on this server (code lora_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "LORA_MAX_ENTRIES reached (code lora_limit_reached)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many LoRA changes this hour (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store file cannot be read or written (code lora_store_unavailable); it is never overwritten",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/loras/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{3,32}$"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "updateLora",
+        "summary": "Change an added LoRA's title, description, modes, strength, hidden flag or trigger words (admin only). Its links and family are fixed: delete it and add it again to change them.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 400
+                  },
+                  "modes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "image"
+                      ]
+                    }
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Default strength (1 when left out)"
+                  },
+                  "hidden": {
+                    "type": "boolean",
+                    "description": "Shown to admins only (enforced by the server): absent from /api/state for members, and for admins unless the request carries x-reveal-hidden: 1; a member's job naming it is refused exactly like an unknown id"
+                  },
+                  "trigger_words": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "lora"
+                  ],
+                  "properties": {
+                    "lora": {
+                      "$ref": "#/components/schemas/AddedLora"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A body that does not match (code invalid_body) or modes the family cannot take (code invalid_lora)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such LoRA (code unknown_lora), or not available (code lora_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many LoRA changes this hour (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store file cannot be read or written (code lora_store_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteLora",
+        "summary": "Delete an added LoRA (admin only; body {}). New jobs can no longer use it at once; the running instance deletes its files once ComfyUI is idle (a running job is not cut off), else they go with the instance.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such LoRA (code unknown_lora), or not available (code lora_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many LoRA changes this hour (code rate_limited)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store file cannot be read or written (code lora_store_unavailable)",
             "content": {
               "application/json": {
                 "schema": {

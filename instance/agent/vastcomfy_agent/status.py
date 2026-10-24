@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from .comfy import ComfyClient
 from .deadlines import DeadlineStore
 from .files import read_int, read_json
-from .models import DestroyInfo, Gpu, Progress, QueueCounts, Status, VideoFamilyStatus, VideoModelsStatus
+from .models import DestroyInfo, Gpu, Progress, QueueCounts, Status, LorasStatus, VideoFamilyStatus, VideoModelsStatus
 from .paths import StatePaths
 from .state import State, StateStore
 
@@ -54,6 +54,7 @@ class StatusBuilder:
         now: Callable[[], int],
         video: Callable[[], VideoModelsStatus | None] = lambda: None,
         video_families: Callable[[], list[VideoFamilyStatus] | None] = lambda: None,
+        loras: Callable[[], LorasStatus | None] = lambda: None,
     ):
         self._p = StatePaths(state_dir)
         self._states = states
@@ -65,6 +66,7 @@ class StatusBuilder:
         self._now = now
         self._video = video
         self._video_families = video_families
+        self._loras = loras
 
     def _progress(self, state: State | None) -> Progress | None:
         if state != State.DOWNLOADING:
@@ -109,7 +111,14 @@ class StatusBuilder:
             destroy=self._destroy_info(),
             video_models=self._video_status(),
             video_families=self._video_families_status(),
+            extra_loras=self._loras_status(),
         )
+
+    def _loras_status(self) -> LorasStatus | None:
+        try:
+            return self._loras()
+        except Exception:
+            return None
 
     def _video_families_status(self) -> list[VideoFamilyStatus] | None:
         try:

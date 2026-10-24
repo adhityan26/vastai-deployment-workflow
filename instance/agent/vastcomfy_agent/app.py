@@ -9,8 +9,10 @@ from .deadlines import DeadlineStore, ExtendError
 from .destroy_flow import DestroyFlow
 from .files import read_json
 from .models import (
-    DestroyRequest, ExtendRequest, ExtendResponse, Status, VideoFamilyStatus, VideoModelsRequest, VideoModelsStatus,
+    DestroyRequest, ExtendRequest, ExtendResponse, LorasRequest, LorasStatus, Status, VideoFamilyStatus, VideoModelsRequest,
+    VideoModelsStatus,
 )
+from .extra_loras import ExtraLoras, LorasRefused
 from .paths import StatePaths
 from .state import InvalidTransition, State, StateStore
 from .status import StatusBuilder
@@ -27,6 +29,7 @@ class Deps:
     flow: DestroyFlow
     workflows: WorkflowStore
     video: VideoModels | None = None
+    loras: ExtraLoras | None = None
 
 
 # A destroy is underway or has failed: moving a deadline now could stop the failsafe from retrying.
@@ -110,6 +113,25 @@ def create_app(deps: Deps) -> FastAPI:
                 return deps.video.start(body.url if body is not None else None)
             return deps.video.request(family=body.family, url=body.url, mode=body.mode, links=body.links)
         except VideoModelsRefused as err:
+            raise HTTPException(status_code=err.status, detail={"code": err.code, "message": err.message}) from None
+
+    @app.post(
+        "/loras", status_code=202, response_model=LorasStatus, dependencies=guarded,
+        responses={
+            404: {"description": "Video is not set up on this instance (code video_unavailable)"},
+            400: {"description": "A refused file name or link (codes invalid_lora_name, invalid_model_link, "
+                                 "model_link_host_not_allowed, model_link_unsupported_type); nothing changes"},
+        },
+    )
+    def sync_loras(body: LorasRequest) -> LorasStatus:
+        """Replace the wanted set of extra LoRA files: the missing ones are downloaded in the background (one download
+        at a time with the video models), failed ones are retried, unwanted ones deleted while ComfyUI is idle. The
+        progress is `extra_loras` in /status. Links are NOT integrity-pinned."""
+        if deps.loras is None:
+            raise HTTPException(status_code=404, detail={"code": "video_unavailable", "message": "video is not set up"})
+        try:
+            return deps.loras.sync([(item.name, item.url) for item in body.loras])
+        except LorasRefused as err:
             raise HTTPException(status_code=err.status, detail={"code": err.code, "message": err.message}) from None
 
     @app.get("/workflows", dependencies=guarded)

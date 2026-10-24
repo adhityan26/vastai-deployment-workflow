@@ -30,6 +30,12 @@ import {
   sniffVideo,
   type VideoFamily,
   type VideoFamilyStatus,
+  type VideoExtraLora,
+  type LorasStatus,
+  type StoredLora,
+  LORA_SIDES,
+  LoraStoreError,
+  lorasDigest,
   ModelLinkError,
   isLinkedModelName,
   parseModelLink,
@@ -403,6 +409,31 @@ const VIDEO_MODELS_BODY = {
     links: { type: ["object", "null"], maxProperties: 4, additionalProperties: { type: "string", maxLength: MODEL_LINK_MAX_CHARS } },
   },
 } as const;
+// Extra LoRAs added by admins: the body shapes (the store checks every value again, the links too).
+const LORA_PATCH_PROPS = {
+  title: { type: "string", minLength: 1, maxLength: 60 },
+  description: { type: "string", maxLength: 400 },
+  modes: { type: "array", minItems: 1, maxItems: 2, items: { type: "string", enum: ["text", "image"] } },
+  strength: { type: "number", minimum: 0, maximum: 1 },
+  hidden: { type: "boolean" },
+  trigger_words: { type: "string", maxLength: 200 },
+} as const;
+const LORA_BODY = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "family", "modes"],
+  properties: {
+    ...LORA_PATCH_PROPS,
+    family: { type: "string", maxLength: 32 },
+    high: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS },
+    low: { type: ["string", "null"], maxLength: MODEL_LINK_MAX_CHARS },
+  },
+} as const;
+const LORA_PATCH_BODY = { type: "object", additionalProperties: false, minProperties: 1, properties: LORA_PATCH_PROPS } as const;
+const LORA_ID_PARAMS = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", pattern: "^[a-z0-9_]{3,32}$" } } } as const;
+/** The header the page sends after the reveal gesture; the server honours it for admins only. */
+const REVEAL_HEADER = "x-reveal-hidden";
+
 const ESTIMATE_QUERY = {
   type: "object",
   additionalProperties: false,
@@ -567,6 +598,54 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
   /** The family a request names: null for the base section (no family, or its id), undefined for an unknown one. */
   const familyOf = (id: unknown): (typeof extraFamilies)[number] | null | undefined =>
     id === undefined || id === null || (baseFamily !== null && id === baseFamily.id) ? null : extraFamilies.find((x) => x.family.id === id);
+  // ---- extra LoRAs added by admins (LORA_STORE_PATH): only where video and a family that takes extra LoRAs are on ----
+  /** The families an added LoRA may apply to: those with a join point for an extra LoRA in some mode. */
+  const loraFamilies = extraFamilies.filter((x) => Object.keys(x.family.text.loraAfter).length + Object.keys(x.family.image.loraAfter).length > 0);
+  const loraStore = videoLimits === null || loraFamilies.length === 0 ? null : (deps.loraStore ?? null);
+  const loraWriteLimiter = new RateLimiter(loraStore === null ? 1 : intCfg(cfg, "loraWriteRateLimitPerHour", "LORA_WRITE_RATE_LIMIT_PER_HOUR"), HOUR_MS, now);
+  const loraSyncMs = loraStore === null ? 0 : intCfg(cfg, "loraSyncMinIntervalS", "LORA_SYNC_MIN_INTERVAL_S") * 1000;
+  let lastLoraSync = Number.NEGATIVE_INFINITY;
+  /** An added LoRA as an extra LoRA of its family (file names from the store only). */
+  const asExtra = (l: StoredLora): VideoExtraLora => ({
+    id: l.id, title: l.title, description: l.description, modes: [...l.modes], strength: l.strength, triggerWords: l.trigger_words,
+    files: Object.fromEntries(LORA_SIDES.flatMap((side) => (l[side] ? [[side, l[side]!.name]] : []))),
+  });
+  /** The added LoRAs of a family a caller may see or use: hidden ones only when `withHidden` (admins). */
+  const storedFor = (familyId: string, withHidden: boolean): StoredLora[] =>
+    loraStore === null ? [] : loraStore.list().filter((l) => l.family === familyId && (withHidden || !l.hidden));
+  /** The files the instance should have: every added LoRA of an enabled family, hidden ones too. */
+  const wantedLoras = (): { name: string; url: string }[] =>
+    loraStore === null
+      ? []
+      : loraStore.list().filter((l) => loraFamilies.some((x) => x.family.id === l.family))
+          .flatMap((l) => LORA_SIDES.flatMap((side) => (l[side] ? [{ name: l[side]!.name, url: l[side]!.url }] : [])));
+  /** An added LoRA's state on the instance: every file ready, else the least advanced; null when the agent does not say. */
+  const storedStatus = (l: StoredLora, reported: LorasStatus | null | undefined): string | null => {
+    if (reported === null || reported === undefined || !Array.isArray(reported.items)) return null;
+    const states = LORA_SIDES.flatMap((side) => (l[side] ? [reported.items.find((i) => i.name === l[side]!.name)?.state ?? "not_installed"] : []));
+    for (const s of ["failed", "not_installed", "downloading"]) if (states.includes(s as never)) return s;
+    return "ready";
+  };
+  /** Send the wanted set to the instance; never throws (a failed sync is retried by a later state poll). */
+  const syncLoras = async (): Promise<void> => {
+    if (loraStore === null || typeof deps.lifecycle.syncLoras !== "function") return;
+    lastLoraSync = now();
+    try {
+      await deps.lifecycle.syncLoras(wantedLoras());
+    } catch (err) {
+      if (!(err instanceof NoActiveInstanceError)) log("warn", `extra LoRA sync failed: ${errorName(err)}`);
+    }
+  };
+  /** Why a LoRA's family and modes cannot take it (null when they can): each mode needs a join point per branch. */
+  const loraFit = (familyId: unknown, modes: readonly string[], sides: readonly string[]): string | null => {
+    const x = loraFamilies.find((f) => f.family.id === familyId);
+    if (x === undefined) return "family must be a video family that takes extra LoRAs here";
+    for (const mode of modes) {
+      const spec = mode === "image" ? x.family.image : x.family.text;
+      for (const side of sides) if (spec.loraAfter[side] === undefined) return `the ${mode} mode of this family takes no extra LoRA on the ${side} branch`;
+    }
+    return null;
+  };
   // The hosts a video model link may name (read only while video is on).
   const linkHosts: string[] = (() => {
     if (videoLimits === null) return [];
@@ -779,6 +858,16 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     const activeHost = view.record !== null && view.record.status !== "gone" ? view.record.tailnet_hostname : null;
     jobs.endLiveExcept(activeHost);
     const isAdmin = req.role === "admin";
+    // Hidden added LoRAs: to admins only, and only when the page asks (after the reveal gesture); never to members.
+    const reveal = isAdmin && req.headers[REVEAL_HEADER] === "1";
+    // The instance's extra LoRA files follow the store: sync when its set differs (throttled; an add or a delete
+    // syncs at once). Only while it serves and its agent reports them.
+    const reportedLoras = view.agent?.extra_loras;
+    if (loraStore !== null && READY_STATES.has(view.state) && typeof reportedLoras === "object" && reportedLoras !== null) {
+      const wanted = wantedLoras();
+      const differs = reportedLoras.digest !== lorasDigest(wanted) && !(reportedLoras.digest === null && wanted.length === 0);
+      if (differs && now() - lastLoraSync >= loraSyncMs) void syncLoras();
+    }
     // The view passes agent-provided text (reason) through unscrubbed: remove the token too.
     const token = (await deps.registry.active())?.agent_token ?? "";
     const scrub = scrubber(deps, [token, ...hostnamesOf(view)]);
@@ -888,10 +977,18 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
                   slots: { text: family.text.experts.map((e) => e.slot), image: family.image.experts.map((e) => e.slot) },
                   experts: isAdmin ? publicExperts(reported) : null,
                   // Profile data only; the file names for admins.
-                  extra_loras: family.extraLoras.map((l) => ({
-                    id: l.id, title: l.title, description: l.description, modes: [...l.modes], strength: l.strength, trigger_words: l.triggerWords,
-                    files: isAdmin ? { ...l.files } : null,
-                  })),
+                  extra_loras: [
+                    ...family.extraLoras.map((l) => ({
+                      id: l.id, title: l.title, description: l.description, modes: [...l.modes], strength: l.strength, trigger_words: l.triggerWords,
+                      files: isAdmin ? { ...l.files } : null, source: "profile", status: null,
+                    })),
+                    // Added by admins: hidden ones only to an admin who asked to reveal them.
+                    ...storedFor(family.id, reveal).map((l) => ({
+                      id: l.id, title: l.title, description: l.description, modes: [...l.modes], strength: l.strength, trigger_words: l.trigger_words,
+                      files: isAdmin ? asExtra(l).files : null, source: "added", status: storedStatus(l, reportedLoras),
+                      ...(l.hidden ? { hidden: true } : {}),
+                    })),
+                  ],
                 };
               }),
             ],
@@ -1315,6 +1412,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         return sendError(reply, 409, "not_ready", "the instance is not ready");
       }
       let extra: Partial<VideoDeps> = {};
+      let hiddenLora = false;
       if (chosen === null) {
         // Never queue a video the instance cannot run: its model files must be there (boot or on-demand download).
         const missing = videoModelsRefusal(view.agent?.video_models);
@@ -1337,8 +1435,17 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           const usable = linked.length === spec.experts.length && linked.every((e) => isLinkedModelName(e.file) && spec.experts.some((x) => x.slot === e.slot));
           if (!usable) return sendError(reply, 409, "video_models_not_ready", "the instance reports unusable linked video models; an admin can download the family again");
         }
+        // The family's extra LoRAs for this caller: the profile's and the added ones (hidden ones for admins only: a
+        // member naming one gets exactly the answer of an unknown id). An added one must be on the instance.
+        const added = storedFor(chosen.family.id, identity !== null && req.role === "admin");
+        const pick = added.find((l) => l.id === (req.body as { extra_lora?: unknown }).extra_lora);
+        if (pick !== undefined && storedStatus(pick, view.agent?.extra_loras) !== "ready") {
+          return sendError(reply, 409, "extra_lora_not_ready", "this extra LoRA is not on the instance yet (it downloads after the instance is ready); try again shortly");
+        }
+        hiddenLora = pick?.hidden === true;
+        const withAdded = (s: typeof chosen.family.text) => ({ ...s, extraLoras: [...s.extraLoras, ...added.map(asExtra)] });
         extra = {
-          family: { text: { spec: chosen.family.text, template: chosen.templates.text }, image: { spec: chosen.family.image, template: chosen.templates.image } },
+          family: { text: { spec: withAdded(chosen.family.text), template: chosen.templates.text }, image: { spec: withAdded(chosen.family.image), template: chosen.templates.image } },
           ...(linked.length > 0 ? { links: Object.fromEntries(linked.map((e) => [e.slot, e.file])) } : {}),
         };
       }
@@ -1364,7 +1471,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       started?.live.socket?.setPromptId(promptId);
       const asked = req.body as VideoRequest;
-      const loraTitle = chosen?.family.extraLoras.find((l) => l.id === (asked as { extra_lora?: unknown }).extra_lora)?.title;
+      // A hidden LoRA's title never goes into the label.
+      const loraTitle = hiddenLora
+        ? undefined
+        : [...(chosen?.family.extraLoras ?? []), ...(chosen === null ? [] : storedFor(chosen.family.id, false).map(asExtra))].find((l) => l.id === asked.extra_lora)?.title;
       const title = (chosen === null ? "" : `, ${chosen.family.title}`) + (loraTitle === undefined ? "" : `, ${loraTitle}`);
       jobs.add({
         id: promptId,
@@ -1460,6 +1570,109 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       return videoModelsFailure(reply, err);
     }
+  });
+
+  // ---- extra LoRAs added by admins (GET/POST /api/loras, PATCH/DELETE /api/loras/{id}) ----
+
+  /** An added LoRA as an admin sees it: everything stored, its state per file on the instance (scrubbed reasons). */
+  const adminLora = (l: StoredLora, reported: LorasStatus | null | undefined, scrub: (t: string) => string) => ({
+    id: l.id, title: l.title, description: l.description, family: l.family, modes: [...l.modes], strength: l.strength,
+    hidden: l.hidden, trigger_words: l.trigger_words, created_at: l.created_at, status: storedStatus(l, reported),
+    sides: Object.fromEntries(
+      LORA_SIDES.flatMap((side) => {
+        const s = l[side];
+        if (s === undefined) return [];
+        const r = reported?.items?.find((i) => i.name === s.name);
+        const sha = typeof r?.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256) ? r.sha256 : null;
+        const size = Number.isSafeInteger(r?.size_bytes) && (r!.size_bytes as number) > 0 ? r!.size_bytes : null;
+        return [[side, {
+          url: s.url, repo: s.repo, revision: s.revision, path: s.path, name: s.name, state: r?.state ?? null, size_bytes: size, sha256: sha,
+          reason: typeof r?.reason === "string" && r.reason !== "" ? scrub(r.reason) : null,
+        }]];
+      }),
+    ),
+  });
+  const loraUnavailable = (reply: FastifyReply): FastifyReply =>
+    sendError(reply, 404, "lora_unavailable", "adding LoRAs is not available on this server (video with a family that takes extra LoRAs is off)");
+  const loraFailure = (reply: FastifyReply, err: unknown): FastifyReply => {
+    if (err instanceof LoraStoreError) {
+      const status = err.code === "unknown_lora" ? 404 : err.code === "lora_limit_reached" ? 409 : err.code === "lora_store_unavailable" ? 503 : 400;
+      return sendError(reply, status, err.code, err.message);
+    }
+    if (err instanceof ModelLinkError) return sendError(reply, 400, err.code, err.message);
+    log("warn", `LoRA store write failed: ${errorName(err)}`);
+    return sendError(reply, 503, "lora_store_unavailable", "the LoRA store could not be written");
+  };
+  const loraContext = async () => {
+    const view = await deps.lifecycle.view();
+    return { reported: view.agent?.extra_loras, scrub: await activeScrubber() };
+  };
+
+  app.get("/api/loras", admin, async (_req, reply) => {
+    if (loraStore === null) return loraUnavailable(reply);
+    const { reported, scrub } = await loraContext();
+    return {
+      loras: loraStore.list().map((l) => adminLora(l, reported, scrub)),
+      families: loraFamilies.map((x) => x.family.id),
+      max_entries: intCfg(cfg, "loraMaxEntries", "LORA_MAX_ENTRIES"),
+    };
+  });
+
+  app.post("/api/loras", { ...admin, schema: { body: LORA_BODY } }, async (req, reply) => {
+    if (loraStore === null) return loraUnavailable(reply);
+    const body = req.body as Record<string, unknown>;
+    const sides = LORA_SIDES.filter((s) => typeof body[s] === "string" && (body[s] as string).trim() !== "");
+    const misfit = loraFit(body["family"], (body["modes"] as string[]) ?? [], sides);
+    if (misfit !== null && sides.length > 0) return sendError(reply, 400, "invalid_lora", misfit);
+    if (!loraWriteLimiter.take(req.identity!.subject)) return sendError(reply, 429, "rate_limited", "too many LoRA changes this hour");
+    let added: StoredLora;
+    try {
+      // Ids of the profile's extra LoRAs are never reused (a job names a LoRA by id).
+      const taken = extraFamilies.flatMap((x) => x.family.extraLoras.map((l) => l.id));
+      added = loraStore.add(body as never, taken);
+    } catch (err) {
+      return loraFailure(reply, err);
+    }
+    log("info", `extra LoRA added by ${userLabel(req.identity?.username) ?? "?"}`);
+    await syncLoras();
+    const { reported, scrub } = await loraContext();
+    return reply.code(201).send({ lora: adminLora(added, reported, scrub) });
+  });
+
+  app.patch("/api/loras/:id", { ...admin, schema: { params: LORA_ID_PARAMS, body: LORA_PATCH_BODY } }, async (req, reply) => {
+    if (loraStore === null) return loraUnavailable(reply);
+    const { id } = req.params as { id: string };
+    const patch = req.body as { modes?: string[] };
+    const old = loraStore.get(id);
+    if (old === null) return sendError(reply, 404, "unknown_lora", "no such LoRA");
+    if (patch.modes !== undefined) {
+      const misfit = loraFit(old.family, patch.modes, LORA_SIDES.filter((s) => old[s] !== undefined));
+      if (misfit !== null) return sendError(reply, 400, "invalid_lora", misfit);
+    }
+    if (!loraWriteLimiter.take(req.identity!.subject)) return sendError(reply, 429, "rate_limited", "too many LoRA changes this hour");
+    let updated: StoredLora;
+    try {
+      updated = loraStore.update(id, patch as never);
+    } catch (err) {
+      return loraFailure(reply, err);
+    }
+    const { reported, scrub } = await loraContext();
+    return { lora: adminLora(updated, reported, scrub) };
+  });
+
+  app.delete("/api/loras/:id", { ...admin, schema: { params: LORA_ID_PARAMS, body: EMPTY_BODY } }, async (req, reply) => {
+    if (loraStore === null) return loraUnavailable(reply);
+    const { id } = req.params as { id: string };
+    if (!loraWriteLimiter.take(req.identity!.subject)) return sendError(reply, 429, "rate_limited", "too many LoRA changes this hour");
+    try {
+      loraStore.remove(id);
+    } catch (err) {
+      return loraFailure(reply, err);
+    }
+    log("info", `extra LoRA deleted by ${userLabel(req.identity?.username) ?? "?"}`);
+    // The instance deletes the file once ComfyUI is idle (a running job may be using it).
+    await syncLoras();
+    return reply.code(204).send();
   });
 
   app.get("/api/generate/:id", { ...member, schema: { params: ID_PARAMS } }, async (req, reply) => {

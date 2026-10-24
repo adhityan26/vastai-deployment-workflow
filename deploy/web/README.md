@@ -855,6 +855,81 @@ nodes, not exported from ComfyUI; the file names they load are the pinned ones),
 takes (`VIDEO_TIMEOUT_S` 2400 s is a guess for both families), the disk need above, and GGUF support for these
 experts.
 
+### Extra LoRAs added from the page (admins)
+
+Admins can add extra LoRAs to a video family that takes them (today the 14B family) **from the page, by Hugging Face
+link**, without a profile change, a pin, a commit or a deploy: Video tool -> **Manage LoRAs** (shown to admins only,
+built by the page only for them). The form takes a title, an optional description, the video model, text and/or
+image to video, a default strength (0 to 1), a "Hidden: admins only" box, optional trigger words, and a link for the
+high-noise and/or the low-noise branch. An added LoRA then appears in the Extra LoRA select of that family like the
+profile's own (`POST /api/video` `extra_lora` takes its id) and is inserted the same way (a `LoraLoaderModelOnly`
+after the 4-step LoRA of each branch it has a file for). Edit changes the title, description, modes, strength, hidden
+flag and trigger words; the links and the family are fixed (delete and add again). Delete asks first.
+
+- **Store.** `LORA_STORE_PATH` (compose: `/data/extra-loras.json`, next to the registry; atomic writes, mode 600, a
+  version and a size cap). At most `LORA_MAX_ENTRIES` (20) entries; adds, changes and deletes share
+  `LORA_WRITE_RATE_LIMIT_PER_HOUR` (30) per admin. A file that cannot be read is never overwritten: nothing is listed
+  and every write answers `lora_store_unavailable` until it is fixed or removed (an entry whose link is no longer
+  allowed, e.g. after `VIDEO_MODEL_LINK_HOSTS` changed, makes the whole file unusable: remove that entry by hand).
+  The profile's own `extra_loras:` are never listed, changed or deleted through the API; an added LoRA never reuses
+  their ids.
+- **Ids and file names are the server's.** The id is generated (`lora_` and 8 hex digits) and the file on the
+  instance is `xl_<id>_<high|low>.safetensors`; nothing a user types ever becomes a file name, so a link cannot
+  overwrite a pinned file or another LoRA. The instance accepts only that name shape and refuses a pinned model's name.
+- **Links.** The model-link rules exactly (https, the hosts of `VIDEO_MODEL_LINK_HOSTS`, a resolve/blob file path, no
+  user info, port, percent-encoding or IP literal), and `.safetensors` only (a `.gguf` LoRA is refused). Checked by
+  the web app before anything is stored, and again on the instance, which also checks every redirect hop
+  (`VIDEO_MODEL_LINK_REDIRECT_DOMAINS`), the size from a HEAD (`LORA_LINK_MAX_BYTES`, 2 GiB), the free disk, and the
+  file's safetensors header after the download. **NOT integrity-pinned or licence-checked**: the page says so next to
+  the link fields; the sha256 of what arrived is computed on the instance and shown to admins (with the size) in the
+  list. The web process never contacts the model host itself; size and sha256 come from the instance (per instance,
+  so they are not stored).
+- **Download to the instance.** Added LoRAs are NOT part of the boot's pinned set and do not change the boot's disk
+  estimate. When an instance serves, the web app sends it the whole wanted set (every added LoRA of an enabled
+  family, hidden ones too: they are small): at once after an add or a delete, and from the state poll whenever the
+  set the agent reports differs (digest), at most every `LORA_SYNC_MIN_INTERVAL_S` (30 s). The agent
+  (`POST /loras`) downloads the missing files in the background through the same single download slot as the video
+  models (one download at a time: a video model download is refused with `video_download_busy` meanwhile, and a LoRA
+  sync during a video download waits for it), into a staging folder ComfyUI does not read, then moves each file into
+  `models/loras/` under its server-chosen name. State per LoRA: not on the instance yet, downloading, on the instance,
+  or download failed (with the reason, retried by the next sync). Each file needs the free disk first, and all of them
+  together at most `LORA_TOTAL_MAX_BYTES` (instance key, 10 GiB; `lora_total_too_large`). Decision: all of them, on
+  demand after the boot, rather than at boot or at first use: the boot and its disk estimate stay exactly as before,
+  a new instance gets them a few seconds after it is ready, and a job never has to wait for a download.
+- **Using one.** A job with an added LoRA whose files are not on the instance is refused with
+  `extra_lora_not_ready` (409), never queued.
+- **Deleting.** The entry goes at once (no new job can use it). The instance deletes the file at the next sync only
+  while ComfyUI's queue is empty (a running job may be using it); otherwise at a later sync or download pass, or with
+  the instance.
+
+**Hidden LoRAs (admins only).** A LoRA marked hidden is for admins only, and the **server** enforces it (the page's
+JavaScript is the same for everyone and the API can be called directly):
+
+- `/api/state` never lists a hidden LoRA for a member, whatever the request carries. For an admin it lists them only
+  when the request carries the header `x-reveal-hidden: 1`, which the page sends after the reveal gesture: **three
+  quick taps (within about a second) on the Video tool's title**. Three more taps hide them again; a reload forgets it
+  (nothing is stored in the browser). Before the gesture the page holds no trace of them (no option, badge or text).
+  The gesture is a convenience: keyboard users and anyone else can manage hidden LoRAs in Manage LoRAs, which lists
+  them with a "hidden" badge.
+- A member's job naming a hidden LoRA gets exactly the answer of an unknown id (`unknown_extra_lora`), so its
+  existence does not leak. An admin's job may use one without the reveal header.
+- A hidden LoRA's title, description, id and file names never appear in a member's state, in a job label (the label
+  of a job with a hidden LoRA leaves its title out), in error messages or in the web app's info log lines. Jobs are
+  per user (an admin can read other people's jobs, not members), and videos are not saved to the gallery or the
+  usage history, so no other place shows them.
+- Decision: hidden is a flag of added LoRAs only. The profile's `extra_loras:` cannot be hidden: the profile is in the
+  repository anyone with repo access reads, and a hidden-in-the-page entry in a public file would suggest a secrecy it
+  does not have.
+
+**Hidden means "not shown to members", NOT secret**: the store file sits on the web host's data volume, the files on
+the instance (with their links in the agent's state file and the download in its log), and anyone with access to the
+server, the instance or the Vast account can see them.
+
+UNVERIFIED (nothing ran): a real linked LoRA download on an instance (Hugging Face's redirect hosts as allowed by
+`VIDEO_MODEL_LINK_REDIRECT_DOMAINS`, the HEAD size after the redirect), ComfyUI listing a new file in `models/loras/`
+without a restart (checked after each download; a file it does not list fails with "needs a restart"), how an added
+LoRA stacks with the 4-step LoRAs, and the gesture on phones (taps on a heading). Links carry no licence check.
+
 ### Longer clips (experimental, about 12 s)
 
 Both families offer a third length, **"About 12 s (experimental)"**: 289 frames for the 5B (24 fps) and 193 frames

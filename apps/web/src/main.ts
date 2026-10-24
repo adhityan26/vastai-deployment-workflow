@@ -9,6 +9,7 @@ import {
   Gallery,
   ConsoleStore,
   Lifecycle,
+  LoraStore,
   Registry,
   UsageHistory,
   UsageStore,
@@ -152,6 +153,16 @@ async function main(): Promise<void> {
   const limits = usageLimits(cfg);
   const usage = new UsageHistory(limits, new UsageStore(str(cfg, "usageLogPath"), usageFileCap(limits.maxEntries)), log);
 
+  // Extra LoRAs admins add by link (LORA_STORE_PATH, on the data volume): only while video is on.
+  const loraStore =
+    cfg["videoEnabled"] === true
+      ? new LoraStore(str(cfg, "loraStorePath"), {
+          maxEntries: int(cfg, "loraMaxEntries"),
+          hosts: Array.isArray(cfg["videoModelLinkHosts"]) ? (cfg["videoModelLinkHosts"] as string[]) : [],
+          now: () => Math.floor(Date.now() / 1000),
+        })
+      : undefined;
+
   const lifecycle = new Lifecycle({
     cfg,
     vast,
@@ -186,6 +197,7 @@ async function main(): Promise<void> {
     upscaleTemplate,
     videoTemplate,
     videoFamilyTemplates,
+    ...(loraStore === undefined ? {} : { loraStore }),
     credit: () => vast.accountCredit(),
     gallery,
     login: { configured: auth.configured, oidc, sessions },

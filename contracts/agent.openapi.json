@@ -141,6 +141,142 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "LoraItem": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 64,
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "LoraItem",
+        "type": "object"
+      },
+      "LoraStatus": {
+        "description": "One extra LoRA file on this instance (vastcomfy_agent.extra_loras).",
+        "properties": {
+          "bytes_done": {
+            "title": "Bytes Done",
+            "type": "integer"
+          },
+          "bytes_total": {
+            "title": "Bytes Total",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "state": {
+            "enum": [
+              "not_installed",
+              "downloading",
+              "ready",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "bytes_done",
+          "bytes_total"
+        ],
+        "title": "LoraStatus",
+        "type": "object"
+      },
+      "LorasRequest": {
+        "additionalProperties": false,
+        "description": "The whole set of extra LoRA files the web app wants on this instance (it replaces the previous set).",
+        "properties": {
+          "loras": {
+            "items": {
+              "$ref": "#/components/schemas/LoraItem"
+            },
+            "maxItems": 64,
+            "title": "Loras",
+            "type": "array"
+          }
+        },
+        "required": [
+          "loras"
+        ],
+        "title": "LorasRequest",
+        "type": "object"
+      },
+      "LorasStatus": {
+        "properties": {
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LoraStatus"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "digest",
+          "items"
+        ],
+        "title": "LorasStatus",
+        "type": "object"
+      },
       "Progress": {
         "properties": {
           "bytes_done": {
@@ -223,6 +359,16 @@
           },
           "destroy": {
             "$ref": "#/components/schemas/DestroyInfo"
+          },
+          "extra_loras": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LorasStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "failsafe_alive": {
             "title": "Failsafe Alive",
@@ -809,6 +955,69 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/loras": {
+      "post": {
+        "description": "Replace the wanted set of extra LoRA files: the missing ones are downloaded in the background (one download\nat a time with the video models), failed ones are retried, unwanted ones deleted while ComfyUI is idle. The\nprogress is `extra_loras` in /status. Links are NOT integrity-pinned.",
+        "operationId": "sync_loras_loras_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LorasRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LorasStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "A refused file name or link (codes invalid_lora_name, invalid_model_link, model_link_host_not_allowed, model_link_unsupported_type); nothing changes"
+          },
+          "404": {
+            "description": "Video is not set up on this instance (code video_unavailable)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync Loras"
       }
     },
     "/status": {

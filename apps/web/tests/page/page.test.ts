@@ -8,7 +8,7 @@ const INDEX = readFileSync(join(import.meta.dirname, "../../public/index.html"),
 
 interface Reply { status?: number; body: unknown; gate?: Promise<void>; /** Sent as raw bytes with this content type instead of JSON. */ raw?: string; type?: string }
 type Handler = Reply | ((body: unknown) => Reply);
-interface Call { method: string; path: string; body: unknown }
+interface Call { method: string; path: string; body: unknown; headers?: Record<string, string> }
 
 function apiState(over: Record<string, unknown> = {}) {
   return {
@@ -48,7 +48,9 @@ async function mount(state: Record<string, unknown> = {}, extra: Record<string, 
       const path = String(input);
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-      calls.push({ method, path, body });
+      // Headers other than the JSON content type (the reveal header of the hidden LoRAs).
+      const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).filter(([k]) => k.toLowerCase() !== "content-type"));
+      calls.push({ method, path, body, ...(Object.keys(headers).length > 0 ? { headers } : {}) });
       const h = routes[`${method} ${path}`];
       if (h === undefined) return new Response(JSON.stringify({ error: { code: "not_found", message: "not found" } }), { status: 404 });
       const r = typeof h === "function" ? h(body) : h;
@@ -2740,5 +2742,150 @@ describe("video families", () => {
     q("#modal-ok")!.click();
     await flush();
     expect(posts("/api/start")[0]!.body).toMatchObject({ video_models: true, video_families: ["wan22_a14b"] });
+  });
+});
+
+
+describe("extra LoRAs: hidden ones and Manage LoRAs", () => {
+  const ready = { state: "ready", bytes_done: 1, bytes_total: 1, percent: 100, reason: null };
+  const video = { sizes: [{ name: "Landscape", width: 1280, height: 704 }], durations: [{ name: "About 3 s", seconds: 3 }], max_bytes: 1000, max_pixels: 1_000_000, types: ["png", "jpeg"], download_bytes: 1, models: ready };
+  const baseFam = { id: "wan22_5b", title: "Fast (5B)", base: true, sizes: video.sizes, durations: video.durations, download_bytes: 1, models: ready, slots: null, experts: null, extra_loras: [] };
+  const added = { id: "lora_0000abcd", title: "Moves", description: "", modes: ["image"], strength: 1, trigger_words: "", status: "downloading" };
+  const big = (extra: unknown[]) => ({
+    id: "wan22_a14b", title: "Quality (14B, 4 steps)", base: false, sizes: [{ name: "Landscape", width: 832, height: 480 }], durations: [{ name: "About 5 s", seconds: 5 }],
+    download_bytes: 1, models: ready, slots: { text: ["high", "low"], image: ["high", "low"] }, experts: null, extra_loras: extra,
+  });
+  const menu = { categories: [{ id: "create", title: "Create" }], items: [{ id: "video", title: "Video", description: "Make a short video.", icon: "film", category: "create", tool: "video", style: null, available: true }] };
+  const pickFamily = async () => {
+    const sel = q<HTMLSelectElement>("#video-family")!;
+    sel.value = "wan22_a14b";
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+  };
+  const stateCalls = () => calls.filter((c) => c.method === "GET" && c.path === "/api/state");
+  const tap3 = async () => {
+    for (let i = 0; i < 3; i++) {
+      nowMs += 200;
+      q<HTMLElement>("#gen-title")!.click();
+    }
+    await flush();
+  };
+
+  it("an added LoRA not on the instance yet says so in the Extra LoRA select", async () => {
+    await mount({ menu, video, video_families: [baseFam, big([added])] });
+    chooseTool("video");
+    await pickFamily();
+    expect([...document.querySelectorAll("#video-lora option")].map((o) => o.textContent)).toEqual(["None", "Moves (downloading)"]);
+  });
+
+  it("three quick taps on the title make an admin's next state requests ask for hidden LoRAs; three more stop it", async () => {
+    await mount({ role: "admin", menu, video, video_families: [baseFam, big([])] }, { "GET /api/loras": { body: { loras: [], families: ["wan22_a14b"], max_entries: 20 } } });
+    chooseTool("video");
+    expect(stateCalls().every((c) => c.headers === undefined)).toBe(true);
+    await tap3();
+    expect(stateCalls().at(-1)!.headers).toEqual({ "x-reveal-hidden": "1" });
+    await app!.refresh();
+    expect(stateCalls().at(-1)!.headers).toEqual({ "x-reveal-hidden": "1" });
+    await tap3();
+    expect(stateCalls().at(-1)!.headers).toBeUndefined();
+    // Slow taps do nothing.
+    const before = stateCalls().length;
+    for (let i = 0; i < 3; i++) {
+      nowMs += 800;
+      q<HTMLElement>("#gen-title")!.click();
+    }
+    await flush();
+    expect(stateCalls()).toHaveLength(before);
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain("reveal");
+  });
+
+  it("does nothing for a member, and a member's page has no hint of hidden LoRAs or of Manage LoRAs", async () => {
+    await mount({ menu, video, video_families: [baseFam, big([added])] });
+    chooseTool("video");
+    await tap3();
+    expect(stateCalls().every((c) => c.headers === undefined)).toBe(true);
+    expect(q("#lora-manage")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/hidden|Manage LoRAs/i);
+  });
+
+  describe("Manage LoRAs", () => {
+    const listed = {
+      id: "lora_0000abcd", title: "Moves", description: "d", family: "wan22_a14b", modes: ["image"], strength: 0.5, hidden: true, trigger_words: "", status: "ready", created_at: 1,
+      sides: { high: { url: "https://huggingface.co/o/r/resolve/main/x.safetensors", repo: "o/r", revision: "main", path: "x.safetensors", name: "xl_lora_0000abcd_high.safetensors", state: "ready", size_bytes: 9, sha256: null, reason: null } }, // config-lint: ok (test fixture)
+    };
+    const open = async (extra: Record<string, Handler> = {}) => {
+      await mount({ role: "admin", menu, video, video_families: [baseFam, big([])] }, { "GET /api/loras": { body: { loras: [listed], families: ["wan22_a14b"], max_entries: 20 } }, ...extra });
+      chooseTool("video");
+      const box = q<HTMLDetailsElement>("#lora-manage")!;
+      box.open = true;
+      box.dispatchEvent(new Event("toggle"));
+      await flush();
+      return box;
+    };
+    const set = (id: string, v: string) => (q<HTMLInputElement>(`#${id}`)!.value = v);
+
+    it("lists the added LoRAs with their state and a hidden badge (text only)", async () => {
+      await open();
+      const row = q("#lora-list li")!;
+      expect(row.textContent).toContain("Moves");
+      expect(row.textContent).toContain("on the instance");
+      expect(row.querySelector(".badge")!.textContent).toBe(" hidden");
+      expect([...q<HTMLSelectElement>("#lora-family")!.options].map((o) => [o.value, o.textContent])).toEqual([["wan22_a14b", "Quality (14B, 4 steps)"]]);
+    });
+
+    it("adds a LoRA by link, checked on the page first; the link is never stored in the browser", async () => {
+      await open({ "POST /api/loras": { status: 201, body: { lora: listed } } });
+      set("lora-title", "Moves");
+      q<HTMLButtonElement>("#lora-save")!.click();
+      await flush();
+      expect(q("#lora-error")!.textContent).toBe("Give a link for the high-noise or the low-noise branch (or both).");
+      expect(posts("/api/loras")).toHaveLength(0);
+      set("lora-high", " https://huggingface.co/o/r/resolve/main/x.safetensors ");
+      q<HTMLInputElement>("#lora-hidden")!.checked = true;
+      q<HTMLButtonElement>("#lora-save")!.click();
+      await flush();
+      expect(posts("/api/loras")[0]!.body).toEqual({
+        title: "Moves", description: "", modes: ["image"], strength: 1, hidden: true, trigger_words: "", family: "wan22_a14b",
+        high: "https://huggingface.co/o/r/resolve/main/x.safetensors", // config-lint: ok (test fixture)
+      });
+      expect(q<HTMLInputElement>("#lora-high")!.value).toBe("");
+      expect(JSON.stringify({ ...window.localStorage })).not.toContain("huggingface");
+    });
+
+    it("shows the server's refusal as text", async () => {
+      await open({ "POST /api/loras": { status: 400, body: { error: { code: "model_link_unsupported_type", message: "<b>only .safetensors LoRA files can be linked</b>" } } } });
+      set("lora-title", "Moves");
+      set("lora-high", "https://huggingface.co/o/r/resolve/main/x.gguf");
+      q<HTMLButtonElement>("#lora-save")!.click();
+      await flush();
+      expect(q("#lora-error")!.textContent).toBe("<b>only .safetensors LoRA files can be linked</b>");
+      expect(q("#lora-error b")).toBeNull();
+    });
+
+    it("edits the fields but not the links, hides or shows, and deletes after confirming", async () => {
+      await open({
+        "PATCH /api/loras/lora_0000abcd": { body: { lora: listed } },
+        "DELETE /api/loras/lora_0000abcd": { status: 204, body: null },
+      });
+      const buttons = () => [...q("#lora-list li")!.querySelectorAll("button")];
+      buttons().find((b) => b.textContent === "Edit")!.click();
+      expect(q<HTMLInputElement>("#lora-title")!.value).toBe("Moves");
+      expect(q("#lora-links")!.hidden).toBe(true);
+      set("lora-title", "Moves 2");
+      q<HTMLButtonElement>("#lora-save")!.click();
+      await flush();
+      const patches = calls.filter((c) => c.method === "PATCH");
+      expect(patches[0]).toMatchObject({ path: "/api/loras/lora_0000abcd", body: { title: "Moves 2", description: "d", modes: ["image"], strength: 0.5, hidden: true, trigger_words: "" } });
+      expect(patches[0]!.body).not.toHaveProperty("high");
+      buttons().find((b) => b.textContent === "Show to members")!.click();
+      await flush();
+      expect(calls.filter((c) => c.method === "PATCH").at(-1)!.body).toEqual({ hidden: false });
+      buttons().find((b) => b.textContent === "Delete")!.click();
+      await flush();
+      expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0); // the confirm dialog first
+      q<HTMLButtonElement>("#modal-ok")!.click();
+      await flush();
+      expect(calls.filter((c) => c.method === "DELETE")).toEqual([expect.objectContaining({ path: "/api/loras/lora_0000abcd", body: {} })]);
+    });
   });
 });

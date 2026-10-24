@@ -72,6 +72,105 @@
       "title": "Gpu",
       "type": "object"
     },
+    "LoraStatus": {
+      "description": "One extra LoRA file on this instance (vastcomfy_agent.extra_loras).",
+      "properties": {
+        "bytes_done": {
+          "title": "Bytes Done",
+          "type": "integer"
+        },
+        "bytes_total": {
+          "title": "Bytes Total",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "state": {
+          "enum": [
+            "not_installed",
+            "downloading",
+            "ready",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "state",
+        "bytes_done",
+        "bytes_total"
+      ],
+      "title": "LoraStatus",
+      "type": "object"
+    },
+    "LorasStatus": {
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Digest"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/LoraStatus"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "digest",
+        "items"
+      ],
+      "title": "LorasStatus",
+      "type": "object"
+    },
     "Progress": {
       "properties": {
         "bytes_done": {
@@ -350,6 +449,17 @@
     },
     "destroy": {
       "$ref": "#/$defs/DestroyInfo"
+    },
+    "extra_loras": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LorasStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "failsafe_alive": {
       "title": "Failsafe Alive",

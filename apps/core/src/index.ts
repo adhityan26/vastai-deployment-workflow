@@ -19,3 +19,4 @@ export * from "./tailscale.js";
 export * from "./usage.js";
 export * from "./vast.js";
 export * from "./video.js";
+export * from "./lora-store.js";

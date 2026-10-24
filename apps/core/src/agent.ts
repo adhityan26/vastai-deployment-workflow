@@ -42,6 +42,23 @@ export interface AgentStatus {
   video_models?: VideoModelsStatus | null;
   /** Every enabled video family (the base section first); absent or null without families. */
   video_families?: VideoFamilyStatus[] | null;
+  /** The extra LoRA files the web app synced (POST /loras); absent from an agent without them, null with video off. */
+  extra_loras?: LorasStatus | null;
+}
+
+export interface LoraFileStatus {
+  name: string;
+  state: "not_installed" | "downloading" | "ready" | "failed";
+  bytes_done: number;
+  bytes_total: number;
+  size_bytes?: number | null;
+  sha256?: string | null;
+  reason?: string | null;
+}
+
+export interface LorasStatus {
+  digest: string | null;
+  items: LoraFileStatus[];
 }
 
 export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
@@ -171,6 +188,15 @@ export class AgentClient {
     if (got === null || typeof got !== "object" || typeof got.state !== "string" || typeof got.id !== "string") {
       throw new AgentError(reply.status, "video models: response is not a family status");
     }
+    return got;
+  }
+
+  /** Send the whole wanted set of extra LoRA files (POST /loras); the agent downloads and deletes in the background. */
+  async syncLoras(items: readonly { name: string; url: string }[]): Promise<LorasStatus> {
+    const reply = await this.call("POST", "/loras", { loras: items });
+    if (reply.status < 200 || reply.status >= 300) this.fail("loras", reply);
+    const got = parseJson(reply.body) as LorasStatus | null;
+    if (got === null || typeof got !== "object" || !Array.isArray(got.items)) throw new AgentError(reply.status, "loras: response is not a LoRA status");
     return got;
   }
 

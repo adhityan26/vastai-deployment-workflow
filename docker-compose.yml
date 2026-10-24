@@ -29,6 +29,7 @@ services:
       REGISTRY_PATH: /data/registry.json
       BOOT_LOG_PATH: /data/boot-console.json
       USAGE_LOG_PATH: /data/usage-history.json
+      LORA_STORE_PATH: /data/extra-loras.json
       WEB_PORT: "3000"
     # The only published port. The Cloudflare tunnel (and the LAN) reach the app here; the app
     # enforces login itself (OIDC), so there is no proxy in front of it.
