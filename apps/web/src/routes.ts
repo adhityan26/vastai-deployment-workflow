@@ -207,6 +207,11 @@ function publicExperts(v: VideoFamilyStatus | null | undefined) {
     .map((e) => ({ mode: e.mode, slot: e.slot, file: e.file, linked: e.linked === true, sha256: typeof e.sha256 === "string" && /^[0-9a-f]{64}$/.test(e.sha256) ? e.sha256 : null }));
 }
 
+/** A video duration as the page sees it: its name and seconds, and `experimental: true` when it is one. */
+function publicDuration(d: { name: string; seconds: number; experimental?: true }) {
+  return { name: d.name, seconds: d.seconds, ...(d.experimental === true ? { experimental: true } : {}) };
+}
+
 /** Why a video job cannot run yet (null when the instance has its video models). */
 function videoModelsRefusal(v: VideoModelsStatus | null | undefined): string | null {
   if (v?.state === "ready") return null;
@@ -810,7 +815,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           ? null
           : {
               sizes: videoSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
-              durations: videoSpec.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+              durations: videoSpec.durations.map(publicDuration),
               // What "Download video models" fetches (all of them; the instance fetches only the missing ones).
               download_bytes: videoDownloadBytes,
               // The instance's own state of its video model files; null without an instance or an answer.
@@ -830,7 +835,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
               {
                 id: baseFamily.id, title: baseFamily.title, base: true,
                 sizes: videoSpec.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
-                durations: videoSpec.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+                durations: videoSpec.durations.map(publicDuration),
                 download_bytes: videoDownloadBytes,
                 models: publicVideoModels(view.agent?.video_models, scrub),
                 slots: null,
@@ -842,7 +847,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
                 return {
                   id: family.id, title: family.title, base: false,
                   sizes: family.sizes.map((z) => ({ name: z.name, width: z.width, height: z.height })),
-                  durations: family.durations.map((d) => ({ name: d.name, seconds: d.seconds })),
+                  durations: family.durations.map(publicDuration),
                   download_bytes: downloadBytes,
                   models: publicVideoModels(reported, scrub),
                   slots: { text: family.text.experts.map((e) => e.slot), image: family.image.experts.map((e) => e.slot) },

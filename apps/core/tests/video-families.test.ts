@@ -93,7 +93,11 @@ describe("parseVideoFamilies", () => {
     const f = fam();
     expect(f).toMatchObject({ id: "wan22_a14b", title: "Quality (14B, 4 steps)", fps: 16 });
     expect(f.sizes.map((z) => [z.name, z.width, z.height])).toEqual([["Landscape", 832, 480], ["Portrait", 480, 832]]);
-    expect(f.durations).toEqual([{ name: "About 3 s", frames: 49, seconds: 3 }, { name: "About 5 s", frames: 81, seconds: 5 }]);
+    expect(f.durations).toEqual([
+      { name: "About 3 s", frames: 49, seconds: 3 },
+      { name: "About 5 s", frames: 81, seconds: 5 },
+      { name: "About 12 s (experimental)", frames: 193, seconds: 12, experimental: true },
+    ]);
     expect(f.text.startImage).toBeNull();
     expect(f.image.startImage).toEqual({ node: "11", input: "start_image" });
     expect(f.text.experts).toEqual([
@@ -131,6 +135,7 @@ describe("parseVideoFamilies", () => {
     ["fps zero", (f) => (f.fps = 0)],
     ["no sizes", (f) => (f.sizes = [])],
     ["frames not 4n+1", (f) => (f.durations[0].frames = 50)],
+    ["the 12 s frames not 4n+1", (f) => (f.durations[2].frames = 192)],
     ["no text mode", (f) => delete f.text],
     ["no image mode", (f) => delete f.image],
     ["a mode with an unknown key", (f) => (f.text.steps = 4)],
@@ -200,6 +205,11 @@ describe("buildVideoPrompt for a two-expert family", () => {
     expect(p["12"]!.inputs).toMatchObject({ steps: 4, cfg: 1, start_at_step: 0, end_at_step: 2, add_noise: "enable", return_with_leftover_noise: "enable" });
     expect(p["13"]!.inputs).toMatchObject({ steps: 4, cfg: 1, start_at_step: 2, end_at_step: 4, add_noise: "disable" });
     expect(p[VIDEO_START_NODE]).toBeUndefined();
+  });
+
+  it("the experimental 12 s duration asks the latent for 193 frames (16 fps)", () => {
+    expect(buildVideoPrompt(fam().text, T2V, { ...ok, duration: "About 12 s (experimental)" })["11"]!.inputs["length"]).toBe(193);
+    expect(buildVideoPrompt(fam().image, I2V, { ...ok, duration: "About 12 s (experimental)", startImage: "a.png" })["11"]!.inputs["length"]).toBe(193);
   });
 
   it("applies the fixed values over whatever the workflow file says", () => {

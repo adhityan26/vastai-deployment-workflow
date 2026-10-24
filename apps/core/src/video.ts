@@ -16,6 +16,8 @@ export interface VideoDuration {
   readonly frames: number;
   /** Whole seconds at the section's fps, for the page. */
   readonly seconds: number;
+  /** Longer than the model was trained for: the page labels it and warns (absent for a normal duration). */
+  readonly experimental?: true;
 }
 
 export interface VideoModel {
@@ -162,12 +164,13 @@ const MAX_EXPERTS = 4;
 const MAX_FIXED = 16;
 // Fixed values are recipe numbers (LoRA strength, sampling shift): small, never a size or a step count of thousands.
 const MAX_FIXED_ABS = 1000;
-const DURATION_KEYS = new Set(["name", "frames"]);
+const DURATION_KEYS = new Set(["name", "frames", "experimental"]);
 const MAX_MODELS = 8;
 const MAX_FPS = 60;
 const MIN_FRAMES = 5;
-// About 10 s at 24 fps; longer clips need far more VRAM and time than a 24 GB card is known to give.
-const MAX_FRAMES = 257;
+// About 12 s at 24 fps (12 x 24 + 1), the longest experimental duration; longer clips need far more VRAM and time
+// than a 24 GB card is known to give.
+const MAX_FRAMES = 289;
 const FRAMES_PER_LATENT = 4;
 const MAX_SIDE = 1920;
 
@@ -261,7 +264,9 @@ function parseDurations(raw: unknown, fps: number, what: string): VideoDuration[
     if (typeof frames !== "number" || !Number.isInteger(frames) || frames < MIN_FRAMES || frames > MAX_FRAMES || (frames - 1) % FRAMES_PER_LATENT !== 0) {
       throw new ProfileError(`${what} duration ${name}: frames must be 4n+1 between ${MIN_FRAMES} and ${MAX_FRAMES}`);
     }
-    return { name, frames, seconds: Math.round(frames / fps) };
+    const experimental = d["experimental"];
+    if (experimental !== undefined && experimental !== true) throw new ProfileError(`${what} duration ${name}: experimental must be true (or left out)`);
+    return { name, frames, seconds: Math.round(frames / fps), ...(experimental === true ? { experimental: true as const } : {}) };
   });
   if (new Set(durations.map((d) => d.name)).size !== durations.length) throw new ProfileError(`${what} duration names must be unique`);
   return durations;

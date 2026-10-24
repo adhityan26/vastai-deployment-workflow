@@ -1830,6 +1830,27 @@ describe("video", () => {
     expect(posts("/api/video")).toHaveLength(0);
   });
 
+  it("an experimental duration is labelled and warns while it is chosen; the job carries its name", async () => {
+    const long = { ...video, durations: [...video.durations, { name: "About 12 s (experimental)", seconds: 12, experimental: true }] };
+    await mount({ menu, video: long }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": { body: { status: "pending" } } });
+    chooseTool("video");
+    expect([...document.querySelectorAll("#video-duration option")].map((o) => o.textContent)).toEqual(["About 3 s", "About 5 s", "About 12 s (experimental)"]);
+    expect(q("#video-duration-warning")!.hidden).toBe(true);
+    const sel = q<HTMLSelectElement>("#video-duration")!;
+    sel.value = "About 12 s (experimental)";
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(q("#video-duration-warning")!.hidden).toBe(false);
+    expect(q("#video-duration-warning")!.textContent).toBe("Longer than the model was trained for (about 5 s): quality may drop and it may run out of memory or time out.");
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    await submit();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "a fox", size: "Landscape", duration: "About 12 s (experimental)" });
+    sel.value = "About 3 s";
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(q("#video-duration-warning")!.hidden).toBe(true);
+  });
+
   describe("video models on the instance", () => {
     const at = (models: unknown) => ({ ...video, models });
     const missing = { state: "not_installed", bytes_done: 0, bytes_total: 18_000_000_000, percent: 0, reason: null };

@@ -809,6 +809,35 @@ nodes, not exported from ComfyUI; the file names they load are the pinned ones),
 takes (`VIDEO_TIMEOUT_S` 2400 s is a guess for both families), the disk need above, and GGUF support for these
 experts.
 
+### Longer clips (experimental, about 12 s)
+
+Both families offer a third length, **"About 12 s (experimental)"**: 289 frames for the 5B (24 fps) and 193 frames
+for the 14B (16 fps), both 4n+1 (profile `durations`, `experimental: true`; the loaders allow at most 289 frames).
+The two shorter lengths are unchanged. The page labels it and, while it is chosen, warns: "Longer than the model was
+trained for (about 5 s): quality may drop and it may run out of memory or time out." `/api/state` marks it with
+`experimental: true` (frames are never sent to the browser).
+
+What to expect and what to change (nothing ran yet, so these are estimates):
+
+- **Time.** A 12 s clip has 2.4 times the frames of a 5 s one and the model's attention grows faster than linearly
+  with the frames, so expect several times the 5 s time. `VIDEO_TIMEOUT_S` (default 2400 s, 40 min) may be too short
+  for 289 frames at 1280x704 on a 24 GB card, but it is not certain to be, so the default is unchanged. If 12 s jobs
+  time out on the page, raise both, keeping the rule that the job timeout is shorter than the job memory (the web
+  app refuses to start otherwise): for example `VIDEO_TIMEOUT_S=5400` and `WEB_JOB_TTL_S=7200`. A longer
+  `WEB_JOB_TTL_S` also keeps image jobs (and access to their images) in memory longer. A job the page gives up on is
+  not cancelled in ComfyUI: it keeps the GPU until it finishes, and image jobs queued behind it wait (each with its
+  own `GENERATE_TIMEOUT_S`). The idle shutdown does not stop a busy instance; the failsafe deadline and the hard cap
+  still do.
+- **Memory.** VRAM grows with the frames: 289 frames at 1280x704 may well not fit in 24 GB. **Try 832x480 first**
+  (the "faster" sizes of the 5B; the 14B has only 832x480 and 480x832). An out-of-memory error shows as a failed job.
+- **Result size.** `VIDEO_MAX_BYTES` (100 MiB) should be enough: an h264 mp4 of 12 s at 1280x704 is likely in the
+  range of 5 to 50 MB at usual encoder settings. The settings `SaveVideo` uses (bitrate or quality) were not read, so
+  this is an estimate; a larger file is refused with `video_too_large` (raise `VIDEO_MAX_BYTES` then).
+  `VIDEO_VIEW_TIMEOUT_S` (300 s) is ample for that over the tailnet.
+
+UNVERIFIED: quality beyond about 5 s (the models were trained for about 5 s clips; motion may loop or degrade), VRAM
+for 289 and 193 frames, the time per clip, and the result size.
+
 ### What the web app enforces
 
 The body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start image is checked like an

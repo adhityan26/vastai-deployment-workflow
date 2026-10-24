@@ -329,6 +329,9 @@ video:
   durations:
     - {name: "About 3 s", frames: 73}
     - {name: "About 5 s", frames: 121}
+    # Experimental: longer than the model was trained for (about 5 s); quality, VRAM and time UNVERIFIED (README
+    # "Longer clips"). 289 = 12 s x 24 fps + 1. The page labels it and warns.
+    - {name: "About 12 s (experimental)", frames: 289, experimental: true}
 
 # More video families (deploy/web/README.md "Video families"), each switched on by listing its id in VIDEO_FAMILIES
 # (csv, besides VIDEO_ENABLED=true). A family listed there needs every file of its `models` pinned under `models:`
@@ -365,6 +368,8 @@ video_families:
     durations:
       - {name: "About 3 s", frames: 49}
       - {name: "About 5 s", frames: 81}
+      # Experimental, as for the 5B: 193 = 12 s x 16 fps + 1.
+      - {name: "About 12 s (experimental)", frames: 193, experimental: true}
     text:
       workflow: video-14b-t2v.json
       params:

@@ -1215,6 +1215,11 @@
                         "seconds": {
                           "type": "integer",
                           "minimum": 0
+                        },
+                        "experimental": {
+                          "type": "boolean",
+                          "const": true,
+                          "description": "Present (true) only for a duration longer than the model was trained for (about 5 s): the page labels it and warns; quality, VRAM and time UNVERIFIED"
                         }
                       }
                     }
@@ -1408,6 +1413,11 @@
                           "seconds": {
                             "type": "integer",
                             "minimum": 0
+                          },
+                          "experimental": {
+                            "type": "boolean",
+                            "const": true,
+                            "description": "Present (true) only for a duration longer than the model was trained for (about 5 s): the page labels it and warns; quality, VRAM and time UNVERIFIED"
                           }
                         }
                       }

@@ -116,7 +116,7 @@ export interface AdvancedInfo { generate: Knobs; edit: Knobs; negativeMaxChars: 
 /** What the server offers for upscale (null in the state when upscale is off). */
 export interface UpscaleInfo { scales: string[]; max_bytes: number; max_pixels: number; types: string[] }
 /** One video length the server offers: its name and about how many seconds it lasts. */
-export interface VideoDurationInfo { name: string; seconds: number }
+export interface VideoDurationInfo { name: string; seconds: number; experimental?: true }
 export type VideoModelsState = "unavailable" | "not_installed" | "downloading" | "ready" | "failed";
 /** The video model files on the running instance (GET /api/state video.models). */
 export interface VideoModelsView { state: VideoModelsState; bytes_done: number; bytes_total: number; percent: number | null; reason: string | null }
@@ -367,7 +367,7 @@ function parseVideo(v: unknown): VideoInfo | null {
   for (const d of durations) {
     const seconds = d && isObj(d) ? d["seconds"] : undefined;
     if (!isObj(d) || typeof d["name"] !== "string" || d["name"] === "" || !Number.isInteger(seconds) || (seconds as number) < 0 || (seconds as number) > MAX_VIDEO_SECONDS) return null;
-    durationList.push({ name: d["name"], seconds: seconds as number });
+    durationList.push({ name: d["name"], seconds: seconds as number, ...(d["experimental"] === true ? { experimental: true as const } : {}) });
   }
   const download = v["download_bytes"];
   return {
@@ -1375,8 +1375,14 @@ export function videoHint(v: VideoInfo): string {
 
 /** "About 5 s (5 s)" is redundant: the option shows the name, plus the seconds only when the name lacks them. */
 export function durationLabel(d: VideoDurationInfo): string {
-  return d.name.includes(`${d.seconds} s`) ? d.name : `${d.name} (about ${d.seconds} s)`;
+  const flagged = d.experimental === true && !/experimental/i.test(d.name);
+  if (d.name.includes(`${d.seconds} s`)) return flagged ? `${d.name} (experimental)` : d.name;
+  return `${d.name} (about ${d.seconds} s${flagged ? ", experimental" : ""})`;
 }
+
+/** Shown while an experimental (longer than trained) duration is chosen. */
+export const EXPERIMENTAL_DURATION_WARNING =
+  "Longer than the model was trained for (about 5 s): quality may drop and it may run out of memory or time out.";
 
 /** The job label, the way the server labels the same job (a family besides the base one adds its title). */
 export function videoLabel(size: string, duration: string, fromImage: boolean, family: string | null = null, lora: string | null = null): string {
