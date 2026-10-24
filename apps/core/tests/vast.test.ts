@@ -31,8 +31,9 @@ afterEach(() => {
 
 type Handler = (req: Seen, res: ServerResponse) => void;
 
-async function fake(handler: Handler, timeoutS = 5): Promise<{ client: VastClient; seen: Seen[] }> {
+async function fake(handler: Handler, timeoutS = 5): Promise<{ client: VastClient; seen: Seen[]; sleeps: number[] }> {
   const seen: Seen[] = [];
+  const sleeps: number[] = [];
   server = createServer((req: IncomingMessage, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
@@ -56,7 +57,8 @@ async function fake(handler: Handler, timeoutS = 5): Promise<{ client: VastClien
     httpTimeoutSApps: timeoutS,
     secretNames: [],
   } as unknown as AppsConfig;
-  return { client: new VastClient(cfg), seen };
+  // Waits (search retries) are recorded, not taken.
+  return { client: new VastClient(cfg, { sleep: async (ms) => void sleeps.push(ms) }), seen, sleeps };
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -271,6 +273,37 @@ describe("VastClient", () => {
       expect(err.message).not.toContain(KEY);
       expect(err.message).toContain("[redacted]");
     }
+  });
+
+  it("search retries a network error or 5xx (it only reads) and then succeeds", async () => {
+    let n = 0;
+    const { client, seen, sleeps } = await fake((_r, res) => {
+      n++;
+      if (n === 1) return void res.socket?.destroy();
+      if (n === 2) return json(res, 503, { msg: "busy" });
+      json(res, 200, { offers: [{ id: 7, dph_total: 0.3 }] });
+    });
+    expect((await client.searchOffers(filters)).map((o) => o.id)).toEqual([7]);
+    expect(seen).toHaveLength(3);
+    expect(sleeps).toEqual([1000, 2000]);
+  });
+
+  it("search gives up after 3 attempts and never retries a 4xx", async () => {
+    const down = await fake((_r, res) => json(res, 502, "bad gateway"));
+    await expect(down.client.searchOffers(filters)).rejects.toThrow(/HTTP 502/);
+    expect(down.seen).toHaveLength(3);
+    server?.close();
+    const refused = await fake((_r, res) => json(res, 401, { msg: "bad key" }));
+    await expect(refused.client.searchOffers(filters)).rejects.toThrow(/HTTP 401/);
+    expect(refused.seen).toHaveLength(1);
+    expect(refused.sleeps).toHaveLength(0);
+  });
+
+  it("create is never retried, whatever the failure", async () => {
+    const { client, seen, sleeps } = await fake((_r, res) => json(res, 503, { msg: "busy" }));
+    await expect(client.createInstance(1, request)).rejects.toBeInstanceOf(VastError);
+    expect(seen).toHaveLength(1);
+    expect(sleeps).toHaveLength(0);
   });
 
   it("search returns [] for an empty offers list", async () => {

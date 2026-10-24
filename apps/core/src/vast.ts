@@ -190,9 +190,12 @@ interface Reply {
 export interface VastClientOptions {
   /** Fetch implementation (tests inject one); defaults to the global fetch. */
   fetch?: typeof fetch;
-  /** Waits between log-result polls; defaults to a real timer. */
+  /** Waits between log-result polls and offer-search retries; defaults to a real timer. */
   sleep?(ms: number): Promise<void>;
 }
+
+/** The offer search only reads: a network error, timeout or 5xx is retried (1 s, then 2 s), 4xx never. */
+const SEARCH_RETRY_BACKOFF_MS = [1000, 2000] as const;
 
 function realSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -300,7 +303,7 @@ export class VastClient {
     // CUDA cannot use): refuse instead of searching.
     if (filters.allowedGpus.length === 0) throw new VastError("refusing to search offers without a GPU allow-list");
     query["gpu_name"] = { in: filters.allowedGpus.map(normalizeGpuName) };
-    const reply = await this.send("POST", this.url("bundles/"), query);
+    const reply = await this.searchWithRetry(query);
     this.failIfNotOk("search offers", reply);
     const offers = (reply.json as { offers?: unknown } | null)?.offers;
     if (!Array.isArray(offers)) throw new VastError("search offers: response has no offers list");
@@ -312,6 +315,24 @@ export class VastClient {
       return row;
     });
     return parsed.sort((a, b) => a.dph_total - b.dph_total);
+  }
+
+  /**
+   * POST bundles/ is a read-only search, so repeating it is safe: up to 1 + SEARCH_RETRY_BACKOFF_MS
+   * attempts on a network error, a timeout or a 5xx. The last failure is what the caller sees.
+   * (Create, destroy and the other writes are never retried here.)
+   */
+  private async searchWithRetry(query: Record<string, unknown>): Promise<Reply> {
+    for (let attempt = 0; ; attempt++) {
+      const last = attempt >= SEARCH_RETRY_BACKOFF_MS.length;
+      try {
+        const reply = await this.send("POST", this.url("bundles/"), query);
+        if (reply.status < 500 || last) return reply;
+      } catch (e) {
+        if (last) throw e;
+      }
+      await this.sleep(SEARCH_RETRY_BACKOFF_MS[attempt]!);
+    }
   }
 
   async createInstance(offerId: number, req: CreateRequest): Promise<{ id: number }> {
