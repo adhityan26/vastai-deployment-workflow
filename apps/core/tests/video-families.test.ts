@@ -78,6 +78,7 @@ describe("parseVideoFamilies", () => {
       ["split_files/vae/wan_2.1_vae.safetensors", W21, "models/vae/", 253815318],
       ["split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", W21, "models/text_encoders/", 6735906897], // shared with the 5B
       ["calisthenics_moves_high_noise.safetensors", ["Aisha-AI-Official/wan2.2-calisthenic-moves", "32a3d164f03f18624bbbd2754efeccc926354c80"], "models/loras/", 153453560], // its extra LoRA
+      ["DR34ML4Y_I2V_14B_LOW_V2.safetensors", ["Aisha-AI-Official/backups", "61c811028bbe170f888b89031286905db2116716"], "models/loras/", 306807976], // the second entry's low side
     ];
     const doc = shipped();
     for (const [file, [repo, revision], dest, size] of expected) {
@@ -85,8 +86,8 @@ describe("parseVideoFamilies", () => {
     }
     const familyFiles = new Set((doc.video_families[0].models as Doc[]).map((m) => m.file));
     expect([...familyFiles].sort()).toEqual(expected.map(([f]) => f.split("/").pop()).sort());
-    // 62.49 GB of its own files (the extra LoRA's 0.15 GB included) plus the shared 6.74 GB text encoder.
-    expect(expected.reduce((n, e) => n + e[3], 0)).toBe(69_228_418_399);
+    // 62.80 GB of its own files (the extra LoRAs' 0.15 + 0.31 GB included) plus the shared 6.74 GB text encoder.
+    expect(expected.reduce((n, e) => n + e[3], 0)).toBe(69_535_226_375);
   });
 
   it("reads an enabled, pinned family: both modes, fixed inputs and the expert slots", () => {
@@ -107,7 +108,7 @@ describe("parseVideoFamilies", () => {
     expect(f.image.experts.map((e) => e.file)).toEqual(["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"]);
     expect(f.text.fixed).toContainEqual({ node: "5", input: "shift", value: 5 });
     expect(f.text.fixed).toContainEqual({ node: "3", input: "strength_model", value: 1 });
-    expect(f.models).toHaveLength(11);
+    expect(f.models).toHaveLength(12);
   });
 
   it("refuses an unknown id in VIDEO_FAMILIES (also while video is off) and accepts the base id", () => {
@@ -339,15 +340,22 @@ describe("extra LoRAs of a family", () => {
     f.extra_loras[0].low = { file: "low_extra.safetensors" };
   };
   const pinsWithLow = [...PINS, { file: "split_files/x/low_extra.safetensors", dest: "models/loras/" }];
+  const LOW = "DR34ML4Y_I2V_14B_LOW_V2.safetensors";
+  /** A test-local family whose first entry is also offered for text to video (the shipped entries are image only). */
+  const textToo = () => families((f) => (f.extra_loras[0].modes = ["text", "image"]))[0]!;
 
-  it("reads the shipped entry: title, modes, default strength, its high-side file and no trigger words yet", () => {
+  it("reads the shipped entries from the model card: image to video only, strength 1.0, no trigger words", () => {
     const f = fam();
-    expect(f.extraLoras).toEqual([
-      { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds calisthenics moves (high-noise expert only).", modes: ["text", "image"], files: { high: LORA }, strength: 0.6, triggerWords: "" },
+    expect(f.extraLoras.map((l) => [l.id, l.title, l.modes, l.files, l.strength, l.triggerWords])).toEqual([
+      ["calisthenic_moves", "Calisthenic moves", ["image"], { high: LORA }, 1, ""],
+      ["calisthenic_moves_low", "Calisthenic moves + low-noise LoRA", ["image"], { high: LORA, low: LOW }, 1, ""],
     ]);
+    expect(f.extraLoras[0]!.description).toMatch(/^Image to video only\./);
+    expect(f.extraLoras[1]!.description).toMatch(/^Image to video only\./);
     expect(f.text.extraLoras).toBe(f.extraLoras);
     expect(f.text.loraAfter).toEqual({ high: "3", low: "4" });
     expect(f.models.map((m) => m.file)).toContain(LORA); // downloaded with the family
+    expect(f.models.map((m) => m.file)).toContain(LOW);
   });
 
   it.each<[string, (f: Doc) => void]>([
@@ -367,8 +375,10 @@ describe("extra LoRAs of a family", () => {
     ["a negative strength", (f) => (f.extra_loras[0].strength = -0.1)],
     ["a strength that is not a number", (f) => (f.extra_loras[0].strength = "0.6")],
     ["trigger words that are not text", (f) => (f.extra_loras[0].trigger_words = ["x"])],
-    ["a mode without lora_after", (f) => delete f.text.lora_after],
-    ["a lora_after missing the used side", (f) => (f.image.lora_after = { low: "4" })],
+    ["a mode without lora_after", (f) => delete f.image.lora_after],
+    ["a text entry without a text lora_after", (f) => { f.extra_loras[0].modes = ["text"]; delete f.text.lora_after; }],
+    ["a lora_after missing the high side", (f) => (f.image.lora_after = { low: "4" })],
+    ["a lora_after missing the low side the second entry uses", (f) => (f.image.lora_after = { high: "3" })],
     ["a lora_after with an unknown slot", (f) => (f.text.lora_after = { high: "3", low: "4", mid: "5" })],
     ["a lora_after with a bad node id", (f) => (f.text.lora_after = { high: "a b", low: "4" })],
     ["a lora_after on a param's node input", (f) => (f.text.lora_after = 5)],
@@ -386,7 +396,7 @@ describe("extra LoRAs of a family", () => {
       delete x.extra_loras;
       delete x.text.lora_after;
       delete x.image.lora_after;
-      x.models = x.models.filter((m: Doc) => m.file !== LORA);
+      x.models = x.models.filter((m: Doc) => m.file !== LORA && m.file !== LOW);
     })[0]!;
     expect(f.extraLoras).toEqual([]);
     expect(f.text.loraAfter).toEqual({});
@@ -403,18 +413,33 @@ describe("extra LoRAs of a family", () => {
   });
 
   it("inserts the chosen LoRA after the 4-step LoRA of its branch, before ModelSamplingSD3, with the strength", () => {
-    const p = buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: { id: "calisthenic_moves", strength: 0.45 } });
+    const p = buildVideoPrompt(fam().image, I2V, { ...ok, startImage: "a.png", extraLora: { id: "calisthenic_moves", strength: 0.45 } });
     expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: LORA, strength_model: 0.45 } });
     expect(p["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
     expect(p["6"]!.inputs["model"]).toEqual(["4", 0]); // no low file: the low branch is unchanged
     expect(p["video_lora_low"]).toBeUndefined();
-    expect(T2V["5"].inputs.model).toEqual(["3", 0]); // the template is not mutated
-    const i = buildVideoPrompt(fam().image, I2V, { ...ok, startImage: "a.png", extraLora: { id: "calisthenic_moves", strength: 1 } });
-    expect(i["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
+    expect(I2V["5"].inputs.model).toEqual(["3", 0]); // the template is not mutated
+    // A test-local entry also offered for text: the same insertion in the text workflow.
+    const t = buildVideoPrompt(textToo().text, T2V, { ...ok, extraLora: { id: "calisthenic_moves", strength: 1 } });
+    expect(t["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
+  });
+
+  it("the shipped entries are image to video only: a text job with one is refused", () => {
+    for (const id of ["calisthenic_moves", "calisthenic_moves_low"]) {
+      expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: { id, strength: 1 } }), id).toThrow(expect.objectContaining({ code: "extra_lora_mode" }));
+    }
+  });
+
+  it("the second shipped entry gets a node in each branch: the calisthenics LoRA on high, the low-noise LoRA on low", () => {
+    const p = buildVideoPrompt(fam().image, I2V, { ...ok, startImage: "a.png", extraLora: { id: "calisthenic_moves_low", strength: 0.8 } });
+    expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: LORA, strength_model: 0.8 } });
+    expect(p["video_lora_low"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["4", 0], lora_name: LOW, strength_model: 0.8 } });
+    expect(p["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
+    expect(p["6"]!.inputs["model"]).toEqual(["video_lora_low", 0]);
   });
 
   it("an entry with both sides gets a node in each branch", () => {
-    const f = families(withLow, undefined, true, pinsWithLow)[0]!;
+    const f = families((x) => { withLow(x); x.extra_loras[0].modes = ["text"]; }, undefined, true, pinsWithLow)[0]!;
     const p = buildVideoPrompt(f.text, T2V, { ...ok, extraLora: { id: "calisthenic_moves", strength: 0.6 } });
     expect(p["video_lora_low"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["4", 0], lora_name: "low_extra.safetensors", strength_model: 0.6 } });
     expect(p["6"]!.inputs["model"]).toEqual(["video_lora_low", 0]);
@@ -426,17 +451,19 @@ describe("extra LoRAs of a family", () => {
     const textOnly = families((f) => (f.extra_loras[0].modes = ["text"]))[0]!;
     expect(() => buildVideoPrompt(textOnly.image, I2V, { ...ok, startImage: "a.png", extraLora: one(0.5) })).toThrow(expect.objectContaining({ code: "extra_lora_mode" }));
     expect(() => buildVideoPrompt(textOnly.text, T2V, { ...ok, extraLora: one(0.5) })).not.toThrow();
+    const img = { ...ok, startImage: "a.png" };
     for (const strength of [-0.01, 1.01, Number.NaN, Infinity]) {
-      expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: one(strength) })).toThrow(expect.objectContaining({ code: "invalid_strength" }));
+      expect(() => buildVideoPrompt(fam().image, I2V, { ...img, extraLora: one(strength) })).toThrow(expect.objectContaining({ code: "invalid_strength" }));
     }
-    for (const strength of [0, 1]) expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: one(strength) })).not.toThrow();
+    for (const strength of [0, 1]) expect(() => buildVideoPrompt(fam().image, I2V, { ...img, extraLora: one(strength) })).not.toThrow();
     const base = parseVideo(shipped().video, shipped().models, true)!;
     const baseTpl = tpl(shipped().video.workflow);
     expect(() => buildVideoPrompt(base, baseTpl, { ...ok, size: "Landscape", duration: "About 3 s", extraLora: one(0.5) })).toThrow(expect.objectContaining({ code: "extra_lora_unavailable" }));
   });
 
   it("video(): takes extra_lora and extra_lora_strength (the entry's default when absent), checked before anything is sent", async () => {
-    const f = fam();
+    // A test-local entry also offered for text, so the jobs need no start image; its default strength is the shipped 1.0.
+    const f = textToo();
     const sent: unknown[] = [];
     const comfy = { submit: async (p: unknown) => (sent.push(p), { promptId: "p-x" }), uploadImage: async () => ({ name: "u.png", subfolder: "", type: "input" }) };
     const cfg = { generateMaxPromptChars: 40, editMaxReferences: 3, editReferenceMaxBytes: 4096, editReferenceMaxPixels: 1_000_000, editReferenceMaxSide: 8192, editReferenceTypes: ["png"], secretNames: [] } as unknown as AppsConfig;
@@ -446,7 +473,7 @@ describe("extra LoRAs of a family", () => {
     };
     const body = { prompt: "a fox", size: "Landscape", duration: "About 5 s" };
     await video(deps, { ...body, extra_lora: "calisthenic_moves" });
-    expect((sent[0] as Doc)["video_lora_high"].inputs.strength_model).toBe(0.6);
+    expect((sent[0] as Doc)["video_lora_high"].inputs.strength_model).toBe(1);
     await video(deps, { ...body, extra_lora: "calisthenic_moves", extra_lora_strength: 0.25 });
     expect((sent[1] as Doc)["video_lora_high"].inputs.strength_model).toBe(0.25);
     await video(deps, { ...body, extra_lora: null });
@@ -454,6 +481,7 @@ describe("extra LoRAs of a family", () => {
     const bad: [Doc, string][] = [
       [{ ...body, extra_lora: 5 }, "unknown_extra_lora"],
       [{ ...body, extra_lora: "nope" }, "unknown_extra_lora"],
+      [{ ...body, extra_lora: "calisthenic_moves_low" }, "extra_lora_mode"], // image only, and this is a text job
       [{ ...body, extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
       [{ ...body, extra_lora: "calisthenic_moves", extra_lora_strength: 2 }, "invalid_strength"],
       [{ ...body, extra_lora_strength: 0.5 }, "invalid_strength"], // a strength without a LoRA

@@ -47,6 +47,9 @@ models:
   # The family's optional extra LoRA (extra_loras: below), pinned 2026-10-24 by the owner: a high-noise-only LoRA,
   # downloaded with the family (153 MB) so the family's disk and progress figures include it.
   - {file: "calisthenics_moves_high_noise.safetensors", repo: "Aisha-AI-Official/wan2.2-calisthenic-moves", revision: "32a3d164f03f18624bbbd2754efeccc926354c80", dest: "models/loras/", size_bytes: 153453560}
+  # A third-party low-noise LoRA (author's card: "for male nudity"), pinned 2026-10-26 with scripts/pin_model.py; its
+  # repo states no licence. Used only by the `calisthenic_moves_low` extra LoRA below (307 MB, downloaded with the family).
+  - {file: "DR34ML4Y_I2V_14B_LOW_V2.safetensors", repo: "Aisha-AI-Official/backups", revision: "61c811028bbe170f888b89031286905db2116716", dest: "models/loras/", size_bytes: 306807976}
 workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json, video-14b-t2v.json, video-14b-i2v.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
@@ -360,6 +363,7 @@ video_families:
       - {file: umt5_xxl_fp8_e4m3fn_scaled.safetensors, dest: models/text_encoders/}
       - {file: wan_2.1_vae.safetensors, dest: models/vae/}
       - {file: calisthenics_moves_high_noise.safetensors, dest: models/loras/}
+      - {file: DR34ML4Y_I2V_14B_LOW_V2.safetensors, dest: models/loras/}
     node_classes: [UNETLoader, LoraLoaderModelOnly, ModelSamplingSD3, CLIPLoader, VAELoader, CLIPTextEncode, EmptyHunyuanLatentVideo, WanImageToVideo, KSamplerAdvanced, VAEDecode, CreateVideo, SaveVideo, LoadImage]
     fps: 16
     sizes:
@@ -413,15 +417,25 @@ video_families:
     # Optional extra LoRAs a user may add to a job (one at a time, the page's "Extra LoRA"; strength 0 to 1). Each
     # names its files per expert branch (`high` and/or `low`: a missing side gets no extra LoRA node); every file must
     # be one of the family's `models` (so it is downloaded with the family). `modes`, `strength` (the default) and
-    # `trigger_words` are profile data shown to the user. UNVERIFIED: whether this LoRA suits text and/or image to
-    # video (both offered until known), how it stacks with the 4-step LoRAs, the 0.6 default strength (the usual
-    # recommendation, not tested), and its trigger words: nobody here has read its model card, so trigger_words is
-    # empty; the owner should fill it from the card.
+    # `trigger_words` are profile data shown to the user. From the model card of calisthenic_moves (read 2026-10-26):
+    # a LoRA for Wan 2.2 I2V A14B only (image to video), trained on the high-noise expert only (3 clips of 80 frames), no
+    # trigger words (the card gives example prompts), scale 1.0 and shift 4 for the author's own setup; the author warns
+    # it probably works only at the training camera angle, may ignore other prompts and may force the training
+    # characters' looks. The repo states no licence. UNVERIFIED here: how it stacks with the 4-step LoRAs and the 1.0
+    # default under them (lower the strength if the result breaks).
     extra_loras:
       - id: calisthenic_moves
         title: "Calisthenic moves"
-        description: "Adds calisthenics moves (high-noise expert only)."
-        modes: [text, image]
+        description: "Image to video only. Adds calisthenics moves (high-noise expert only). Works best at the camera angle it was trained on and may ignore very different prompts. Example prompt: \"Then she jumps and with her hand raised, she grabs onto a fixed iron bar on top, keeping herself suspended.\""
+        modes: [image]
         high: {file: calisthenics_moves_high_noise.safetensors}
-        strength: 0.6
+        strength: 1.0
+        trigger_words: ""
+      - id: calisthenic_moves_low
+        title: "Calisthenic moves + low-noise LoRA"
+        description: "Image to video only. The calisthenic moves LoRA plus a third-party low-noise LoRA from another repo (its author recommends it for nudity). Same limits as the first entry."
+        modes: [image]
+        high: {file: calisthenics_moves_high_noise.safetensors}
+        low: {file: DR34ML4Y_I2V_14B_LOW_V2.safetensors}
+        strength: 1.0
         trigger_words: ""

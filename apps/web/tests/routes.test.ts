@@ -3764,7 +3764,7 @@ describe("video families", () => {
     expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }, { name: "About 12 s (experimental)", seconds: 12, experimental: true }]);
     expect(big.models).toEqual({ state: "ready", bytes_done: 9, bytes_total: 9, percent: 100, reason: null });
     expect(big.slots).toEqual({ text: ["high", "low"], image: ["high", "low"] });
-    expect(big.download_bytes).toBe(69_228_418_399); // its ten own pins (the extra LoRA's too) and the shared text encoder
+    expect(big.download_bytes).toBe(69_535_226_375); // its eleven own pins (both extra LoRA files too) and the shared text encoder
     expect(big.experts).toBeNull(); // file names are for admins
     expect(m.video_families[0].models).toEqual({ state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null });
     const a = (await call("GET", "/api/state", await admin())).json();
@@ -3900,17 +3900,21 @@ describe("video families", () => {
     h = await fharness();
     const m = (await call("GET", "/api/state", await member())).json();
     expect(m.video_families[0].extra_loras).toEqual([]);
-    expect(m.video_families[1].extra_loras).toEqual([
-      { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds calisthenics moves (high-noise expert only).", modes: ["text", "image"], strength: 0.6, trigger_words: "", files: null },
+    expect(m.video_families[1].extra_loras.map((l: Record<string, unknown>) => [l.id, l.title, l.modes, l.strength, l.trigger_words, l.files])).toEqual([
+      ["calisthenic_moves", "Calisthenic moves", ["image"], 1, "", null],
+      ["calisthenic_moves_low", "Calisthenic moves + low-noise LoRA", ["image"], 1, "", null],
     ]);
+    expect(m.video_families[1].extra_loras[0].description).toMatch(/^Image to video only\./);
     expect(JSON.stringify(m)).not.toContain("calisthenics_moves_high_noise");
+    expect(JSON.stringify(m)).not.toContain("DR34ML4Y");
     const a = (await call("GET", "/api/state", await admin())).json();
     expect(a.video_families[1].extra_loras[0].files).toEqual({ high: "calisthenics_moves_high_noise.safetensors" });
+    expect(a.video_families[1].extra_loras[1].files).toEqual({ high: "calisthenics_moves_high_noise.safetensors", low: "DR34ML4Y_I2V_14B_LOW_V2.safetensors" });
   });
 
   it("a job with the extra LoRA gets its node after the 4-step LoRA of the high branch, with the strength; with the chosen strength", async () => {
     h = await fharness();
-    const res = await post("/api/video", await member(), { ...ok, extra_lora: "calisthenic_moves", extra_lora_strength: 0.35 });
+    const res = await post("/api/video", await member(), { ...ok, image: REF_A.toString("base64"), extra_lora: "calisthenic_moves", extra_lora_strength: 0.35 });
     expect(res.statusCode, res.body).toBe(202);
     const p = sentPrompt();
     expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: "calisthenics_moves_high_noise.safetensors", strength_model: 0.35 } });
@@ -3918,11 +3922,23 @@ describe("video families", () => {
     expect(p["video_lora_low"]).toBeUndefined();
   });
 
+  it("the second entry puts its low-noise LoRA on the low branch too, at the default strength 1.0", async () => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, image: REF_A.toString("base64"), extra_lora: "calisthenic_moves_low" });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["video_lora_high"].inputs).toEqual({ model: ["3", 0], lora_name: "calisthenics_moves_high_noise.safetensors", strength_model: 1 });
+    expect(p["video_lora_low"].inputs).toEqual({ model: ["4", 0], lora_name: "DR34ML4Y_I2V_14B_LOW_V2.safetensors", strength_model: 1 });
+    expect(p["6"].inputs.model).toEqual(["video_lora_low", 0]);
+  });
+
   it.each<[string, Record<string, unknown>, string]>([
     ["an unknown extra LoRA", { extra_lora: "nope" }, "unknown_extra_lora"],
     ["a file name as the LoRA", { extra_lora: "calisthenics_moves_high_noise.safetensors" }, "unknown_extra_lora"],
-    ["a strength above 1", { extra_lora: "calisthenic_moves", extra_lora_strength: 1.5 }, "invalid_strength"],
-    ["a strength as text", { extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
+    ["a strength above 1", { image: REF_A.toString("base64"), extra_lora: "calisthenic_moves", extra_lora_strength: 1.5 }, "invalid_strength"],
+    ["a strength as text", { image: REF_A.toString("base64"), extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
+    ["an image-only LoRA on a text job", { extra_lora: "calisthenic_moves" }, "extra_lora_mode"],
+    ["the second image-only LoRA on a text job", { extra_lora: "calisthenic_moves_low" }, "extra_lora_mode"],
     ["a strength without a LoRA", { extra_lora_strength: 0.5 }, "invalid_strength"],
     ["a LoRA for the base family", { family: "wan22_5b", size: "Landscape", duration: "About 3 s", extra_lora: "calisthenic_moves" }, "extra_lora_unavailable"],
   ])("refuses %s and sends nothing to ComfyUI", async (_n, over, code) => {
