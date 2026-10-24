@@ -44,6 +44,12 @@ const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.gene
 const upscaleTemplate = JSON.parse(readFileSync(repo("instance/workflows/image-upscale.json"), "utf8"));
 const editTemplate = JSON.parse(readFileSync(repo(`instance/workflows/${profile.edit!.workflow}`), "utf8"));
 const videoTemplate = JSON.parse(readFileSync(repo("instance/workflows/video-ti2v.json"), "utf8"));
+/** The workflows of a profile's enabled video families (besides the base section), by file name. */
+const familyTemplates = (p: typeof profile): Record<string, unknown> =>
+  Object.fromEntries(
+    p.videoFamilies.filter((f) => !f.base).flatMap((f) => [f.text.workflow, f.image.workflow])
+      .map((w) => [w, JSON.parse(readFileSync(repo(`instance/workflows/${w}`), "utf8"))]),
+  );
 
 const PUBLIC_ORIGIN = "https://comfy.example.test"; // config-lint: ok (test fixture)
 const SESSION_SECRET = "test-session-secret-0123456789abcdef";
@@ -191,8 +197,10 @@ class FakeVast {
     return this.offers;
   }
   createdOffers: number[] = [];
+  requests: CreateRequest[] = [];
   async createInstance(offer: number, req: CreateRequest): Promise<{ id: number }> {
     this.creates++;
+    this.requests.push(req);
     this.createdOffers.push(offer);
     const id = this.nextId++;
     this.instances.push({ id, label: req.label, actual_status: "loading", start_date: NOW_S, dph_total: 0.3 });
@@ -249,6 +257,8 @@ async function harness(
     ws?: WsOptions;
     /** undefined: the shipped video workflow when the profile enables video; null turns video off. */
     videoTemplate?: unknown;
+    /** undefined: the shipped workflows of the profile's further video families. */
+    videoFamilyTemplates?: Record<string, unknown>;
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -360,7 +370,9 @@ async function harness(
     agentFor: (r: InstanceRecord) => new AgentClient("127.0.0.1", cfg, r.agent_token, STATUS_SCHEMA),
     clock: () => clock.ms / 1000,
     tsAuthKey: opts.authKey ?? (async () => AUTH_KEY),
-    profileModels: profile.models,
+    profileModels: (opts.profile ?? profile).models,
+    // Only for a profile with families besides the base section (the base files are counted as before).
+    ...((opts.profile ?? profile).videoFamilies.some((f) => !f.base) ? { videoFamilyFiles: (opts.profile ?? profile).videoFamilyFiles } : {}),
     newToken: () => TOKEN,
     newHostname: () => `vast-new${n++}`,
     sleep: async () => undefined,
@@ -390,6 +402,7 @@ async function harness(
     template,
     upscaleTemplate: opts.profile?.upscale ? upscaleTemplate : null,
     videoTemplate: opts.videoTemplate !== undefined ? opts.videoTemplate : opts.profile?.video ? videoTemplate : null,
+    videoFamilyTemplates: opts.videoFamilyTemplates ?? familyTemplates(opts.profile ?? profile),
     editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     credit,
     gallery,
@@ -3581,7 +3594,7 @@ describe("edit output size", () => {
     expect(JSON.stringify(body.edit)).not.toContain("latent_image");
   });
 
-  it("an edit with a size feeds the sampler an empty latent of that size, and the label names it", async () => {
+  it("an edit with a size feeds the sampler an empty latent of that size, and with the chosen strength", async () => {
     h.setComfy(comfyEdit());
     const res = await post("/api/edit", await member(), { ...okEdit, size: "9:16" });
     expect(res.statusCode).toBe(202);
@@ -3612,5 +3625,258 @@ describe("edit output size", () => {
     expect(Object.keys(props)).toContain("size");
     const edit = doc.components.schemas.State.properties.edit;
     expect(JSON.stringify(edit)).toContain("sizes");
+  });
+});
+
+describe("video families", () => {
+  const FAMILY = "wan22_a14b";
+  /** The shipped profile (the 14B family pinned 2026-10-24) with VIDEO_ENABLED and VIDEO_FAMILIES naming it. */
+  function familyProfile(): typeof profile {
+    return loadProfile(repo("instance/profiles/image.yaml"), { videoEnabled: true, videoFamilies: [FAMILY] });
+  }
+  const ok = { prompt: "a fox runs through snow", size: "Landscape", duration: "About 5 s", family: FAMILY };
+  const BASE_READY = { state: "ready", boot: true, bytes_done: 50, bytes_total: 50, reason: null };
+  const fam = (over: Record<string, unknown> = {}) => ({
+    id: FAMILY, state: "ready", boot: false, bytes_done: 9, bytes_total: 9, reason: null,
+    experts: [
+      { mode: "text", slot: "high", file: "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+      { mode: "text", slot: "low", file: "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+      { mode: "image", slot: "high", file: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+      { mode: "image", slot: "low", file: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+    ],
+    ...over,
+  });
+  const agentWith = (family: unknown): Handler => (s, res) => {
+    if (s.url === "/status") {
+      return json(res, 200, agentStatus("ready", { video_models: BASE_READY, video_families: family === null ? null : [{ ...BASE_READY, id: "wan22_5b" }, family] }));
+    }
+    if (s.url === "/video-models") return json(res, 202, { ...fam({ state: "downloading", bytes_done: 0 }) });
+    json(res, 404, {});
+  };
+  const comfyOk: Handler = (s, res) => {
+    if (s.url === "/upload/image") return json(res, 200, { name: /filename="([^"]+)"/.exec(s.body)![1], subfolder: "", type: "input" });
+    if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-vid14" });
+    json(res, 404, {});
+  };
+  const fharness = async (family: unknown = fam(), opts: Parameters<typeof harness>[0] = {}) => {
+    const made = await harness({ profile: familyProfile(), ...opts });
+    made.setAgent(agentWith(family));
+    made.setComfy(comfyOk);
+    return made;
+  };
+  const sentPrompt = () => JSON.parse(h.comfySeen.find((x) => x.url === "/prompt")!.body).prompt;
+  const HIGH = "https://huggingface.co/someone/q/resolve/main/high-Q4_K_M.gguf"; // config-lint: ok (test fixture)
+  const LOW = "https://huggingface.co/someone/q/resolve/main/low-Q4_K_M.gguf"; // config-lint: ok (test fixture)
+
+  it("lists the families (base first) with their own sizes, durations and state; the base video entry is unchanged", async () => {
+    h = await fharness();
+    const m = (await call("GET", "/api/state", await member())).json();
+    expect(m.video.sizes).toHaveLength(4); // the base section's, as before
+    expect(m.video_families.map((f: { id: string; title: string; base: boolean }) => [f.id, f.title, f.base])).toEqual([
+      ["wan22_5b", "Fast (5B)", true], [FAMILY, "Quality (14B, 4 steps)", false],
+    ]);
+    const big = m.video_families[1];
+    expect(big.sizes).toEqual([{ name: "Landscape", width: 832, height: 480 }, { name: "Portrait", width: 480, height: 832 }]);
+    expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }]);
+    expect(big.models).toEqual({ state: "ready", bytes_done: 9, bytes_total: 9, percent: 100, reason: null });
+    expect(big.slots).toEqual({ text: ["high", "low"], image: ["high", "low"] });
+    expect(big.download_bytes).toBe(69_228_418_399); // its ten own pins (the extra LoRA's too) and the shared text encoder
+    expect(big.experts).toBeNull(); // file names are for admins
+    expect(m.video_families[0].models).toEqual({ state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null });
+    const a = (await call("GET", "/api/state", await admin())).json();
+    expect(a.video_families[1].experts[0]).toEqual({ mode: "text", slot: "high", file: "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null });
+    for (const secret of ["\"node\"", "workflow", "\"length\"", "frames", "shift", "strength_model"]) expect(JSON.stringify(m.video_families)).not.toContain(secret);
+  });
+
+  it("refuses to start with a family workflow that does not match its profile entry, or that did not load", async () => {
+    const p = familyProfile();
+    const broken = familyTemplates(p);
+    const t2v = structuredClone(broken["video-14b-t2v.json"]) as Record<string, { class_type: string }>;
+    t2v["16"]!.class_type = "SaveImage";
+    await expect(harness({ profile: p, videoFamilyTemplates: { ...broken, "video-14b-t2v.json": t2v } })).rejects.toThrow(/SaveVideo/);
+    const { ["video-14b-i2v.json"]: _gone, ...partial } = broken;
+    await expect(harness({ profile: p, videoFamilyTemplates: partial })).rejects.toThrow(/video-14b-i2v\.json did not load/);
+  });
+
+  it("is null with only the base family on, and while video is off", async () => {
+    h = await harness({ profile: loadProfile(repo("instance/profiles/image.yaml"), { videoEnabled: true }) });
+    expect((await call("GET", "/api/state", await member())).json().video_families).toBeNull();
+    h = await harness();
+    expect((await call("GET", "/api/state", await member())).json().video_families).toBeNull();
+  });
+
+  it("text to video with the 14B family: its text workflow, the fixed recipe and its sizes", async () => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, seed: 4 });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["1"].inputs.unet_name).toBe("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors");
+    expect(p["2"].inputs.unet_name).toBe("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors");
+    expect(p["11"].inputs).toMatchObject({ width: 832, height: 480, length: 81 });
+    expect(p["12"].inputs).toMatchObject({ noise_seed: 4, steps: 4, cfg: 1, end_at_step: 2 });
+    expect(p["5"].inputs.shift).toBe(5);
+  });
+
+  it("image to video with the 14B family: its image workflow with the uploaded start image", async () => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, size: "Portrait", image: REF_A.toString("base64") });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["1"].inputs.unet_name).toBe("wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors");
+    expect(p["video_start"]).toEqual({ class_type: "LoadImage", inputs: { image: expect.stringMatching(/^video-[0-9a-f]+\.png$/) } });
+    expect(p["11"].inputs).toMatchObject({ start_image: ["video_start", 0], width: 480, height: 832 });
+  });
+
+  it("the base family by id, or no family, is the base section as before", async () => {
+    h = await fharness();
+    for (const body of [{ ...ok, size: "Landscape, faster", duration: "About 3 s", family: "wan22_5b" }, { prompt: "x", size: "Landscape, faster", duration: "About 3 s" }]) {
+      h.comfySeen.length = 0;
+      expect((await post("/api/video", await member(), body)).statusCode).toBe(202);
+      expect(sentPrompt()["1"].inputs.unet_name).toBe("wan2.2_ti2v_5B_fp16.safetensors");
+    }
+  });
+
+  it.each<[string, unknown, Record<string, unknown>, number, string]>([
+    ["an unknown family", fam(), { family: "nope" }, 400, "unknown_family"],
+    ["a family name that is not a string", fam(), { family: 5 }, 400, "invalid_body"],
+    ["the base family's size", fam(), { size: "Landscape, faster" }, 400, "unknown_size"],
+    ["a family not installed", fam({ state: "not_installed", bytes_done: 0 }), {}, 409, "video_models_not_ready"],
+    ["a family still downloading", fam({ state: "downloading", bytes_done: 3 }), {}, 409, "video_models_not_ready"],
+    ["a family the agent does not report", null, {}, 409, "video_models_not_ready"],
+    ["one linked expert of the mode only", fam({ experts: [{ mode: "text", slot: "high", file: "h.gguf", linked: true, sha256: null }, { mode: "text", slot: "low", file: "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null }] }), {}, 409, "video_models_not_ready"],
+    ["an unusable linked name", fam({ experts: [{ mode: "text", slot: "high", file: "../h.gguf", linked: true, sha256: null }, { mode: "text", slot: "low", file: "l.gguf", linked: true, sha256: null }] }), {}, 409, "video_models_not_ready"],
+  ])("refuses %s and sends nothing to ComfyUI", async (_n, family, over, status, code) => {
+    h = await fharness(family);
+    const res = await post("/api/video", await member(), { ...ok, ...over });
+    expect(res.statusCode, res.body).toBe(status);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("uses the mode's linked experts the instance reports (a .gguf one with the GGUF loader)", async () => {
+    const experts = [
+      { mode: "text", slot: "high", file: "high-Q4_K_M.gguf", linked: true, sha256: "a".repeat(64) },
+      { mode: "text", slot: "low", file: "low-Q4_K_M.gguf", linked: true, sha256: "b".repeat(64) },
+      { mode: "image", slot: "high", file: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+      { mode: "image", slot: "low", file: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null },
+    ];
+    h = await fharness(fam({ experts }));
+    expect((await post("/api/video", await member(), ok)).statusCode).toBe(202);
+    expect(sentPrompt()["1"]).toEqual({ class_type: "UnetLoaderGGUF", inputs: { unet_name: "high-Q4_K_M.gguf" } });
+    expect(sentPrompt()["2"]).toEqual({ class_type: "UnetLoaderGGUF", inputs: { unet_name: "low-Q4_K_M.gguf" } });
+    h.comfySeen.length = 0;
+    expect((await post("/api/video", await member(), { ...ok, image: REF_A.toString("base64") })).statusCode).toBe(202);
+    expect(sentPrompt()["1"].inputs.unet_name).toBe("wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"); // the image mode is pinned
+  });
+
+  it("Download a family: admins only; both links of the mode travel as resolve URLs", async () => {
+    h = await fharness(fam({ state: "not_installed" }));
+    expect((await post("/api/video-models", await member(), { family: FAMILY })).statusCode).toBe(403);
+    const plain = await post("/api/video-models", await admin(), { family: FAMILY });
+    expect(plain.statusCode, plain.body).toBe(202);
+    expect(plain.json().models).toMatchObject({ state: "downloading" });
+    expect(JSON.parse(h.agentSeen.find((x) => x.url === "/video-models")!.body)).toEqual({ family: FAMILY });
+    h.agentSeen.length = 0;
+    const res = await post("/api/video-models", await admin(), { family: FAMILY, mode: "text", links: { high: HIGH.replace("/resolve/", "/blob/"), low: LOW } });
+    expect(res.statusCode, res.body).toBe(202);
+    expect(JSON.parse(h.agentSeen.find((x) => x.url === "/video-models")!.body)).toEqual({ family: FAMILY, mode: "text", links: { high: HIGH, low: LOW } });
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["one link only", { mode: "text", links: { high: HIGH } }, "invalid_model_link"],
+    ["an empty second link", { mode: "text", links: { high: HIGH, low: " " } }, "invalid_model_link"],
+    ["an unknown slot", { mode: "text", links: { high: HIGH, low: LOW, mid: LOW } }, "invalid_model_link"],
+    ["links without a mode", { links: { high: HIGH, low: LOW } }, "invalid_model_link"],
+    ["the same file twice", { mode: "text", links: { high: HIGH, low: HIGH } }, "model_link_name_clash"],
+    ["a bad host", { mode: "image", links: { high: HIGH.replace("huggingface.co", "evil.example"), low: LOW } }, "model_link_host_not_allowed"], // config-lint: ok (test fixture)
+    ["an IP literal", { mode: "image", links: { high: "https://169.254.169.254/o/r/resolve/main/m.gguf", low: LOW } }, "invalid_model_link"], // config-lint: ok (test fixture)
+    ["a bad type", { mode: "image", links: { high: HIGH.replace(".gguf", ".ckpt"), low: LOW } }, "model_link_unsupported_type"],
+    ["a url with a family", { url: HIGH }, "invalid_model_link"],
+    ["expert links for the base family", { family: "wan22_5b", mode: "text", links: { high: HIGH, low: LOW } }, "invalid_model_link"],
+    ["an unknown family", { family: "nope" }, "unknown_family"],
+  ])("Download a family refuses %s without asking the agent", async (_n, body, code) => {
+    h = await fharness(fam({ state: "not_installed" }));
+    const res = await post("/api/video-models", await admin(), { family: FAMILY, ...body });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.agentSeen.some((x) => x.url === "/video-models")).toBe(false);
+  });
+
+  it("passes the agent's family refusals with their codes", async () => {
+    for (const [status, code] of [[409, "video_download_busy"], [409, "video_gguf_loader_missing"], [409, "disk_insufficient"]] as const) {
+      h = await fharness();
+      h.setAgent((s, res) => (s.url === "/video-models" ? json(res, status, { detail: { code, message: "refused" } }) : json(res, 200, agentStatus("ready"))));
+      const res = await post("/api/video-models", await admin(), { family: FAMILY });
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+    }
+  });
+
+  it("lists the family's extra LoRAs (profile data; file names for admins only); the base family has none", async () => {
+    h = await fharness();
+    const m = (await call("GET", "/api/state", await member())).json();
+    expect(m.video_families[0].extra_loras).toEqual([]);
+    expect(m.video_families[1].extra_loras).toEqual([
+      { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds calisthenics moves (high-noise expert only).", modes: ["text", "image"], strength: 0.6, trigger_words: "", files: null },
+    ]);
+    expect(JSON.stringify(m)).not.toContain("calisthenics_moves_high_noise");
+    const a = (await call("GET", "/api/state", await admin())).json();
+    expect(a.video_families[1].extra_loras[0].files).toEqual({ high: "calisthenics_moves_high_noise.safetensors" });
+  });
+
+  it("a job with the extra LoRA gets its node after the 4-step LoRA of the high branch, with the strength; with the chosen strength", async () => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, extra_lora: "calisthenic_moves", extra_lora_strength: 0.35 });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: "calisthenics_moves_high_noise.safetensors", strength_model: 0.35 } });
+    expect(p["5"].inputs.model).toEqual(["video_lora_high", 0]);
+    expect(p["video_lora_low"]).toBeUndefined();
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an unknown extra LoRA", { extra_lora: "nope" }, "unknown_extra_lora"],
+    ["a file name as the LoRA", { extra_lora: "calisthenics_moves_high_noise.safetensors" }, "unknown_extra_lora"],
+    ["a strength above 1", { extra_lora: "calisthenic_moves", extra_lora_strength: 1.5 }, "invalid_strength"],
+    ["a strength as text", { extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
+    ["a strength without a LoRA", { extra_lora_strength: 0.5 }, "invalid_strength"],
+    ["a LoRA for the base family", { family: "wan22_5b", size: "Landscape", duration: "About 3 s", extra_lora: "calisthenic_moves" }, "extra_lora_unavailable"],
+  ])("refuses %s and sends nothing to ComfyUI", async (_n, over, code) => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, ...over });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
+  it("Start with families: the disk for their files and VIDEO_BOOT_FAMILIES; checked before anything is rented", async () => {
+    h = await fharness(fam(), { ready: false, cfg: { vastVideoDiskGb: 80, videoFamilies: [FAMILY] } });
+    const a = await admin();
+    const started = await post("/api/start", a, { confirm: true, video_models: true, video_families: [FAMILY] });
+    expect(started.statusCode, started.body).toBe(200);
+    const disk = h.vast.searches.at(-1)!.diskGb;
+    expect(disk).toBe(50 + 70); // VAST_DISK_GB plus the family's 69.23 GB of files, above VAST_VIDEO_DISK_GB (80)
+    expect(h.vast.requests.at(-1)!.env).toMatchObject({ INCLUDE_VIDEO_MODELS: "true", VIDEO_BOOT_FAMILIES: FAMILY });
+    const est = await call("GET", `/api/estimate?video_models=true&video_families=${FAMILY}`, a);
+    expect(est.statusCode, est.body).toBe(200);
+    expect(h.vast.searches.at(-1)!.diskGb).toBe(disk);
+    // Both families: the 5B's own 11.41 GB on top (the text encoder once): 80.64 GB of video files.
+    expect((await call("GET", `/api/estimate?video_models=true&video_families=wan22_5b,${FAMILY}`, a)).statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)!.diskGb).toBe(50 + 81);
+    // The base family alone keeps the disk of before: max(VAST_DISK_GB, VAST_VIDEO_DISK_GB).
+    expect((await call("GET", "/api/estimate?video_models=true&video_families=wan22_5b", a)).statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)!.diskGb).toBe(80);
+    for (const [body, code] of [
+      [{ video_models: true, video_families: ["nope"] }, "unknown_family"],
+      [{ video_families: [FAMILY] }, "invalid_filter"],
+      [{ video_models: true, video_families: [FAMILY, FAMILY] }, "invalid_filter"],
+      [{ video_models: true, video_families: [FAMILY], video_model_url: "https://huggingface.co/o/r/resolve/main/m.safetensors" }, "invalid_model_link"], // config-lint: ok (test fixture)
+    ] as const) {
+      h = await fharness(fam(), { ready: false, cfg: { videoFamilies: [FAMILY] } });
+      const res = await post("/api/start", await admin(), { confirm: true, ...body });
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+      expect(res.json().error.code).toBe(code);
+      expect(h.vast.creates).toBe(0);
+    }
   });
 });

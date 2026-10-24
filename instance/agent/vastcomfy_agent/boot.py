@@ -101,7 +101,7 @@ class Boot:
 
     def profile(self):
         return load_profile(Path(self.cfg.repo_dir) / "instance" / "profiles" / f"{self.cfg.profile}.yaml",
-                            video_enabled=self.cfg.video_enabled)
+                            video_enabled=self.cfg.video_enabled, video_families=tuple(self.cfg.video_families))
 
 
 def cmd_write_env(environ, now, schema_path=None) -> int:
@@ -154,8 +154,9 @@ def cmd_install_models(b: Boot) -> int:
     comfy_dir = Path(b.cfg.comfy_dir)
     try:
         profile = b.profile()
-        # An image-only boot (INCLUDE_VIDEO_MODELS false) neither downloads nor counts the video files.
-        wanted = boot_models(profile, b.cfg.include_video_models)
+        # An image-only boot (INCLUDE_VIDEO_MODELS false) neither downloads nor counts the video files; one that
+        # includes video downloads those of the chosen families only (VIDEO_BOOT_FAMILIES, default the base section).
+        wanted = boot_models(profile, b.cfg.include_video_models, tuple(b.cfg.video_boot_families))
         link = None
         if b.cfg.include_video_models and b.cfg.video_model_url:
             # A linked diffusion model replaces the pinned one for this boot (validated again here, size from a HEAD).
@@ -163,6 +164,8 @@ def cmd_install_models(b: Boot) -> int:
             spec, link = linked_spec(b.cfg.video_model_url, profile, hosts=b.cfg.video_model_link_hosts, client=link_client,
                                      max_bytes=b.cfg.video_model_link_max_bytes)
             slot = diffusion_slot(profile)
+            if slot not in wanted:
+                raise ProfileError("VIDEO_MODEL_URL replaces the base video section's model, which this boot does not include")
             wanted = tuple(spec if m == slot else m for m in wanted)
         else:
             clear_active(Path(b.cfg.state_dir))
@@ -270,7 +273,7 @@ def cmd_verify_nodes(b: Boot) -> int:
     """After the ComfyUI restart answers: every node class the profile provides must be registered, so a node
     whose import failed (e.g. a missing Python dependency) never ends in a healthy-looking `ready`."""
     try:
-        names = boot_node_classes(b.profile(), b.cfg.include_video_models)
+        names = boot_node_classes(b.profile(), b.cfg.include_video_models, tuple(b.cfg.video_boot_families))
         active = read_active(Path(b.cfg.state_dir)) if b.cfg.include_video_models else None
         loader = None if active is None else required_loader(active.name)
         if loader is not None and loader not in names:

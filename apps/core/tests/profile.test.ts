@@ -88,6 +88,17 @@ describe("loadProfile", () => {
       "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
       "split_files/vae/wan2.2_vae.safetensors",
       "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      // The 14B family's own files (pinned 2026-10-24; the text encoder above is shared).
+      "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+      "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+      "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+      "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+      "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "split_files/vae/wan_2.1_vae.safetensors",
+      "calisthenics_moves_high_noise.safetensors", // its extra LoRA
     ]);
     expect(loadProfile(shipped).video).toBeNull(); // VIDEO_ENABLED unset
     expect(loadProfile(shipped).videoFiles).toEqual(["wan2.2_ti2v_5B_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "wan2.2_vae.safetensors"]);
@@ -315,5 +326,38 @@ describe("styles in the profile", () => {
     const out = buildPrompt(profile, template, { prompt: "x", preset: "preview", size: "1:1", seed: 1, style });
     expect(out["style_lora"]!.inputs["strength_model"]).toBe(0.6);
     expect(out["4"]!.inputs["model"]).toEqual(["style_lora", 0]);
+  });
+});
+
+describe("video families in the profile", () => {
+  /** The shipped profile without the 14B family's own pins (as before the owner pinned them on 2026-10-24). */
+  const unpinned14 = () =>
+    writeProfile((d) => {
+      const own = new Set((d.video_families[0].models as Doc[]).map((m) => m.file).filter((f) => !(d.video.models as Doc[]).some((v) => v.file === f)));
+      d.models = (d.models as Doc[]).filter((e) => !own.has(e.file.split("/").pop()));
+    });
+
+  it("names every family's files by id, also while video is off", () => {
+    const p = loadProfile(shipped);
+    expect(p.videoFamilies).toEqual([]);
+    expect(Object.keys(p.videoFamilyFiles)).toEqual(["wan22_5b", "wan22_a14b"]);
+    expect(p.videoFamilyFiles["wan22_5b"]).toEqual(p.videoFiles);
+    expect(p.videoFamilyFiles["wan22_a14b"]).toHaveLength(11);
+  });
+
+  it("VIDEO_ENABLED alone switches on the base family only; VIDEO_FAMILIES adds a pinned family after it", () => {
+    expect(loadProfile(shipped, { videoEnabled: true }).videoFamilies.map((f) => [f.id, f.base])).toEqual([["wan22_5b", true]]);
+    const base = loadProfile(shipped, { videoEnabled: true }).videoFamilies[0]!;
+    expect(base.text).toBe(base.image);
+    expect(base.title).toBe("Fast (5B)");
+    const both = loadProfile(shipped, { videoEnabled: true, videoFamilies: ["wan22_a14b"] });
+    expect(both.videoFamilies.map((f) => f.id)).toEqual(["wan22_5b", "wan22_a14b"]);
+    expect(both.video?.workflow).toBe("video-ti2v.json"); // the base section is unchanged
+    expect(loadProfile(shipped, { videoEnabled: false, videoFamilies: ["wan22_a14b"] }).videoFamilies).toEqual([]);
+  });
+
+  it("refuses VIDEO_FAMILIES naming an unpinned or unknown family", () => {
+    expect(() => loadProfile(unpinned14(), { videoEnabled: true, videoFamilies: ["wan22_a14b"] })).toThrow(/wan2\.2_t2v_high_noise_14B_fp8_scaled\.safetensors is not listed in models/);
+    expect(() => loadProfile(shipped, { videoEnabled: true, videoFamilies: ["wan22_x"] })).toThrow(/unknown video family: wan22_x/);
   });
 });

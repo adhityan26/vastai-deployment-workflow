@@ -243,3 +243,61 @@ def test_video_models_passes_a_link_and_refuses_other_body_members(env):
     assert client.post("/video-models", headers=AUTH, json={}).status_code == 202 and deps.video.url is None
     assert client.post("/video-models", headers=AUTH, json={"url": 5}).status_code == 422
     assert client.post("/video-models", headers=AUTH, json={"path": "/etc/passwd"}).status_code == 422
+
+
+class FakeFamilies(FakeVideo):
+    def __init__(self, refuse=None):
+        super().__init__(refuse)
+        from vastcomfy_agent.models import VideoExpertInfo, VideoFamilyStatus
+
+        self.family_status = VideoFamilyStatus(id="big", state="downloading", boot=False, bytes_done=0, bytes_total=9,
+                                               experts=[VideoExpertInfo(mode="text", slot="high", file="h.gguf", linked=True)])
+        self.asked = None
+
+    def request(self, **kw):
+        self.asked = kw
+        if self.refuse is not None:
+            raise self.refuse
+        return self.family_status
+
+
+def test_video_models_passes_a_family_its_mode_and_both_links(env):
+    client, deps, _ = env
+    deps.video = FakeFamilies()
+    links = {"high": "https://huggingface.co/o/r/resolve/main/h.gguf", "low": "https://huggingface.co/o/r/resolve/main/l.gguf"}
+    res = client.post("/video-models", headers=AUTH, json={"family": "big", "mode": "text", "links": links})
+    assert res.status_code == 202 and res.json()["id"] == "big" and res.json()["experts"][0]["file"] == "h.gguf"
+    assert deps.video.asked == {"family": "big", "url": None, "mode": "text", "links": links}
+    assert client.post("/video-models", headers=AUTH, json={"family": "big"}).status_code == 202
+    assert deps.video.asked == {"family": "big", "url": None, "mode": None, "links": None}
+    for bad in ({"family": "big", "mode": "video"}, {"family": 5}, {"family": "x" * 33}, {"family": "big", "links": {"a": 1}},
+                {"family": "big", "links": {str(i): "u" for i in range(5)}}):
+        assert client.post("/video-models", headers=AUTH, json=bad).status_code == 422, bad
+
+
+def test_video_models_family_refusals_keep_their_status_and_code(env):
+    from vastcomfy_agent.video_models import VideoModelsRefused
+
+    client, deps, _ = env
+    deps.video = FakeFamilies(VideoModelsRefused(409, "video_download_busy", "busy"))
+    res = client.post("/video-models", headers=AUTH, json={"family": "big"})
+    assert res.status_code == 409 and res.json()["detail"] == {"code": "video_download_busy", "message": "busy"}
+
+
+def test_status_carries_the_video_families_only_when_there_are_some(tmp_path, make_cfg):
+    from vastcomfy_agent.models import VideoFamilyStatus
+
+    clock = Clock()
+    fam = VideoFamilyStatus(id="big", state="ready", boot=False, bytes_done=1, bytes_total=1)
+    builder = StatusBuilder(state_dir=tmp_path / "s", states=StateStore(tmp_path / "s", clock), deadlines=DeadlineStore(tmp_path / "s", clock),
+                            comfy=FakeComfy(), gpu_reader=lambda: None, profile="image", commit="c", now=clock,
+                            video_families=lambda: [fam])
+    assert builder.build().video_families == [fam]
+    builder._video_families = lambda: []
+    assert builder.build().video_families is None
+
+    def boom():
+        raise OSError("disk")
+
+    builder._video_families = boom
+    assert builder.build().video_families is None

@@ -134,6 +134,21 @@ Also UNVERIFIED: the on-demand download on a real instance (speed beside running
 it may well be refused as `disk_insufficient`), ComfyUI listing the new files without a restart, the price of the
 larger disk, and the slow-download guard on a boot with the video files (about 18 GB more).
 
+**Second video family: 14B, 4 steps (branch `feat/video-14b`, 2026-10-23, pushed, NOT merged).** The profile's
+`video_families:` lists `wan22_a14b` (two experts, fp8, the official lightx2v 4-step LoRAs, 4 steps, cfg 1) with a
+workflow per mode (`video-14b-t2v.json`, `video-14b-i2v.json`). Switched on by `VIDEO_FAMILIES=wan22_a14b` (apps and
+instance, besides `VIDEO_ENABLED=true`); its nine own files were pinned by the owner on 2026-10-24 (the text
+encoder is shared with the 5B). The Start dialog chooses which families a boot downloads
+(`video_families`, `VIDEO_BOOT_FAMILIES`; the disk follows the pins: 120 GB for 14B alone, 131 GB with both, at
+`VAST_DISK_GB=50`), the Video tool has a
+model choice, per-family download and per-expert links (both of a mode together; GGUF swaps that expert's loader).
+An optional extra LoRA per job (profile `extra_loras:`; shipped: "Calisthenic moves", a
+high-noise-only LoRA pinned 2026-10-24 and downloaded with the family) is inserted after the 4-step LoRA of each
+branch it has a file for, strength 0 to 1 (default 0.6); its trigger words are empty until the owner fills them from
+the model card. The 5B behaviour, its API fields and its tests are unchanged. UNVERIFIED (also): the extra LoRA's fit
+with text/image to video, its stacking with the 4-step LoRAs and its strength; the 14B graphs, recipe values,
+16 fps, VRAM, time per clip, GGUF support of the pinned fork for these experts. Runbook: README "Video families".
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)

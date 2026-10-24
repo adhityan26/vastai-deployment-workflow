@@ -197,14 +197,22 @@ def guarded_client(link_hosts: list[str], domains: list[str], timeout_s: float) 
 def linked_spec(url: object, profile: Profile, *, hosts: list[str], client: httpx.Client, max_bytes: int) -> tuple[ModelSpec, ModelLink]:
     """The `models` entry a link stands for: the diffusion slot's dest, the link's repo / revision / file and the size
     its host reports (capped). LinkError when the link, the profile or the host refuses."""
-    link = parse_link(url, hosts)
     slot = diffusion_slot(profile)
     if slot is None:
+        parse_link(url, hosts)
         raise LinkError("invalid_model_link", "the profile's video section has no diffusion model to replace")
-    if any(m.file.rsplit("/", 1)[-1] == link.name for m in profile.models):
-        raise LinkError("model_link_name_clash", "the linked file has the name of a pinned model; it would overwrite it")
+    return expert_spec(url, profile, slot.dest, hosts=hosts, client=client, max_bytes=max_bytes)
+
+
+def expert_spec(url: object, profile: Profile, dest: str, *, hosts: list[str], client: httpx.Client, max_bytes: int,
+                taken: tuple[str, ...] = ()) -> tuple[ModelSpec, ModelLink]:
+    """The `models` entry a link to a diffusion model stands for, stored in `dest`: refused when its name is that of
+    a pinned model or one of `taken` (other linked files it would overwrite); the size from a HEAD, capped."""
+    link = parse_link(url, hosts)
+    if any(m.file.rsplit("/", 1)[-1] == link.name for m in profile.models) or link.name in taken:
+        raise LinkError("model_link_name_clash", "the linked file has the name of a pinned or another linked model; it would overwrite it")
     size = probe_size(client, link, max_bytes)
-    return ModelSpec(file=link.file, repo=link.repo, revision=link.revision, dest=slot.dest, size_bytes=size), link
+    return ModelSpec(file=link.file, repo=link.repo, revision=link.revision, dest=dest, size_bytes=size), link
 
 
 def link_path(state_dir: Path) -> Path:
@@ -232,5 +240,52 @@ def write_active(state_dir: Path, link: ActiveLink) -> None:
 def clear_active(state_dir: Path) -> None:
     try:
         link_path(state_dir).unlink()
+    except FileNotFoundError:
+        pass
+
+
+# ---- linked experts of a video family (state dir, video_links_<family>.json: {"<mode>.<slot>": ActiveLink}) ----
+
+_FAMILY_FILE_ID = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_LINK_KEY = re.compile(r"(text|image)\.[a-z][a-z0-9]{0,15}")
+
+
+def family_links_path(state_dir: Path, family: str) -> Path:
+    if not _FAMILY_FILE_ID.fullmatch(family):
+        raise ValueError("not a family id")
+    return Path(state_dir) / f"video_links_{family}.json"
+
+
+def _valid_active(link: ActiveLink) -> bool:
+    return bool(
+        isinstance(link.name, str) and _SEGMENT.fullmatch(link.name) is not None and any(link.name.endswith(s) for s in SUFFIXES)
+        and isinstance(link.dest, str) and _DEST.fullmatch(link.dest) is not None and isinstance(link.file, str)
+        and link.file.rsplit("/", 1)[-1] == link.name and isinstance(link.size_bytes, int) and link.size_bytes > 0
+        and re.fullmatch(r"[0-9a-f]{64}", link.sha256 or "")
+    )
+
+
+def read_family_links(state_dir: Path, family: str) -> dict[str, ActiveLink]:
+    """The family's linked experts by "<mode>.<slot>"; empty when there are none or the file is unusable."""
+    try:
+        raw = json.loads(family_links_path(state_dir, family).read_text())
+        links = {key: ActiveLink(**value) for key, value in raw.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+    if not all(_LINK_KEY.fullmatch(k) and _valid_active(v) for k, v in links.items()):
+        return {}
+    return links
+
+
+def write_family_links(state_dir: Path, family: str, links: dict[str, ActiveLink]) -> None:
+    if not links:
+        clear_family_links(state_dir, family)
+        return
+    atomic_write(family_links_path(state_dir, family), json.dumps({k: asdict(v) for k, v in sorted(links.items())}))
+
+
+def clear_family_links(state_dir: Path, family: str) -> None:
+    try:
+        family_links_path(state_dir, family).unlink()
     except FileNotFoundError:
         pass

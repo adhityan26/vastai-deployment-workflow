@@ -76,12 +76,13 @@ def build(
     idle = IdleWatcher(states, deadlines, now, cfg.idle_minutes, cfg.idle_warn_minutes)
     video = VideoModels(
         load_profile=lambda: load_profile(Path(cfg.repo_dir) / "instance" / "profiles" / f"{cfg.profile}.yaml",
-                                          video_enabled=cfg.video_enabled),
+                                          video_enabled=cfg.video_enabled, video_families=tuple(cfg.video_families)),
         comfy=comfy,
         comfy_dir=Path(cfg.comfy_dir),
         free_bytes_fn=free_bytes_of,
         disk_margin_mb=cfg.disk_margin_mb,
         include_at_boot=cfg.include_video_models,
+        boot_families=tuple(cfg.video_boot_families),
         # The boot's own downloader settings; its own HTTP client, as it runs beside the agent's requests.
         make_downloader=lambda on_progress: Downloader(
             hf_base=cfg.hf_base_url, token=cfg.hf_token, client=httpx.Client(timeout=cfg.http_timeout_s),
@@ -113,6 +114,7 @@ def build(
         commit=cfg.repo_commit,
         now=now,
         video=video.view,
+        video_families=video.families_view,
     )
     workflows = WorkflowStore(Path(cfg.workflows_dir), cfg.workflow_max_bytes)
     deps = Deps(cfg=cfg, states=states, deadlines=deadlines, status=status, flow=flow, workflows=workflows, video=video)

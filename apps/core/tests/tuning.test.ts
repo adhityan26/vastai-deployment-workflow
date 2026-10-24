@@ -252,6 +252,12 @@ describe("style defaults", () => {
       "Qwen2.1_Anything2RealCharacters.safetensors", "RealESRGAN_x4plus.safetensors",
       // The video files: never downloaded by an image-only boot (VIDEO_ENABLED off or Include video models unticked).
       "wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_vae.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      // The 14B family's own files: never downloaded unless VIDEO_FAMILIES names it and a boot includes it.
+      "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+      "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+      "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "wan_2.1_vae.safetensors", "calisthenics_moves_high_noise.safetensors",
     ]);
     // The three generate samples pre-fill guidance 3 and a negative prompt (UNVERIFIED on this model); the edit
     // samples only a negative prompt.

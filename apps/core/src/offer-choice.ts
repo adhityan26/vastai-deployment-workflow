@@ -21,6 +21,8 @@ export interface StartFilters {
   videoModels?: true;
   /** A checked link (canonical resolve URL) replacing the video diffusion model; set by the route, never parsed here. */
   videoModelUrl?: string;
+  /** The video families whose files the boot downloads (VIDEO_BOOT_FAMILIES); set by the route, checked against the enabled ones. */
+  videoFamilies?: readonly string[];
 }
 
 export class StartFilterError extends Error {

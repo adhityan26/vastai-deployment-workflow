@@ -6,7 +6,7 @@ import { buildUpscalePrompt } from "./upscale.js";
 import { resolveTuning, type Tuning } from "./guidance.js";
 import { checkStyleReferences, resolveStyle, stylePrompt } from "./styles.js";
 import { decodeReferences, referenceLimits, type ReferenceType } from "./references.js";
-import { VIDEO_OUTPUT_CLASS, buildVideoPrompt } from "./video.js";
+import { VIDEO_OUTPUT_CLASS, buildVideoPrompt, type VideoSpec } from "./video.js";
 
 export class GenerateTimeout extends Error {
   constructor(message = "generation timed out") {
@@ -279,6 +279,13 @@ export interface VideoDeps {
   clientId?: string;
   /** The instance's linked diffusion model (its plain file name) when it uses one instead of the pinned model. */
   diffusionFile?: string;
+  /**
+   * A video family other than the base section: its spec and workflow per mode (text without, image with a start
+   * image). When set, `profile.video` and `template` are not read.
+   */
+  family?: { text: { spec: VideoSpec; template: unknown }; image: { spec: VideoSpec; template: unknown } };
+  /** The instance's linked experts of the chosen family mode, by slot (all or none). */
+  links?: Readonly<Record<string, string>>;
 }
 
 export interface VideoRequest {
@@ -290,6 +297,9 @@ export interface VideoRequest {
   seed?: unknown;
   /** Optional base64 start image (image to video); absent or null is text to video. */
   image?: unknown;
+  /** Optional extra LoRA id of the family (absent or null: none) and its strength (absent: the entry's default). */
+  extra_lora?: unknown;
+  extra_lora_strength?: unknown;
 }
 
 /**
@@ -298,8 +308,7 @@ export interface VideoRequest {
  * workflow. Nothing leaves for the instance before every check has passed.
  */
 export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ promptId: string; startImage: boolean }> {
-  const spec = deps.profile.video;
-  if (spec === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
+  if (deps.family === undefined && deps.profile.video === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
   const seed = checkPromptAndSeed(deps.cfg, deps.random, { prompt: input.prompt, seed: input.seed });
   if (typeof input.size !== "string") throw new GenerateInputError("unknown_size", "size is not offered for video");
   if (typeof input.duration !== "string") throw new GenerateInputError("unknown_duration", "duration is not offered for video");
@@ -309,17 +318,34 @@ export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ pro
     size: input.size,
     duration: input.duration,
     ...(deps.diffusionFile === undefined ? {} : { diffusionFile: deps.diffusionFile }),
+    ...(deps.links === undefined ? {} : { links: deps.links }),
   };
   const wanted = input.image !== undefined && input.image !== null;
+  const mode = deps.family === undefined ? null : wanted ? deps.family.image : deps.family.text;
+  const spec = mode === null ? deps.profile.video! : mode.spec;
+  const template = mode === null ? deps.template : mode.template;
+  // The extra LoRA by its profile id only (nothing user-given reaches a file name); the strength is checked in buildVideoPrompt.
+  let extraLora: { id: string; strength: number } | undefined;
+  const loraId = input.extra_lora;
+  if (loraId !== undefined && loraId !== null) {
+    const found = typeof loraId === "string" ? spec.extraLoras.find((x) => x.id === loraId) : undefined;
+    if (found === undefined) throw new GenerateInputError(spec.extraLoras.length === 0 ? "extra_lora_unavailable" : "unknown_extra_lora", "extra_lora is not offered for this video model");
+    const strength = input.extra_lora_strength ?? found.strength;
+    if (typeof strength !== "number") throw new GenerateInputError("invalid_strength", "extra_lora_strength must be a number from 0 to 1");
+    extraLora = { id: found.id, strength };
+  } else if (input.extra_lora_strength !== undefined && input.extra_lora_strength !== null) {
+    throw new GenerateInputError("invalid_strength", "extra_lora_strength needs an extra_lora");
+  }
   // Exactly one start image, decoded and checked like a reference (anything but a base64 string is refused).
   const [image] = wanted ? decodeReferences([input.image], referenceLimits(deps.cfg)) : [];
   // Dry run with a placeholder name: size, duration and workflow mismatches surface before the upload.
-  buildVideoPrompt(spec, deps.template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
-  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, deps.template, fields), deps.clientId)).promptId, startImage: false };
+  if (extraLora !== undefined) Object.assign(fields, { extraLora });
+  buildVideoPrompt(spec, template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
+  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, template, fields), deps.clientId)).promptId, startImage: false };
   const kind = FILE_TYPES[image.type];
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
   const stored = await deps.comfy.uploadImage(`video-${token()}.${kind.ext}`, image.bytes, kind.contentType);
-  const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, deps.template, { ...fields, startImage: stored.name }), deps.clientId);
+  const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, template, { ...fields, startImage: stored.name }), deps.clientId);
   return { promptId, startImage: true };
 }
 

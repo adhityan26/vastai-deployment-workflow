@@ -247,6 +247,11 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
         "models/diffusion_models/", "models/text_encoders/", "models/vae/", "models/loras/", "models/upscale_models/",
         # the video files (pinned 2026-10-22): diffusion model, VAE, text encoder
         "models/diffusion_models/", "models/vae/", "models/text_encoders/",
+        # the 14B family's own files (pinned 2026-10-24): four experts, four 4-step LoRAs, its VAE
+        "models/diffusion_models/", "models/diffusion_models/", "models/diffusion_models/", "models/diffusion_models/",
+        "models/loras/", "models/loras/", "models/loras/", "models/loras/", "models/vae/",
+        # its extra LoRA (extra_loras:), downloaded with the family
+        "models/loras/",
     ]
     # An image-only boot (the default) downloads and disk-checks only these; the style LoRA and the upscale model add
     # about 0.39 GB to the 14.6 GB base.
@@ -256,7 +261,14 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
     # With video on and included, the boot adds the three video files (about 18.1 GB).
     on = load_profile(instance / "profiles" / "image.yaml", video_enabled=True)
     assert sum(m.size_bytes for m in boot_models(on, True)) == image_only + 9999658848 + 1409400960 + 6735906897
-    assert sum(m.size_bytes for m in profile.models) == image_only + 9999658848 + 1409400960 + 6735906897
+    # Its own files: 2 x 14293923632 + 2 x 14294742832 (experts), 4 x 1226977424 (LoRAs), 253815318 (VAE).
+    family_14b = 2 * 14293923632 + 2 * 14294742832 + 4 * 1226977424 + 253815318 + 153453560  # + the extra LoRA
+    assert family_14b == 62_492_511_502
+    assert sum(m.size_bytes for m in profile.models) == image_only + 9999658848 + 1409400960 + 6735906897 + family_14b
+    # The 14B family alone at boot: its own files and the shared text encoder, none of the 5B's own.
+    both = load_profile(instance / "profiles" / "image.yaml", video_enabled=True, video_families=("wan22_a14b",))
+    assert sum(m.size_bytes for m in boot_models(both, True, ("wan22_a14b",))) == image_only + 6735906897 + family_14b
+    assert sum(m.size_bytes for m in boot_models(both, True)) == image_only + 9999658848 + 1409400960 + 6735906897
     assert sum(m.size_bytes for m in profile.models) < profile.requires_disk_gb * 1024**3 // 2
     assert all(len(m.revision) == 40 for m in profile.models) and all(len(n.commit) == 40 for n in profile.nodes)
     for name in profile.workflows:
@@ -413,7 +425,8 @@ def test_the_shipped_image_profile_declares_the_gguf_loader_and_edit_classes():
     profile = load_profile(instance / "profiles" / "image.yaml")
     # Boot fails closed unless these are registered: the edit workflow needs the two Qwen-Image 2.1 nodes (S6).
     assert profile.provides_node_classes == ("UnetLoaderGGUF", "TextEncodeQwenImage21", "QwenImage21Cache")
-    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json", "video-ti2v.json")
+    assert profile.workflows == ("qwen-image-t2i.json", "qwen-image-edit.json", "image-upscale.json", "video-ti2v.json",
+                                 "video-14b-t2v.json", "video-14b-i2v.json")
 
 
 def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_another_model(tmp_path):
@@ -437,7 +450,9 @@ def test_the_styles_section_is_the_webs_business_and_a_style_lora_is_just_anothe
     path = tmp_path / "image.yaml"
     path.write_text(yaml.safe_dump(raw))
     without = load_profile(path)
-    assert all(m.dest != "models/loras/" for m in without.models)
+    # The only LoRAs left belong to a video family (never downloaded by an image boot).
+    family_loras = {m["file"] for f in raw["video_families"] for m in f["models"] if m["dest"] == "models/loras/"}
+    assert all(m.dest != "models/loras/" or PurePosixPath(m.file).name in family_loras for m in without.models)
     assert len(without.models) == len(shipped_profile.models) - 1
 
 
@@ -476,7 +491,8 @@ def test_the_face_swap_preset_ships_enabled_and_needs_no_model():
     profile = load_profile(shipped)
     # Nothing in models belongs to the preset: every models/loras entry is a lora style's file.
     lora_files = {s["lora"]["file"] for s in raw["styles"] if s.get("kind", "lora") == "lora"}
-    assert {m.file for m in profile.models if m.dest == "models/loras/"} == lora_files
+    family_loras = {m["file"] for f in raw["video_families"] for m in f["models"] if m["dest"] == "models/loras/"}
+    assert {m.file for m in profile.models if m.dest == "models/loras/" and PurePosixPath(m.file).name not in family_loras} == lora_files
 
 
 @pytest.mark.parametrize("change, message", [
@@ -615,11 +631,12 @@ def test_enabled_video_names_its_files_and_classes_and_a_boot_includes_them_only
     assert profile.provides_node_classes == image_classes
     assert boot_node_classes(profile, False) == image_classes
     image_only = boot_models(profile, False)
-    assert [m.file for m in image_only] == [m.file for m in profile.models[:-3]]
+    assert [m.file for m in image_only] == [m.file for m in profile.models[:5]]
     assert [m.file for m in video_model_specs(profile)] == [p["file"] for p in _video_pins(raw)]
     assert len(video_model_specs(profile)) == 3
-    # A boot that includes video downloads every file and also requires the video classes, once each.
-    assert boot_models(profile, True) == profile.models
+    # A boot that includes video downloads the base family's files too (not the 14B's) and also requires the video
+    # classes, once each.
+    assert boot_models(profile, True) == profile.models[:8]
     with_video = boot_node_classes(profile, True)
     assert with_video[:3] == image_classes and set(with_video[3:]) == set(raw["video"]["node_classes"])
     assert "SaveVideo" in with_video and len(set(with_video)) == len(with_video)
@@ -631,7 +648,7 @@ def test_with_video_off_its_pinned_files_are_never_downloaded_and_no_video_class
     profile = load_profile(_write_raw(tmp_path, raw))
     assert profile.video_enabled is False
     for include in (False, True):
-        assert boot_models(profile, include) == profile.models[:-3]
+        assert boot_models(profile, include) == profile.models[:5]
         assert boot_node_classes(profile, include) == profile.provides_node_classes
 
 

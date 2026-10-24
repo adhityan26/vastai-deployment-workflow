@@ -901,3 +901,83 @@ def test_video_enabled_without_its_pins_stops_the_boot(tmp_path, capsys):
     code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client([]),
                        free_bytes_fn=lambda p: 10**12)
     assert code == 12 and "is not listed in models" in capsys.readouterr().err
+
+
+# --- VIDEO_FAMILIES / VIDEO_BOOT_FAMILIES: a boot downloads the chosen families' files only ---
+
+FAMILY_PROFILE = """
+name: image
+requires: {vram_gb: 24, disk_gb: 40}
+nodes: []
+provides_node_classes: [UnetLoaderGGUF]
+models:
+  - {file: m.bin, repo: org/m, revision: r1, dest: models/x/, size_bytes: 10}
+  - {file: sub/b.bin, repo: org/v, revision: r1, dest: models/diffusion_models/, size_bytes: 10}
+  - {file: sub/v.bin, repo: org/v, revision: r1, dest: models/v/, size_bytes: 10}
+  - {file: sub/h.bin, repo: org/v, revision: r1, dest: models/diffusion_models/, size_bytes: 10}
+  - {file: sub/l.bin, repo: org/v, revision: r1, dest: models/diffusion_models/, size_bytes: 10}
+workflows: [flow.json, video.json, t.json, i.json]
+video:
+  id: small
+  workflow: video.json
+  models: [{file: b.bin, dest: models/diffusion_models/}, {file: v.bin, dest: models/v/}]
+  node_classes: [SaveVideo]
+video_families:
+  - id: big
+    title: Big
+    models: [{file: h.bin, dest: models/diffusion_models/}, {file: l.bin, dest: models/diffusion_models/}, {file: v.bin, dest: models/v/}]
+    node_classes: [SaveVideo, KSamplerAdvanced]
+    text: {workflow: t.json, experts: [{slot: high, file: h.bin}, {slot: low, file: l.bin}]}
+    image: {workflow: i.json, experts: [{slot: high, file: h.bin}, {slot: low, file: l.bin}]}
+"""
+
+
+def family_boot(tmp_path, **extra):
+    environ = prepared(tmp_path, VIDEO_ENABLED="true", INCLUDE_VIDEO_MODELS="true", **extra)
+    prof = tmp_path / "repo" / "instance" / "profiles"
+    prof.mkdir(parents=True, exist_ok=True)
+    (prof / "image.yaml").write_text(FAMILY_PROFILE)
+    ef = env_file(tmp_path)
+    run_boot(tmp_path, ["begin", "--env-file", ef], environ=environ)
+    return environ, ef
+
+
+@pytest.mark.parametrize("boot_families, files", [
+    ("", ["m.bin", "b.bin", "v.bin"]),
+    ("small", ["m.bin", "b.bin", "v.bin"]),
+    ("big", ["m.bin", "v.bin", "h.bin", "l.bin"]),
+    ("small,big", ["m.bin", "b.bin", "v.bin", "h.bin", "l.bin"]),
+])
+def test_install_models_downloads_the_chosen_families_files(tmp_path, boot_families, files):
+    environ, ef = family_boot(tmp_path, VIDEO_FAMILIES="big", VIDEO_BOOT_FAMILIES=boot_families)
+    seen = []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(seen),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 0
+    assert [p.rsplit("/", 1)[-1] for p in seen] == files
+
+
+def test_a_boot_family_that_is_not_switched_on_stops_the_boot(tmp_path, capsys):
+    environ, ef = family_boot(tmp_path, VIDEO_BOOT_FAMILIES="big")  # VIDEO_FAMILIES does not name it
+    seen = []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(seen),
+                       free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and seen == [] and "not on: big" in capsys.readouterr().err
+
+
+def test_verify_nodes_checks_the_chosen_familys_classes(tmp_path):
+    environ, ef = family_boot(tmp_path, VIDEO_FAMILIES="big", VIDEO_BOOT_FAMILIES="big")
+    states(tmp_path).set(State.DOWNLOADING)
+    seen = []
+    code, _ = run_boot(tmp_path, ["verify-nodes", "--env-file", ef], environ=environ,
+                       http_client=fake_comfy({"UnetLoaderGGUF", "SaveVideo", "KSamplerAdvanced"}, seen))
+    assert code == 0 and seen == [f"/object_info/{c}" for c in ("UnetLoaderGGUF", "SaveVideo", "KSamplerAdvanced")]
+
+
+def test_the_base_link_is_refused_when_the_boot_leaves_the_base_family_out(tmp_path, capsys):
+    environ, ef = family_boot(tmp_path, VIDEO_FAMILIES="big", VIDEO_BOOT_FAMILIES="big", VIDEO_MODEL_URL=LINK)
+    seen, linked = [], []
+    code, _ = run_boot(tmp_path, ["install-models", "--env-file", ef], environ=environ, http_client=counting_client(seen),
+                       link_client=link_client(linked), free_bytes_fn=lambda p: 10**12)
+    assert code == 12 and seen == [] and [m for m, _u in linked] == ["HEAD"]
+    assert "does not include" in capsys.readouterr().err

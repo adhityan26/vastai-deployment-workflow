@@ -134,6 +134,34 @@ export interface VideoInfo {
   /** The diffusion model in use (admins only): pinned, or linked (not integrity-pinned) with its sha256. */
   model: { file: string; linked: boolean; sha256: string | null } | null;
 }
+/** One linked or pinned diffusion expert of a video family mode (admins only). */
+export interface VideoExpertView { mode: "text" | "image"; slot: string; file: string; linked: boolean; sha256: string | null }
+/** An optional extra LoRA of a video family (profile data; its files are named for admins only). */
+export interface VideoExtraLoraView {
+  id: string;
+  title: string;
+  description: string;
+  modes: ("text" | "image")[];
+  strength: number;
+  trigger_words: string;
+}
+/** One video family to choose from (GET /api/state video_families; the base section first). */
+export interface VideoFamilyInfo {
+  id: string;
+  title: string;
+  /** The base section: its models and link are video's own (video.models, video.model). */
+  base: boolean;
+  sizes: Size[];
+  durations: VideoDurationInfo[];
+  download_bytes: number;
+  models: VideoModelsView | null;
+  /** The expert slots an admin may link per mode (both together); null for the base section. */
+  slots: { text: string[]; image: string[] } | null;
+  /** The experts in use (admins only; null for members and for the base section). */
+  experts: VideoExpertView[] | null;
+  /** The optional extra LoRAs (empty when the family has none). */
+  extra_loras: VideoExtraLoraView[];
+}
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
 export interface ApiState {
@@ -164,6 +192,8 @@ export interface ApiState {
   upscale: UpscaleInfo | null;
   /** Video (text to video, or image to video with one start image); null when the server does not offer it. */
   video: VideoInfo | null;
+  /** The video families to choose from (base first); null unless the server offers more than the base one. */
+  video_families: VideoFamilyInfo[] | null;
   guidance: GuidanceInfo | null;
   /** The Advanced section per mode (negative prompt, guidance). */
   advanced: AdvancedInfo;
@@ -373,6 +403,51 @@ function parseVideoModels(v: unknown): VideoModelsView | null {
   };
 }
 
+const FAMILY_ID = /^[a-z][a-z0-9_]{0,31}$/;
+const SLOT = /^[a-z][a-z0-9]{0,15}$/;
+const MAX_FAMILIES = 8;
+
+/** The video families of the state; null when missing, when video is off, or when anything in them is unusable. */
+function parseVideoFamilies(v: unknown, video: VideoInfo | null): VideoFamilyInfo[] | null {
+  if (video === null || !Array.isArray(v) || v.length < 2 || v.length > MAX_FAMILIES) return null;
+  const out: VideoFamilyInfo[] = [];
+  for (const f of v) {
+    if (!isObj(f) || typeof f["id"] !== "string" || !FAMILY_ID.test(f["id"]) || typeof f["title"] !== "string" || f["title"] === "" || f["title"].length > 40) return null;
+    // The size and duration lists are read like video's own (the same checks).
+    const shape = parseVideo({ ...f, max_bytes: video.max_bytes, max_pixels: video.max_pixels, types: video.types });
+    if (shape === null) return null;
+    const slotsRaw = f["slots"];
+    let slots: VideoFamilyInfo["slots"] = null;
+    if (slotsRaw !== null && slotsRaw !== undefined) {
+      const list = (x: unknown): string[] | null => (Array.isArray(x) && x.length >= 2 && x.length <= 4 && x.every((s) => typeof s === "string" && SLOT.test(s)) ? (x as string[]) : null);
+      const text = isObj(slotsRaw) ? list(slotsRaw["text"]) : null;
+      const image = isObj(slotsRaw) ? list(slotsRaw["image"]) : null;
+      if (text === null || image === null) return null;
+      slots = { text, image };
+    }
+    const experts = Array.isArray(f["experts"])
+      ? (f["experts"] as unknown[]).flatMap((e): VideoExpertView[] =>
+          isObj(e) && (e["mode"] === "text" || e["mode"] === "image") && typeof e["slot"] === "string" && SLOT.test(e["slot"]) &&
+          typeof e["file"] === "string" && e["file"] !== "" && e["file"].length <= 128
+            ? [{ mode: e["mode"], slot: e["slot"], file: e["file"], linked: e["linked"] === true, sha256: typeof e["sha256"] === "string" && /^[0-9a-f]{64}$/.test(e["sha256"]) ? e["sha256"] : null }]
+            : [],
+        )
+      : null;
+    const extraLoras = Array.isArray(f["extra_loras"])
+      ? (f["extra_loras"] as unknown[]).flatMap((e): VideoExtraLoraView[] => {
+          if (!isObj(e) || typeof e["id"] !== "string" || !FAMILY_ID.test(e["id"]) || typeof e["title"] !== "string" || e["title"] === "") return [];
+          const modes = Array.isArray(e["modes"]) ? (e["modes"] as unknown[]).filter((m): m is "text" | "image" => m === "text" || m === "image") : [];
+          const strength = num(e["strength"]);
+          if (modes.length === 0 || strength === null || strength < 0 || strength > 1) return [];
+          return [{ id: e["id"], title: e["title"], description: typeof e["description"] === "string" ? e["description"] : "", modes, strength, trigger_words: typeof e["trigger_words"] === "string" ? e["trigger_words"] : "" }];
+        })
+      : [];
+    out.push({ id: f["id"], title: f["title"], base: f["base"] === true, sizes: shape.sizes, durations: shape.durations, download_bytes: shape.download_bytes, models: shape.models, slots, experts, extra_loras: extraLoras });
+  }
+  if (out[0]?.base !== true || out.slice(1).some((f) => f.base || f.slots === null) || new Set(out.map((f) => f.id)).size !== out.length) return null;
+  return out;
+}
+
 function parseGuidance(v: unknown): GuidanceInfo | null {
   if (!isObj(v)) return null;
   const [min, max, step, def] = [num(v["min"]), num(v["max"]), num(v["step"]), num(v["default"])];
@@ -480,6 +555,7 @@ export function parseState(json: unknown): ApiState | null {
     styles: parseStyles(json["styles"]),
     upscale: parseUpscale(json["upscale"]),
     video: parseVideo(json["video"]),
+    video_families: parseVideoFamilies(json["video_families"], parseVideo(json["video"])),
     guidance: parseGuidance(json["guidance"]),
     advanced: parseAdvanced(json["advanced"]),
     menu: parseMenu(json["menu"]),
@@ -909,7 +985,9 @@ export function controls(s: ApiState | null, busy: boolean, jobPending: boolean)
     canEdit: s !== null && s.edit !== null && GENERATE_STATES.has(state) && !jobPending,
     canUpscale: s !== null && s.upscale !== null && GENERATE_STATES.has(state) && !jobPending,
     // Video also needs its model files on the instance (never a job that would only wait for them).
-    canVideo: s !== null && s.video !== null && s.video.models?.state === "ready" && GENERATE_STATES.has(state) && !jobPending,
+    canVideo:
+      s !== null && s.video !== null && GENERATE_STATES.has(state) && !jobPending &&
+      (s.video.models?.state === "ready" || (s.video_families ?? []).some((f) => f.models?.state === "ready")),
   };
 }
 
@@ -1300,9 +1378,65 @@ export function durationLabel(d: VideoDurationInfo): string {
   return d.name.includes(`${d.seconds} s`) ? d.name : `${d.name} (about ${d.seconds} s)`;
 }
 
-/** The job label, the way the server labels the same job. */
-export function videoLabel(size: string, duration: string, fromImage: boolean): string {
-  return `Video: ${size}, ${duration}${fromImage ? ", from an image" : ""}`;
+/** The job label, the way the server labels the same job (a family besides the base one adds its title). */
+export function videoLabel(size: string, duration: string, fromImage: boolean, family: string | null = null, lora: string | null = null): string {
+  return `Video: ${size}, ${duration}${family === null ? "" : `, ${family}`}${lora === null ? "" : `, ${lora}`}${fromImage ? ", from an image" : ""}`;
+}
+
+/** What the page says under the extra LoRA choice: its description, its trigger words (if known) and the caveat. */
+export function extraLoraNote(l: VideoExtraLoraView): string {
+  const words = l.trigger_words.trim() === "" ? "No trigger words are known for it yet." : `Trigger words: ${l.trigger_words}`;
+  return `${l.description === "" ? "" : `${l.description} `}${words} Untested with this 4-step model: results may vary.`;
+}
+
+/**
+ * The request members of an extra LoRA choice (none for "None"), with the strength checked (0 to 1) and the mode
+ * (text, or image when a start image is attached) one the LoRA is offered for.
+ */
+export function extraLoraMembers(l: VideoExtraLoraView | null, strengthText: string, fromImage: boolean): { members: Record<string, unknown> } | { error: string } {
+  if (l === null) return { members: {} };
+  const mode = fromImage ? "image" : "text";
+  if (!l.modes.includes(mode)) return { error: `${l.title} is not offered for ${mode} to video.` };
+  const text = strengthText.trim();
+  const strength = text === "" ? l.strength : Number(text);
+  if (!Number.isFinite(strength) || strength < 0 || strength > 1) return { error: "The LoRA strength must be a number from 0 to 1." };
+  return { members: { extra_lora: l.id, extra_lora_strength: strength } };
+}
+
+/**
+ * The video offer as the chosen family sees it: its sizes, durations, download size and model state in place of the
+ * base section's (the start image rules stay). The base family (or none) is the video offer itself.
+ */
+export function familyVideo(v: VideoInfo, families: VideoFamilyInfo[] | null, id: string | null): VideoInfo {
+  const f = families?.find((x) => x.id === id) ?? null;
+  if (f === null || f.base) return v;
+  return { ...v, sizes: f.sizes, durations: f.durations, download_bytes: f.download_bytes, models: f.models, model: null };
+}
+
+/** What an admin must know before linking a family's experts (next to the expert link inputs). */
+export const EXPERT_LINK_NOTICE =
+  "Expert links replace both diffusion experts of the chosen mode together (high noise and low noise): give both or " +
+  "none. NOT integrity-pinned or licence-checked: only link files you trust; Hugging Face file links only " +
+  "(.safetensors or .gguf). Whether the GGUF loader supports these models is UNVERIFIED.";
+
+/** The admin's linked experts of a family, one line (empty when none is linked). */
+export function expertsNote(f: VideoFamilyInfo): string {
+  const linked = (f.experts ?? []).filter((e) => e.linked);
+  if (linked.length === 0) return "";
+  return `Linked experts in use: ${linked.map((e) => `${e.mode} ${e.slot}: ${e.file}${e.sha256 === null ? "" : ` (sha256 ${e.sha256})`}`).join("; ")}. Not integrity-pinned.`;
+}
+
+/**
+ * The body of a family download: the family alone (its pinned files; any links are dropped), or with links for
+ * every expert slot of the mode. One-sided links are refused here already (the server refuses them too).
+ */
+export function familyDownloadBody(f: VideoFamilyInfo, mode: "text" | "image", links: Record<string, string>): { body: Record<string, unknown> } | { error: string } {
+  const slots = f.slots?.[mode] ?? [];
+  const given = slots.filter((s) => (links[s] ?? "").trim() !== "");
+  if (given.length === 0) return { body: { family: f.id } };
+  if (given.length !== slots.length) return { error: `Give a link for every expert (${slots.join(" and ")}), or none.` };
+  if (slots.some((s) => links[s]!.trim().length > MODEL_LINK_MAX_CHARS)) return { error: "A link is too long." };
+  return { body: { family: f.id, mode, links: Object.fromEntries(slots.map((s) => [s, links[s]!.trim()])) } };
 }
 
 /** What an admin must know before linking a model (shown next to both link inputs and with a linked model in use). */

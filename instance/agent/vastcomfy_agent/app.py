@@ -8,7 +8,9 @@ from .config import Config
 from .deadlines import DeadlineStore, ExtendError
 from .destroy_flow import DestroyFlow
 from .files import read_json
-from .models import DestroyRequest, ExtendRequest, ExtendResponse, Status, VideoModelsRequest, VideoModelsStatus
+from .models import (
+    DestroyRequest, ExtendRequest, ExtendResponse, Status, VideoFamilyStatus, VideoModelsRequest, VideoModelsStatus,
+)
 from .paths import StatePaths
 from .state import InvalidTransition, State, StateStore
 from .status import StatusBuilder
@@ -83,25 +85,30 @@ def create_app(deps: Deps) -> FastAPI:
         return {"accepted": True}
 
     @app.post(
-        "/video-models", status_code=202, response_model=VideoModelsStatus, dependencies=guarded,
+        "/video-models", status_code=202, response_model=VideoModelsStatus | VideoFamilyStatus, dependencies=guarded,
         responses={
-            404: {"description": "No enabled video section (code video_unavailable)"},
+            404: {"description": "No enabled video section or family (code video_unavailable)"},
             400: {"description": "A refused model link (codes invalid_model_link, model_link_host_not_allowed, "
                                  "model_link_unsupported_type, model_link_name_clash)"},
-            409: {"description": "Not now: the instance is not ready, ComfyUI lacks the video node classes, the disk "
-                                 "is too small, or the link's host refused (codes not_ready, video_nodes_missing, "
+            409: {"description": "Not now: the instance is not ready, another video download runs, ComfyUI lacks the "
+                                 "video node classes, the disk is too small, or the link's host refused (codes "
+                                 "not_ready, video_download_busy, video_nodes_missing, video_gguf_loader_missing, "
                                  "disk_insufficient, model_link_too_large, model_link_unreachable, "
                                  "model_link_redirect_not_allowed)"},
             503: {"description": "ComfyUI could not be asked (code comfy_unavailable)"},
         },
     )
-    def start_video_models(body: VideoModelsRequest | None = None) -> VideoModelsStatus:
+    def start_video_models(body: VideoModelsRequest | None = None) -> VideoModelsStatus | VideoFamilyStatus:
         """Download the missing video model files in the background (single-flight); the progress is in /status.
-        `url`: a Hugging Face .safetensors link that replaces the diffusion model (NOT integrity-pinned)."""
+        `url`: a Hugging Face .safetensors or .gguf link that replaces the base section's diffusion model; `family`
+        another enabled video family, with `mode` and `links` (every expert slot of the mode) replacing its experts.
+        Links are NOT integrity-pinned."""
         if deps.video is None:
             raise HTTPException(status_code=404, detail={"code": "video_unavailable", "message": "video is not set up"})
         try:
-            return deps.video.start(body.url if body is not None else None)
+            if body is None or body.family is None:
+                return deps.video.start(body.url if body is not None else None)
+            return deps.video.request(family=body.family, url=body.url, mode=body.mode, links=body.links)
         except VideoModelsRefused as err:
             raise HTTPException(status_code=err.status, detail={"code": err.code, "message": err.message}) from None
 

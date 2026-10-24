@@ -91,6 +91,19 @@ class GenerateSpec:
 
 
 @dataclass(frozen=True)
+class VideoFamilySpec:
+    """One of the profile's `video_families:` (the web app owns the rest: apps/core/src/video.ts)."""
+    id: str
+    title: str
+    # VIDEO_ENABLED and listed in VIDEO_FAMILIES (then every file is pinned).
+    enabled: bool
+    models: tuple[str, ...]
+    node_classes: tuple[str, ...]
+    # (mode, slot, file): the diffusion files of a mode an admin may replace with links (all of a mode together).
+    experts: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     requires_vram_gb: int
@@ -106,6 +119,9 @@ class Profile:
     # off (VIDEO_ENABLED false): a boot leaves those files out unless video is on and the boot includes it.
     video_models: tuple[str, ...] = ()
     video_node_classes: tuple[str, ...] = ()
+    # The base section's family id (`video: id:`), and every other family, on or off.
+    video_base_id: str = "standard"
+    video_families: tuple[VideoFamilySpec, ...] = ()
 
 
 def _relative(value: str, what: str) -> str:
@@ -203,10 +219,145 @@ def _parse_node_classes(raw: object, what: str = "provides_node_classes") -> tup
 
 
 _VIDEO_MODELS_MAX = 8
+_FAMILY_MODELS_MAX = 16
+_FAMILIES_MAX = 8
+_FAMILY_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_SLOT_RE = re.compile(r"[a-z][a-z0-9]{0,15}")
+_EXPERTS_MIN, _EXPERTS_MAX = 2, 4
+_DEFAULT_BASE_ID = "standard"
+_DIFFUSION_FOLDER = "models/diffusion_models"
+_MODES = ("text", "image")
 
 
 def _dest_folder(dest: str) -> str:
     return dest.rstrip("/")
+
+
+def _parse_files(raw: object, what: str, max_items: int) -> list[tuple[str, str]]:
+    if not isinstance(raw, list) or not raw or len(raw) > max_items:
+        raise ProfileError(f"{what} models must be a non-empty list of at most {max_items} entries")
+    wanted: list[tuple[str, str]] = []
+    for item in raw:
+        item = _mapping(item, f"{what} model")
+        name = _relative(_required(item.get("file"), f"{what} model file"), f"{what} model file")
+        if "/" in name:
+            raise ProfileError(f"{what} model file must be a plain file name: {name!r}")
+        dest = _relative(_required(item.get("dest"), f"{what} model dest"), f"{what} model dest")
+        wanted.append((name, dest))
+    return wanted
+
+
+def _check_pinned(wanted: list[tuple[str, str]], models: list[ModelSpec], what: str) -> None:
+    for name, dest in wanted:
+        entry = next((m for m in models if PurePosixPath(m.file).name == name), None)
+        if entry is None:
+            raise ProfileError(f"{what} model {name} is not listed in models (pin it with scripts/pin_model.py)")
+        if _dest_folder(entry.dest) != _dest_folder(dest):
+            raise ProfileError(f"{what} model {name} must have dest {_dest_folder(dest)}/")
+
+
+def _family_id(value: object, what: str) -> str:
+    if not isinstance(value, str) or not _FAMILY_ID_RE.fullmatch(value):
+        raise ProfileError(f"{what} id must be lower case letters, digits and _ (at most 32): {value!r}")
+    return value
+
+
+def _base_id(raw: object) -> str:
+    if raw is None:
+        return _DEFAULT_BASE_ID
+    video = _mapping(raw, "video")
+    return _DEFAULT_BASE_ID if video.get("id") is None else _family_id(video.get("id"), "video")
+
+
+_EXTRA_LORAS_MAX = 8
+_LORA_FOLDER = "models/loras"
+
+
+def _check_extra_loras(raw: object, files: list[tuple[str, str]], what: str) -> None:
+    """The part of `extra_loras:` that decides downloads: each entry's files are LoRAs of the family's own `models`
+    (downloaded with the family, never on their own). The web app validates the rest."""
+    if raw is None:
+        return
+    if not isinstance(raw, list) or len(raw) > _EXTRA_LORAS_MAX:
+        raise ProfileError(f"{what} extra_loras must be a list of at most {_EXTRA_LORAS_MAX} entries")
+    ids: list[str] = []
+    for item in raw:
+        entry = _mapping(item, f"{what} extra LoRA")
+        lid = _family_id(entry.get("id"), f"{what} extra LoRA")
+        if lid in ids:
+            raise ProfileError(f"{what} extra LoRA ids must be unique")
+        ids.append(lid)
+        sides = [s for s in ("high", "low") if s in entry]
+        if not sides:
+            raise ProfileError(f"{what} extra LoRA {lid} needs a high or a low file")
+        for side in sides:
+            name = _mapping(entry[side], f"{what} extra LoRA {lid} {side}").get("file")
+            dest = next((d for n, d in files if n == name), None)
+            if dest is None:
+                raise ProfileError(f"{what} extra LoRA {lid} {side} file must be one of the family's models")
+            if _dest_folder(dest) != _LORA_FOLDER:
+                raise ProfileError(f"{what} extra LoRA {lid} {side} file must be a LoRA ({_LORA_FOLDER}/)")
+
+
+def _parse_families(
+    raw: object, models: list[ModelSpec], workflows: tuple[str, ...], video_enabled: bool, wanted_ids: tuple[str, ...],
+    base_id: str,
+) -> tuple[VideoFamilySpec, ...]:
+    """Every family of `video_families:`, validated also while off; on when VIDEO_ENABLED and VIDEO_FAMILIES lists it
+    (then every file must be pinned). An id in VIDEO_FAMILIES that names no family is refused (the base id is fine)."""
+    items = [] if raw is None else raw
+    if not isinstance(items, list) or len(items) > _FAMILIES_MAX:
+        raise ProfileError(f"video_families must be a list of at most {_FAMILIES_MAX} families")
+    families: list[VideoFamilySpec] = []
+    for item in items:
+        fam = _mapping(item, "video family")
+        fid = _family_id(fam.get("id"), "video family")
+        what = f"video family {fid}"
+        if "enabled" in fam:
+            raise ProfileError(f"{what}: `enabled:` is not read from the profile: list the id in VIDEO_FAMILIES in .env")
+        if fid == base_id or any(f.id == fid for f in families):
+            raise ProfileError(f"video family ids must be unique (also against the video section's id): {fid}")
+        title = fam.get("title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 40:
+            raise ProfileError(f"{what} title must be a short non-empty name")
+        files = _parse_files(fam.get("models"), what, _FAMILY_MODELS_MAX)
+        classes = _parse_node_classes(fam.get("node_classes"), f"{what} node_classes")
+        experts: list[tuple[str, str, str]] = []
+        for mode in _MODES:
+            spec = _mapping(fam.get(mode), f"{what} {mode}")
+            workflow = spec.get("workflow")
+            if not isinstance(workflow, str) or not NAME_RE.fullmatch(workflow):
+                raise ProfileError(f"{what} {mode} workflow is not a valid workflow name: {workflow!r}")
+            if workflow not in workflows:
+                raise ProfileError(f"{what} {mode} workflow {workflow} is not listed in workflows")
+            raw_experts = spec.get("experts")
+            if not isinstance(raw_experts, list) or not _EXPERTS_MIN <= len(raw_experts) <= _EXPERTS_MAX:
+                raise ProfileError(f"{what} {mode} experts must list {_EXPERTS_MIN} to {_EXPERTS_MAX} diffusion models")
+            slots: list[str] = []
+            for e in raw_experts:
+                e = _mapping(e, f"{what} {mode} expert")
+                slot, file = e.get("slot"), e.get("file")
+                if not isinstance(slot, str) or not _SLOT_RE.fullmatch(slot):
+                    raise ProfileError(f"{what} {mode} expert slot must be a short lower case name")
+                if slot in slots:
+                    raise ProfileError(f"{what} {mode} expert slots must be unique")
+                slots.append(slot)
+                dest = next((d for n, d in files if n == file), None)
+                if dest is None:
+                    raise ProfileError(f"{what} {mode} expert {slot} must name one of the family's models")
+                if _dest_folder(dest) != _DIFFUSION_FOLDER:
+                    raise ProfileError(f"{what} {mode} expert {slot} must be a diffusion model ({_DIFFUSION_FOLDER}/)")
+                experts.append((mode, slot, file))
+        _check_extra_loras(fam.get("extra_loras"), files, what)
+        enabled = video_enabled and fid in wanted_ids
+        if enabled:
+            _check_pinned(files, models, what)
+        families.append(VideoFamilySpec(id=fid, title=title, enabled=enabled, models=tuple(n for n, _ in files),
+                                        node_classes=classes, experts=tuple(experts)))
+    unknown = [i for i in wanted_ids if i != base_id and not any(f.id == i for f in families)]
+    if unknown:
+        raise ProfileError(f"VIDEO_FAMILIES names an unknown video family: {', '.join(unknown)}")
+    return tuple(families)
 
 
 def _parse_video(
@@ -227,28 +378,14 @@ def _parse_video(
         raise ProfileError(f"video workflow is not a valid workflow name: {workflow!r}")
     if workflow not in workflows:
         raise ProfileError(f"video workflow {workflow} is not listed in workflows")
-    files = video.get("models")
-    if not isinstance(files, list) or not files or len(files) > _VIDEO_MODELS_MAX:
-        raise ProfileError(f"video models must be a non-empty list of at most {_VIDEO_MODELS_MAX} entries")
-    wanted: list[tuple[str, str]] = []
-    for item in files:
-        item = _mapping(item, "video model")
-        name = _relative(_required(item.get("file"), "video model file"), "video model file")
-        if "/" in name:
-            raise ProfileError(f"video model file must be a plain file name: {name!r}")
-        dest = _relative(_required(item.get("dest"), "video model dest"), "video model dest")
-        wanted.append((name, dest))
+    _base_id(video)
+    wanted = _parse_files(video.get("models"), "video", _VIDEO_MODELS_MAX)
     classes = _parse_node_classes(video.get("node_classes"), "video node_classes")
     names = tuple(name for name, _ in wanted)
     if not enabled:
         # Still named: a boot never downloads the video files while video is off, even once they are pinned.
         return False, names, classes
-    for name, dest in wanted:
-        entry = next((m for m in models if PurePosixPath(m.file).name == name), None)
-        if entry is None:
-            raise ProfileError(f"video model {name} is not listed in models (pin it with scripts/pin_model.py)")
-        if _dest_folder(entry.dest) != _dest_folder(dest):
-            raise ProfileError(f"video model {name} must have dest {_dest_folder(dest)}/")
+    _check_pinned(wanted, models, "video")
     return True, names, classes
 
 
@@ -289,8 +426,9 @@ def _check_styles(raw) -> None:
                 raise ProfileError(f"style {name}: references labels must be at most max non-empty strings")
 
 
-def load_profile(path: Path, video_enabled: bool = False) -> Profile:
-    """The profile; `video_enabled` is VIDEO_ENABLED (the video section is validated either way)."""
+def load_profile(path: Path, video_enabled: bool = False, video_families: tuple[str, ...] | list[str] = ()) -> Profile:
+    """The profile; `video_enabled` is VIDEO_ENABLED and `video_families` VIDEO_FAMILIES (every video section is
+    validated either way)."""
     try:
         raw = yaml.safe_load(Path(path).read_text())
         models = []
@@ -313,7 +451,10 @@ def load_profile(path: Path, video_enabled: bool = False) -> Profile:
         _check_styles(raw.get("styles"))
         workflows = tuple(_relative(w, "workflow") for w in raw.get("workflows", []))
         declared = _parse_node_classes(raw.get("provides_node_classes"))
+        wanted_families = tuple(video_families)
         video_enabled, video_files, video_classes = _parse_video(raw.get("video"), models, workflows, video_enabled)
+        base_id = _base_id(raw.get("video"))
+        families = _parse_families(raw.get("video_families"), models, workflows, video_enabled, wanted_families, base_id)
         return Profile(
             name=_required(raw["name"], "name"),
             requires_vram_gb=int(raw["requires"]["vram_gb"]),
@@ -326,6 +467,8 @@ def load_profile(path: Path, video_enabled: bool = False) -> Profile:
             video_enabled=video_enabled,
             video_models=video_files,
             video_node_classes=video_classes,
+            video_base_id=base_id,
+            video_families=families,
         )
     except ProfileError as exc:
         raise ProfileError(f"{path}: {exc}") from None
@@ -342,18 +485,57 @@ def video_model_specs(profile: Profile) -> tuple[ModelSpec, ...]:
     return tuple(m for m in profile.models if PurePosixPath(m.file).name in profile.video_models)
 
 
-def boot_models(profile: Profile, include_video: bool) -> tuple[ModelSpec, ...]:
-    """What a boot downloads: every model, minus the video section's unless video is on (VIDEO_ENABLED) and the boot
-    includes it (INCLUDE_VIDEO_MODELS). Profile order is kept."""
-    if include_video and profile.video_enabled:
-        return profile.models
-    skip = set(video_model_specs(profile))
-    return tuple(m for m in profile.models if m not in skip)
+def video_family_ids(profile: Profile) -> tuple[str, ...]:
+    """The video families that are on: the base section first (VIDEO_ENABLED), then those VIDEO_FAMILIES lists."""
+    if not profile.video_enabled:
+        return ()
+    return (profile.video_base_id,) + tuple(f.id for f in profile.video_families if f.enabled)
 
 
-def boot_node_classes(profile: Profile, include_video: bool) -> tuple[str, ...]:
-    """What a boot requires from ComfyUI: the declared classes, plus the video section's when it includes video."""
-    extra = profile.video_node_classes if include_video and profile.video_enabled else ()
+def _family_files(profile: Profile, family_id: str) -> tuple[str, ...]:
+    if family_id == profile.video_base_id:
+        return profile.video_models
+    fam = next((f for f in profile.video_families if f.id == family_id), None)
+    if fam is None:
+        raise ProfileError(f"no video family {family_id}")
+    return fam.models
+
+
+def family_model_specs(profile: Profile, family_id: str) -> tuple[ModelSpec, ...]:
+    """The `models` entries of one video family (pinned files only), in profile order."""
+    names = _family_files(profile, family_id)
+    return tuple(m for m in profile.models if PurePosixPath(m.file).name in names)
+
+
+def _boot_families(profile: Profile, include_video: bool, families: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """The families a boot includes: none without INCLUDE_VIDEO_MODELS or video; VIDEO_BOOT_FAMILIES, else the base."""
+    on = video_family_ids(profile)
+    wanted = tuple(families)
+    bad = [f for f in wanted if f not in on]
+    if include_video and bad:
+        raise ProfileError(f"VIDEO_BOOT_FAMILIES names a video family that is not on: {', '.join(bad)}")
+    if not include_video or not on:
+        return ()
+    return wanted or (profile.video_base_id,)
+
+
+def boot_models(profile: Profile, include_video: bool, families: tuple[str, ...] | list[str] = ()) -> tuple[ModelSpec, ...]:
+    """What a boot downloads: every model, minus the video files unless video is on (VIDEO_ENABLED) and the boot
+    includes it (INCLUDE_VIDEO_MODELS); then only the files of the chosen families (VIDEO_BOOT_FAMILIES, default the
+    base section). A file two families share is kept when one of them is chosen. Profile order is kept."""
+    chosen = _boot_families(profile, include_video, families)
+    every = set(profile.video_models).union(*(f.models for f in profile.video_families))
+    keep = set().union(*(_family_files(profile, f) for f in chosen)) if chosen else set()
+    return tuple(m for m in profile.models if PurePosixPath(m.file).name not in every - keep)
+
+
+def boot_node_classes(profile: Profile, include_video: bool, families: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    """What a boot requires from ComfyUI: the declared classes, plus those of the video families it includes."""
+    extra: list[str] = []
+    for fid in _boot_families(profile, include_video, families):
+        classes = profile.video_node_classes if fid == profile.video_base_id else next(
+            f.node_classes for f in profile.video_families if f.id == fid)
+        extra += [c for c in classes if c not in extra]
     return profile.provides_node_classes + tuple(c for c in extra if c not in profile.provides_node_classes)
 
 

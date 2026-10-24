@@ -319,7 +319,8 @@
           "guidance",
           "advanced",
           "menu",
-          "video"
+          "video",
+          "video_families"
         ],
         "properties": {
           "state": {
@@ -1332,6 +1333,288 @@
               }
             ],
             "description": "Null when video is off on this server (no enabled video section, or its workflow did not load). Never frames, nodes or model files"
+          },
+          "video_families": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "title",
+                    "base",
+                    "sizes",
+                    "durations",
+                    "download_bytes",
+                    "models",
+                    "slots",
+                    "experts",
+                    "extra_loras"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+                      "description": "The family id (POST /api/video `family`, Start `video_families`)"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "base": {
+                      "type": "boolean",
+                      "description": "true for the profile's video section (the same offer as video; its link is video_models url)"
+                    },
+                    "sizes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "name",
+                          "width",
+                          "height"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "width": {
+                            "type": "integer"
+                          },
+                          "height": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "durations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "name",
+                          "seconds"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "seconds": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    },
+                    "download_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Size of the family's pinned files (a file shared with another family counted here too)"
+                    },
+                    "models": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "bytes_done",
+                            "bytes_total",
+                            "percent",
+                            "reason"
+                          ],
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "unavailable",
+                                "not_installed",
+                                "downloading",
+                                "ready",
+                                "failed"
+                              ]
+                            },
+                            "bytes_done": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "bytes_total": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "percent": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Why a download failed (scrubbed agent text)"
+                            }
+                          }
+                        }
+                      ],
+                      "description": "The video model files on the running instance: ready after a boot with Include video models or a finished on-demand download; null without an instance or when its agent does not say"
+                    },
+                    "slots": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "text",
+                            "image"
+                          ],
+                          "properties": {
+                            "text": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "image": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "description": "The expert slots an admin may link per mode (all of a mode together); null for the base family"
+                    },
+                    "experts": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "mode",
+                              "slot",
+                              "file",
+                              "linked",
+                              "sha256"
+                            ],
+                            "properties": {
+                              "mode": {
+                                "type": "string",
+                                "enum": [
+                                  "text",
+                                  "image"
+                                ]
+                              },
+                              "slot": {
+                                "type": "string"
+                              },
+                              "file": {
+                                "type": "string"
+                              },
+                              "linked": {
+                                "type": "boolean"
+                              },
+                              "sha256": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "description": "The experts in use (admins only; null for members and for the base family). A linked one is NOT integrity-pinned: its sha256 is what arrived"
+                    },
+                    "extra_loras": {
+                      "type": "array",
+                      "description": "The family's optional extra LoRAs (profile data; empty for the base family and a family without any). One may be added to a job (POST /api/video extra_lora). UNVERIFIED: their fit with text and image to video, how they stack with the 4-step LoRAs, the default strength, the trigger words",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "id",
+                          "title",
+                          "description",
+                          "modes",
+                          "strength",
+                          "trigger_words",
+                          "files"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "modes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text",
+                                "image"
+                              ]
+                            },
+                            "description": "The modes it is offered for (text: no start image; image: one)"
+                          },
+                          "strength": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": "The default strength"
+                          },
+                          "trigger_words": {
+                            "type": "string",
+                            "description": "Words to put in the prompt for it; empty when unknown"
+                          },
+                          "files": {
+                            "oneOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "string"
+                                }
+                              }
+                            ],
+                            "description": "Its LoRA file per expert branch (high, low): admins only, null for members"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "description": "The video families to choose from, the base section first; null unless VIDEO_FAMILIES switches on one more (and while video is off). Never workflows, nodes, frames or recipe values"
           }
         }
       },
@@ -2304,6 +2587,16 @@
               ]
             },
             "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
+          },
+          {
+            "name": "video_families",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9_,]{0,300}$"
+            },
+            "description": "Comma separated video family ids (only with video_models=true): offers with the disk those families' files need"
           }
         ]
       }
@@ -2465,6 +2758,16 @@
               ]
             },
             "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
+          },
+          {
+            "name": "video_families",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9_,]{0,300}$"
+            },
+            "description": "Comma separated video family ids (only with video_models=true): offers with the disk those families' files need"
           }
         ]
       }
@@ -3191,6 +3494,18 @@
                     ],
                     "maxLength": 2048,
                     "description": "Optional https Hugging Face file link (resolve or blob, .safetensors or .gguf) that replaces the video diffusion model for this boot; only with video_models true. Checked before anything is rented and again on the instance (redirect hosts, size cap VIDEO_MODEL_LINK_MAX_BYTES, file magic bytes). NOT integrity-pinned or licence-checked. Empty or null: the pinned model"
+                  },
+                  "video_families": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "maxItems": 8,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    "description": "Only with video_models true: the video families whose files the boot downloads (ids from video_families in /api/state; each once; VIDEO_BOOT_FAMILIES on the instance). The disk is max(VAST_DISK_GB, VAST_VIDEO_DISK_GB, VAST_DISK_GB + the families' pinned files in GB). Absent or empty: the base section only. video_model_url needs the base family among them (it replaces the base model)"
                   }
                 }
               }
@@ -3248,7 +3563,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed); video_models where video is off (code video_unavailable); a refused video_model_url (codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf); invalid_model_link also for a link without video_models)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or gpu is outside VAST_ALLOWED_GPUS (code gpu_not_allowed); video_models where video is off (code video_unavailable); a refused video_model_url (codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf); invalid_model_link also for a link without video_models) ; video_families: invalid_filter without video_models or with a family twice, unknown_family for a family this server does not offer",
             "content": {
               "application/json": {
                 "schema": {
@@ -4877,6 +5192,16 @@
               ]
             },
             "description": "true: offers with the disk a boot with the video models needs (VAST_VIDEO_DISK_GB), priced for it"
+          },
+          {
+            "name": "video_families",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9_,]{0,300}$"
+            },
+            "description": "Comma separated video family ids (only with video_models=true): offers with the disk those families' files need"
           }
         ]
       }
@@ -4884,7 +5209,7 @@
     "/api/video": {
       "post": {
         "operationId": "video",
-        "summary": "Make a short video (member or admin; shares the generate rate limit). 404 video_unavailable when the profile has no enabled video section. Text to video, or image to video when `image` (exactly one base64 start image, validated like an edit reference: magic bytes, size, pixels, side) is sent. Size and duration are names from video in /api/state. Poll the returned id with GET /api/generate/{id} (a video job times out after VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S); when done its file is listed under `videos` and served by GET /api/video/{id}/{index}. The job's label is \"Video: <size>, <duration>\" plus \", from an image\". A video cannot be saved to the gallery (phase 1).",
+        "summary": "Make a short video (member or admin; shares the generate rate limit). 404 video_unavailable when the profile has no enabled video section. Text to video, or image to video when `image` (exactly one base64 start image, validated like an edit reference: magic bytes, size, pixels, side) is sent. Size and duration are names from video in /api/state. Poll the returned id with GET /api/generate/{id} (a video job times out after VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S); when done its file is listed under `videos` and served by GET /api/video/{id}/{index}. The job's label is \"Video: <size>, <duration>\" plus \", from an image\". A video cannot be saved to the gallery (phase 1). With `family` (video_families in /api/state) that family's workflow for the mode is used and its title joins the label: \"Video: <size>, <duration>, <family title>\". An extra LoRA joins the label: \"Video: <size>, <duration>, <family title>, <LoRA title>\".",
         "security": [
           {
             "sessionCookie": []
@@ -4927,6 +5252,27 @@
                       "null"
                     ],
                     "description": "Optional base64 PNG, JPEG or WebP start image (image to video); absent or null is text to video"
+                  },
+                  "family": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "description": "A family id from video_families in /api/state; absent or the base id: the video section. A family's text mode (no image) and image mode (one start image) have their own workflows; its sizes and durations are its own. Refused with 400 unknown_family for an id this server does not offer, 409 video_models_not_ready while the instance lacks the family's files or reports only some of the mode's experts linked"
+                  },
+                  "extra_lora": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Only with a family that has extra LoRAs: the id of one of video_families[].extra_loras. The web app adds a LoraLoaderModelOnly node after the 4-step LoRA of each branch the LoRA has a file for (before ModelSamplingSD3); the file name comes from the profile only. Refused with 400 extra_lora_unavailable (base family or a family without any), unknown_extra_lora, extra_lora_mode (not offered for this mode). Absent or null: none"
+                  },
+                  "extra_lora_strength": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "The extra LoRA's strength, 0 to 1 (400 invalid_strength otherwise, or without extra_lora); absent: the entry's default"
                   }
                 }
               }
@@ -4973,7 +5319,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the video service (codes invalid_prompt, prompt_too_long, invalid_seed, unknown_size, unknown_duration, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the video service (codes unknown_family, extra_lora_unavailable, unknown_extra_lora, extra_lora_mode, invalid_strength, invalid_prompt, prompt_too_long, invalid_seed, unknown_size, unknown_duration, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5158,7 +5504,7 @@
     "/api/video-models": {
       "post": {
         "operationId": "videoModels",
-        "summary": "Download the video model files onto the running instance (admin). The agent checks that the instance serves, that ComfyUI has the video node classes and that the disk holds the files, then downloads only the missing files in the background (single-flight; a second call changes nothing). Image jobs keep running; the download counts as activity for the idle shutdown. Progress: video.models in /api/state. With `url`, that file replaces the diffusion model (NOT integrity-pinned or licence-checked; a .gguf file needs the GGUF loader node and is loaded with it). Text encoder and VAE stay pinned.",
+        "summary": "Download the video model files onto the running instance (admin). The agent checks that the instance serves, that ComfyUI has the video node classes and that the disk holds the files, then downloads only the missing files in the background (single-flight; a second call changes nothing). Image jobs keep running; the download counts as activity for the idle shutdown. Progress: video.models in /api/state. With `url`, that file replaces the diffusion model (NOT integrity-pinned or licence-checked; a .gguf file needs the GGUF loader node and is loaded with it). Text encoder and VAE stay pinned. With `family`, that video family's files (single-flight across families: another running download is refused with 409 video_download_busy); its progress is video_families[].models in /api/state. GGUF support of the 14B experts is UNVERIFIED.",
         "security": [
           {
             "sessionCookie": []
@@ -5179,6 +5525,34 @@
                     ],
                     "maxLength": 2048,
                     "description": "Optional model link (same rules as video_model_url of /api/start); absent, null or blank: the pinned diffusion model (an active link is dropped)"
+                  },
+                  "family": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 32,
+                    "description": "A video family id (video_families in /api/state) other than the base one: downloads that family's missing files. Absent, null or the base id: the video section (with `url`)"
+                  },
+                  "mode": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 16,
+                    "description": "text or image: the mode whose experts `links` replace (needed with links)"
+                  },
+                  "links": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "maxProperties": 4,
+                    "additionalProperties": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "description": "Only with a family: one link per expert slot of `mode` (slots in video_families), all of them together or none (one-sided is refused with invalid_model_link; two links to one file name with model_link_name_clash). Each is checked like video_model_url and again on the instance; NOT integrity-pinned. The other mode's links are kept; a family download without links returns the whole family to its pinned files"
                   }
                 }
               }
@@ -5277,7 +5651,7 @@
             }
           },
           "400": {
-            "description": "A body that does not match (code invalid_body), or a refused link: codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf), model_link_name_clash (the agent's)",
+            "description": "A body that does not match (code invalid_body), or a refused link: codes invalid_model_link, model_link_host_not_allowed (host not in VIDEO_MODEL_LINK_HOSTS), model_link_unsupported_type (only .safetensors or .gguf), model_link_name_clash (the agent's) ; unknown_family for a family this server does not offer; invalid_model_link also for a url with a family, expert links for the base family, links without a mode, or links that do not cover every expert of the mode",
             "content": {
               "application/json": {
                 "schema": {
@@ -5297,7 +5671,7 @@
             }
           },
           "409": {
-            "description": "No active instance (code no_instance), or the agent refused: codes video_unavailable, not_ready, video_nodes_missing (ComfyUI lacks the node classes), disk_insufficient (the instance disk is too small: start with Include video models), comfy_unavailable; for a link: model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed, video_gguf_loader_missing",
+            "description": "No active instance (code no_instance), or the agent refused: codes video_unavailable, not_ready, video_nodes_missing (ComfyUI lacks the node classes), disk_insufficient (the instance disk is too small: start with Include video models), comfy_unavailable; for a link: model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed, video_gguf_loader_missing ; video_download_busy (another video download runs), video_gguf_loader_missing (a .gguf link needs the GGUF loader node)",
             "content": {
               "application/json": {
                 "schema": {

@@ -5,7 +5,7 @@ import { applyStyle, parseStyles, type ResolvedStyle, type StyleSpec } from "./s
 import { parseGuidance, type GuidanceSpec, type TuningSupport } from "./guidance.js";
 import { parseUpscale, type UpscaleSpec } from "./upscale.js";
 import { checkStyleMenus, parseMenu, type MenuSpec } from "./menu.js";
-import { parseVideo, type VideoSpec } from "./video.js";
+import { parseVideo, parseVideoFamilies, videoBaseIdentity, videoFamilyFilesOf, type VideoFamily, type VideoSpec } from "./video.js";
 
 // Same rule as vastcomfy_agent.workflows.NAME_RE (protocol rule, not configuration).
 const WORKFLOW_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,100}\.json$/;
@@ -112,6 +112,13 @@ export interface Profile {
    * then, so the boot download progress must leave them out (empty without a video section).
    */
   readonly videoFiles: readonly string[];
+  /**
+   * The video families that are on: the base section first (VIDEO_ENABLED), then each of `video_families:` that
+   * VIDEO_FAMILIES lists. Empty while video is off.
+   */
+  readonly videoFamilies: readonly VideoFamily[];
+  /** The plain file names of every video family by id, also while it is off (the boot progress leaves them out). */
+  readonly videoFamilyFiles: Readonly<Record<string, readonly string[]>>;
   /** The tool menu's categories and built-in tools (styles add their own entries: see menuItems). */
   readonly menu: MenuSpec;
   readonly models: readonly ModelSpec[];
@@ -368,7 +375,7 @@ function parseEdit(raw: unknown): EditSpec {
 }
 
 /** Load the parts of a profile the web app needs (name, generate, models); the rest is the instance loader's business. */
-export function loadProfile(path: string, opts: { videoEnabled?: boolean } = {}): Profile {
+export function loadProfile(path: string, opts: { videoEnabled?: boolean; videoFamilies?: readonly string[] } = {}): Profile {
   try {
     const raw = mapping(parse(readFileSync(path, "utf8")), "profile");
     if (raw["generate"] === undefined || raw["generate"] === null) throw new ProfileError("profile has no generate section");
@@ -394,6 +401,19 @@ export function loadProfile(path: string, opts: { videoEnabled?: boolean } = {})
       referenceInputs: edit === null ? null : { node: edit.references.encoderNode, prefix: edit.references.inputPrefix },
     });
     checkStyleMenus(raw["styles"], menu);
+    const videoEnabled = opts.videoEnabled === true;
+    const video = parseVideo(raw["video"], modelEntries(raw["models"]), videoEnabled);
+    const hasBase = raw["video"] !== undefined && raw["video"] !== null;
+    const base = hasBase ? videoBaseIdentity(raw["video"]) : null;
+    const families = parseVideoFamilies(raw["video_families"], modelEntries(raw["models"]), {
+      enabled: opts.videoFamilies ?? [],
+      videoEnabled,
+      baseId: base?.id ?? null,
+    });
+    const baseFamily: VideoFamily[] =
+      video === null || base === null
+        ? []
+        : [{ id: base.id, title: base.title, base: true, models: video.models, fps: video.fps, sizes: video.sizes, durations: video.durations, text: video, image: video, extraLoras: [] }];
     return {
       name: required(raw["name"], "name"),
       generate,
@@ -401,8 +421,10 @@ export function loadProfile(path: string, opts: { videoEnabled?: boolean } = {})
       guidance,
       styles,
       upscale: parseUpscale(raw["upscale"], modelEntries(raw["models"])),
-      video: parseVideo(raw["video"], modelEntries(raw["models"]), opts.videoEnabled === true),
+      video,
       videoFiles: videoFilesOf(raw["video"]),
+      videoFamilies: [...baseFamily, ...families],
+      videoFamilyFiles: videoFamilyFilesOf(raw["video"], raw["video_families"]),
       menu,
       models,
     };

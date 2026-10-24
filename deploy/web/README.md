@@ -723,6 +723,92 @@ three video files pinned in `models:`. Relaxing that only for the diffusion slot
 the readiness rules for a small gain: the text encoder and VAE need the same `pin_model.py` step anyway, and the
 pinned diffusion model remains the default when no link is given.
 
+### Video families (a second model: 14B, 4 steps)
+
+Besides the `video:` section (the base family, "Fast (5B)") the profile can list more video model families under
+`video_families:`. The shipped profile has one: `wan22_a14b`, "Quality (14B, 4 steps)": the two-expert 14B model
+(a high-noise expert for the first two steps, a low-noise expert for the last two) in fp8, sped up by the official
+lightx2v 4-step LoRAs. Unlike the base family it has a workflow per mode:
+`instance/workflows/video-14b-t2v.json` (text to video) and `video-14b-i2v.json` (image to video, exactly one start
+image). Each graph: two `UNETLoader` (the experts), a `LoraLoaderModelOnly` on each (strength 1.0), a
+`ModelSamplingSD3` on each (shift 5), `CLIPLoader` (type wan; the same text encoder file as the base family, pinned
+once), `VAELoader` (`wan_2.1_vae.safetensors`, a new pin), `EmptyHunyuanLatentVideo` (text) or `WanImageToVideo` with
+the start image (image), then two `KSamplerAdvanced` (high expert steps 0-2 with leftover noise, low expert steps
+2-4), cfg 1, euler/simple, `VAEDecode`, `CreateVideo` (16 fps) and `SaveVideo`. The page offers only prompt, size
+(832x480, 480x832), length (about 3 s or 5 s: 49 or 81 frames), seed, the start image and the model choice; steps,
+cfg, sampler, LoRA strength and shift are the family's (`fixed:` in the profile sets the strength and shift on every
+job; the step split and cfg are in the workflow files). The negative prompt is the same fixed English text as the
+base family's workflow.
+
+**Switching it on (owner):**
+
+1. Its files are pinned (owner, 2026-10-24, with `scripts/pin_model.py`, licences checked by the owner) in
+   `models:` of the profile: the four fp8 experts and the four 4-step LoRAs from
+   `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` (revision `ee6f4a4...`), the VAE from `Comfy-Org/Wan_2.1_ComfyUI_repackaged`
+   (revision `123acf1...`); the text encoder is the 5B family's own pin. The LoRAs are Comfy-Org's repackaging
+   because their names are unique; the lightx2v originals share the names `high_noise_model` / `low_noise_model`
+   across text and image to video and would overwrite each other in `models/loras/`.
+2. Set `VIDEO_FAMILIES=wan22_a14b` in `.env` (besides `VIDEO_ENABLED=true`; a csv, apps and instance). The web app
+   passes it to every instance it starts. Both loaders refuse the profile while a listed family has a file missing
+   from `models:` or in another folder (same message as the base section), and refuse an id that names no family.
+   With only `VIDEO_ENABLED=true` (and `VIDEO_FAMILIES` empty, the default) everything is as before: the base family
+   only, and the 14B family is validated but never downloaded or offered.
+3. Disk: the family's own files are 62.5 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE, the
+   0.15 GB extra LoRA), 69.2 GB with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
+   with both families 131 GB** (the 5B alone stays at `VAST_VIDEO_DISK_GB`, 80): the Start dialog rents
+   max(`VAST_DISK_GB`, `VAST_VIDEO_DISK_GB`, `VAST_DISK_GB` + the ticked families' pinned files in GB, a shared file
+   counted once), computed from the pins, so `VAST_VIDEO_DISK_GB` needs no change for it. An on-demand download onto
+   an instance started without the family checks the free disk first (`disk_insufficient`).
+4. Push, bump `REPO_COMMIT`, deploy.
+
+**Choosing and downloading.** In the Start dialog, with "Include video models" ticked, "Video models to include"
+lists every family (the base one ticked): the ticked ones are downloaded at boot (`video_families` in the Start body,
+`VIDEO_BOOT_FAMILIES` on the instance; a boot downloads exactly the chosen families' files, a file two families share
+once), and the disk, the offers and the estimate follow the choice. The base model link of the Start dialog needs
+the base family ticked (it replaces that family's model). In the Video tool a "Model" select appears (only when there
+is more than one family); its sizes and lengths are the chosen family's. A family that is not on the instance shows
+the same note as the base one: admins get "Download video models (about N GB, several minutes)"
+(`POST /api/video-models` with `family`), members "Ask an admin to download them"; Make video stays disabled until
+that family's files are there. One video download runs at a time on an instance (`video_download_busy` otherwise).
+
+**Extra LoRA.** A family may offer optional extra LoRAs (profile `extra_loras:` of the family; one per job). The
+shipped one is "Calisthenic moves" (`calisthenic_moves`): `calisthenics_moves_high_noise.safetensors` from
+`Aisha-AI-Official/wan2.2-calisthenic-moves` (pinned by the owner 2026-10-24, 153 MB), a high-noise-only LoRA, so only
+the high branch gets it. Its file is part of the family's `models:` and is **downloaded with the family** (the
+simplest robust choice: no separate download state, and the family's disk and progress figures include it; it costs
+153 MB on a 69 GB family). With the 14B family chosen the Video tool shows "Extra LoRA" (None by default), a strength
+(0 to 1, step 0.05, starting at the entry's default 0.6) and a note with the description and the trigger words. The
+job then carries `extra_lora` (the entry's id) and `extra_lora_strength`; the web app adds a `LoraLoaderModelOnly`
+node (`video_lora_high`, `video_lora_low` for an entry with a low file) right after the branch's 4-step LoRA node
+(`lora_after:` of each mode names it) and before `ModelSamplingSD3`, with the file name from the profile only. It is
+refused (400) for the base family or a family without extra LoRAs (`extra_lora_unavailable`), for an unknown id
+(`unknown_extra_lora`), for a mode the entry does not list (`extra_lora_mode`) and for a strength outside 0 to 1 or
+without a LoRA (`invalid_strength`). An entry has `id`, `title`, `description`, `modes` (text and/or image), `high`
+and/or `low` (`{file}`, one of the family's `models` in `models/loras/`), `strength` (default 0.6) and
+`trigger_words`. **UNVERIFIED:** whether this LoRA suits text and/or image to video (both are offered until someone
+knows), how it stacks with the lightx2v 4-step LoRAs, the 0.6 default (the usual recommendation, not tested), and its
+trigger words: nobody here has read its model card, so `trigger_words` is empty; the owner should fill it from the
+card (and narrow `modes` if the card says so).
+
+**Expert links (GGUF).** For a family an admin may link both experts of one mode instead of the pinned fp8 files:
+choose "Text to video" or "Image to video" under "Expert links for", then give the high-noise and the low-noise link
+(`mode` and `links: {high, low}`; both together or none: one link alone is refused on the page, by the web app and
+by the instance). Each link follows every rule of the base link above (host allow-list, https, redirect check,
+size cap, magic bytes, sha256 reported, not integrity-pinned), plus: two links may not name the same file, nor a
+pinned file or another linked file. A `.gguf` expert turns its own `UNETLoader` into `UnetLoaderGGUF` (needs the
+GGUF loader node, `video_gguf_loader_missing` otherwise). The links of the other mode are kept; a family download
+without links returns the whole family to its pinned files. The links are kept on the instance in
+`video_links_<family>.json` (state dir), apart from the base model's link. The Start dialog has no expert links:
+they are given on demand only (decision: two links per mode in the Start dialog would double its fields for a rare
+case). **Whether the pinned `leejet/ComfyUI-GGUF` fork loads the 14B experts' GGUF files is UNVERIFIED.**
+
+UNVERIFIED (nothing ran): both 14B graphs and every node and input name in them (written from memory of the native
+nodes, not exported from ComfyUI; the file names they load are the pinned ones), the 4-step recipe values
+(strength 1.0, shift 5, cfg 1, euler/simple, the 0-2 / 2-4 split), 16 fps, the 49/81 frame lengths, VRAM of the two
+14B fp8 experts on a 24 GB card (ComfyUI loads one expert at a time; it may still need offloading), the time a clip
+takes (`VIDEO_TIMEOUT_S` 2400 s is a guess for both families), the disk need above, and GGUF support for these
+experts.
+
 ### What the web app enforces
 
 The body is strict (`prompt`, `size`, `duration`, optional `seed` and `image`); the start image is checked like an

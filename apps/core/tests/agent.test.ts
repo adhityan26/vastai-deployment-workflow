@@ -168,3 +168,26 @@ describe("AgentClient video models", () => {
     await expect(client.status()).rejects.toThrow(/status schema/);
   });
 });
+
+describe("AgentClient video families", () => {
+  const fam = {
+    id: "wan22_a14b", state: "downloading", boot: false, bytes_done: 1, bytes_total: 9, reason: null,
+    experts: [{ mode: "text", slot: "high", file: "h.gguf", linked: true, sha256: "a".repeat(64) }],
+  };
+  it("reads video_families from the status and starts a family with its mode and both links", async () => {
+    const { client, seen } = await fake((s, res) => (s.url === "/video-models" ? json(res, 202, fam) : json(res, 200, { ...STATUS, video_families: [fam] })));
+    expect((await client.status()).video_families).toEqual([fam]);
+    expect(await client.startVideoFamily("wan22_a14b")).toEqual(fam);
+    expect(JSON.parse(seen[1]!.body)).toEqual({ family: "wan22_a14b" });
+    const links = { high: "https://huggingface.co/o/r/resolve/main/h.gguf", low: "https://huggingface.co/o/r/resolve/main/l.gguf" }; // config-lint: ok (test fixture)
+    await client.startVideoFamily("wan22_a14b", { mode: "image", links });
+    expect(JSON.parse(seen[2]!.body)).toEqual({ family: "wan22_a14b", mode: "image", links });
+  });
+
+  it("refuses a status whose video_families breaks the schema, and an answer that is not a family", async () => {
+    const bad = await fake((_s, res) => json(res, 200, { ...STATUS, video_families: [{ ...fam, state: "weird" }] }));
+    await expect(bad.client.status()).rejects.toThrow();
+    const odd = await fake((_s, res) => json(res, 202, { state: "ready" }));
+    await expect(odd.client.startVideoFamily("x")).rejects.toThrow(/not a family status/);
+  });
+});

@@ -112,6 +112,12 @@ import {
   videoUrl,
   videoDownloadLabel,
   videoModelsNote,
+  EXPERT_LINK_NOTICE,
+  expertsNote,
+  familyDownloadBody,
+  familyVideo,
+  extraLoraMembers,
+  extraLoraNote,
 } from "../../public/model.js";
 import {
   PANEL_STORAGE_KEY,
@@ -1311,5 +1317,110 @@ describe("video", () => {
     expect(videoLabel("Landscape", "About 3 s", true)).toBe("Video: Landscape, About 3 s, from an image");
     expect(VIDEO_WAIT_TEXT).toContain("several minutes");
     expect(durationText("video", 312)).toBe("Made in 5 min 12 s");
+  });
+});
+
+
+describe("video families", () => {
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }],
+    durations: [{ name: "About 3 s", seconds: 3 }],
+    max_bytes: 2 * 1024 * 1024,
+    max_pixels: 1_000_000,
+    types: ["png", "jpeg"],
+    download_bytes: 18_000_000_000,
+    models: { state: "not_installed" as const, bytes_done: 0, bytes_total: 5, percent: null, reason: null },
+    model: { file: "x.safetensors", linked: true, sha256: null },
+  };
+  const ready = { state: "ready" as const, bytes_done: 5, bytes_total: 5, percent: 100, reason: null };
+  const baseFam = { id: "wan22_5b", title: "Fast (5B)", base: true, sizes: video.sizes, durations: video.durations, download_bytes: 18_000_000_000, models: video.models, slots: null, experts: null, extra_loras: [] };
+  const big = {
+    id: "wan22_a14b", title: "Quality (14B, 4 steps)", base: false,
+    sizes: [{ name: "Landscape", width: 832, height: 480 }], durations: [{ name: "About 5 s", seconds: 5 }],
+    download_bytes: 60_000_000_000, models: ready, slots: { text: ["high", "low"], image: ["high", "low"] },
+    experts: [{ mode: "text" as const, slot: "high", file: "h.gguf", linked: true, sha256: "a".repeat(64) }, { mode: "text" as const, slot: "low", file: "l.gguf", linked: true, sha256: null }],
+    extra_loras: [{ id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds moves.", modes: ["text" as const], strength: 0.6, trigger_words: "" }],
+  };
+  const state = (over: Record<string, unknown> = {}) => parseState({ ...base, video, ...over })!;
+
+  it("reads the families (base first) and treats anything malformed, or video off, as no families", () => {
+    expect(state({ video_families: [baseFam, big] }).video_families).toEqual([baseFam, big]);
+    expect(state().video_families).toBeNull();
+    expect(state({ video: null, video_families: [baseFam, big] }).video_families).toBeNull();
+    const bad: unknown[] = [
+      [baseFam], // the base one alone is no choice
+      [big, baseFam], // the base one comes first
+      [baseFam, { ...big, id: "Bad Id" }],
+      [baseFam, { ...big, title: "" }],
+      [baseFam, { ...big, sizes: [] }],
+      [baseFam, { ...big, durations: [{ name: "x", seconds: -1 }] }],
+      [baseFam, { ...big, slots: { text: ["high"], image: ["high", "low"] } }],
+      [baseFam, { ...big, slots: null }],
+      [baseFam, { ...big, id: "wan22_5b" }],
+      "x",
+    ];
+    for (const v of bad) expect(state({ video_families: v }).video_families, JSON.stringify(v).slice(0, 80)).toBeNull();
+    // An odd expert entry is left out, not the family.
+    expect(state({ video_families: [baseFam, { ...big, experts: [{ mode: "x", slot: "high", file: "h" }] }] }).video_families![1]!.experts).toEqual([]);
+  });
+
+  it("can make a video when any family is ready", () => {
+    expect(controls(state(), false, false).canVideo).toBe(false);
+    expect(controls(state({ video_families: [baseFam, big] }), false, false).canVideo).toBe(true);
+  });
+
+  it("the chosen family's sizes, durations, size and model state stand in for the base ones", () => {
+    const s = state({ video_families: [baseFam, big] });
+    expect(familyVideo(s.video!, s.video_families, "wan22_a14b")).toEqual({ ...s.video!, sizes: big.sizes, durations: big.durations, download_bytes: 60_000_000_000, models: ready, model: null });
+    expect(familyVideo(s.video!, s.video_families, "wan22_5b")).toBe(s.video);
+    expect(familyVideo(s.video!, s.video_families, null)).toBe(s.video);
+    expect(familyVideo(s.video!, null, "wan22_a14b")).toBe(s.video);
+  });
+
+  it("labels a family's job with its title, like the server", () => {
+    expect(videoLabel("Landscape", "About 5 s", true, "Quality (14B, 4 steps)")).toBe("Video: Landscape, About 5 s, Quality (14B, 4 steps), from an image");
+    expect(videoLabel("Landscape", "About 5 s", false)).toBe("Video: Landscape, About 5 s");
+  });
+
+  it("builds a download body: the family alone, or every expert link of the mode (one-sided is refused)", () => {
+    expect(familyDownloadBody(big, "text", {})).toEqual({ body: { family: "wan22_a14b" } });
+    expect(familyDownloadBody(big, "text", { high: " ", low: "" })).toEqual({ body: { family: "wan22_a14b" } });
+    expect(familyDownloadBody(big, "image", { high: " a ", low: "b" })).toEqual({ body: { family: "wan22_a14b", mode: "image", links: { high: "a", low: "b" } } });
+    expect(familyDownloadBody(big, "text", { high: "a" })).toEqual({ error: "Give a link for every expert (high and low), or none." });
+    expect(familyDownloadBody(big, "text", { high: "a", low: "x".repeat(3000) })).toEqual({ error: "A link is too long." });
+  });
+
+  it("tells an admin which experts are linked, with their sha256, and why links need care", () => {
+    expect(expertsNote(big)).toBe(`Linked experts in use: text high: h.gguf (sha256 ${"a".repeat(64)}); text low: l.gguf. Not integrity-pinned.`);
+    expect(expertsNote({ ...big, experts: null })).toBe("");
+    expect(EXPERT_LINK_NOTICE).toMatch(/both .* together/);
+    expect(EXPERT_LINK_NOTICE).toMatch(/UNVERIFIED/);
+  });
+});
+
+
+describe("extra LoRAs of a video family", () => {
+  const lora = { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds moves.", modes: ["text" as const], strength: 0.6, trigger_words: "" };
+  it("sends the LoRA's id and a strength from 0 to 1 (its default when empty), only for a mode it is offered for", () => {
+    expect(extraLoraMembers(null, "0.3", false)).toEqual({ members: {} });
+    expect(extraLoraMembers(lora, "", false)).toEqual({ members: { extra_lora: "calisthenic_moves", extra_lora_strength: 0.6 } });
+    expect(extraLoraMembers(lora, " 0.25 ", false)).toEqual({ members: { extra_lora: "calisthenic_moves", extra_lora_strength: 0.25 } });
+    for (const bad of ["1.5", "-0.1", "x", "NaN"]) expect(extraLoraMembers(lora, bad, false), bad).toEqual({ error: "The LoRA strength must be a number from 0 to 1." });
+    expect(extraLoraMembers(lora, "0.5", true)).toEqual({ error: "Calisthenic moves is not offered for image to video." });
+  });
+
+  it("describes the LoRA with its trigger words, or says none are known, and that it is untested", () => {
+    expect(extraLoraNote(lora)).toBe("Adds moves. No trigger words are known for it yet. Untested with this 4-step model: results may vary.");
+    expect(extraLoraNote({ ...lora, description: "", trigger_words: "push-up" })).toBe("Trigger words: push-up Untested with this 4-step model: results may vary.");
+  });
+
+  it("reads the entries strictly: an odd one is left out", () => {
+    const fam = (extra: unknown) => ({ id: "big", title: "Big", base: false, sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], download_bytes: 1, models: null, slots: { text: ["high", "low"], image: ["high", "low"] }, experts: null, extra_loras: extra });
+    const baseFam = { id: "small", title: "Small", base: true, sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], download_bytes: 1, models: null, slots: null, experts: null, extra_loras: [] };
+    const video = { sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], max_bytes: 10, max_pixels: 10, types: ["png"], download_bytes: 1, models: null, model: null };
+    const read = (extra: unknown) => parseState({ ...base, video, video_families: [baseFam, fam(extra)] })!.video_families![1]!.extra_loras;
+    expect(read([lora])).toEqual([lora]);
+    expect(read([{ ...lora, strength: 2 }, { ...lora, modes: ["video"] }, { ...lora, id: "Bad" }, "x"])).toEqual([]);
+    expect(read(undefined)).toEqual([]);
   });
 });

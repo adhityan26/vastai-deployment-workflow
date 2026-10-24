@@ -2,9 +2,10 @@
 # Source: mirror 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, byte-identical to the author's repo
 # abenzerps/Qwen-Image-2.1-Uncensored-GGUF (renamed ...-Uncensored-Quantized); SHA256 of all three files match.
 name: image
-# disk_gb counts the video model files (about 18 GB) too. Only a boot that includes them (Start dialog "Include video
-# models") needs it: the web app then rents VAST_VIDEO_DISK_GB; an image-only boot keeps VAST_DISK_GB.
-requires: {vram_gb: 24, disk_gb: 80}
+# disk_gb counts the files of every video family too (about 18 GB for the 5B, 62 GB more for the 14B; with the 15 GB
+# of image files about 96 GB, kept under half of it). Only a boot that includes video needs it: the web app then rents
+# what the chosen families need (VAST_VIDEO_DISK_GB at least); an image-only boot keeps VAST_DISK_GB.
+requires: {vram_gb: 24, disk_gb: 200}
 nodes:
   # leejet fork: native Qwen-Image 2.1 GGUF support (city96/ComfyUI-GGUF fails with "Unknown model architecture").
   - {repo: leejet/ComfyUI-GGUF, commit: 373048b8403a7820620065210a691263d4da0a61}
@@ -28,7 +29,25 @@ models:
   - {file: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 9999658848}
   - {file: "split_files/vae/wan2.2_vae.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/vae/", size_bytes: 1409400960}
   - {file: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged", revision: "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", dest: "models/text_encoders/", size_bytes: 6735906897}
-workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json]
+  # Video family wan22_a14b (video_families: below): its files pinned 2026-10-24 with scripts/pin_model.py by the owner
+  # (licences checked by the owner), about 62.5 GB (its extra LoRA included) besides the text encoder above, which it shares with the 5B family.
+  # Downloaded only when VIDEO_FAMILIES lists the family and a boot includes it (Start dialog) or on demand.
+  # The four LoRAs below are the lightx2v 4-step LoRAs as repackaged by Comfy-Org (unique file names; the lightx2v originals in
+  # lightx2v/Wan2.2-Lightning share the names high_noise_model / low_noise_model across T2V and I2V, which would
+  # collide in models/loras/).
+  - {file: "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14293923632}
+  - {file: "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14293923632}
+  - {file: "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14294742832}
+  - {file: "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14294742832}
+  - {file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/vae/wan_2.1_vae.safetensors", repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged", revision: "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", dest: "models/vae/", size_bytes: 253815318}
+  # The family's optional extra LoRA (extra_loras: below), pinned 2026-10-24 by the owner: a high-noise-only LoRA,
+  # downloaded with the family (153 MB) so the family's disk and progress figures include it.
+  - {file: "calisthenics_moves_high_noise.safetensors", repo: "Aisha-AI-Official/wan2.2-calisthenic-moves", revision: "32a3d164f03f18624bbbd2754efeccc926354c80", dest: "models/loras/", size_bytes: 153453560}
+workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json, video-14b-t2v.json, video-14b-i2v.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
   workflow: qwen-image-t2i.json
@@ -283,6 +302,9 @@ upscale:
 # names, the h264 mp4 output of SaveVideo, VRAM use at these sizes on a 24 GB card, the time a clip takes, and that
 # phones play the result. Sizes are multiples of 32; frames are 4n+1 (the latent packs 4 frames per step).
 video:
+  # The base video family: always the one VIDEO_ENABLED switches on (the page lists it first).
+  id: wan22_5b
+  title: "Fast (5B)"
   workflow: video-ti2v.json
   models:
     - {file: wan2.2_ti2v_5B_fp16.safetensors, dest: models/diffusion_models/}
@@ -307,3 +329,94 @@ video:
   durations:
     - {name: "About 3 s", frames: 73}
     - {name: "About 5 s", frames: 121}
+
+# More video families (deploy/web/README.md "Video families"), each switched on by listing its id in VIDEO_FAMILIES
+# (csv, besides VIDEO_ENABLED=true). A family listed there needs every file of its `models` pinned under `models:`
+# with that dest, or the web app and the boot refuse the profile; a family not listed changes nothing. Unlike the base
+# family each mode has its own workflow: `text` (no start image) and `image` (exactly one start image). `experts`
+# names the diffusion files of a mode an admin may replace with a link (both together); `fixed` are inputs the web
+# app sets on every job (the 4-step LoRA recipe only works with them, so the page does not offer steps or guidance).
+# Boot downloads a family only when it is chosen in the Start dialog (VIDEO_BOOT_FAMILIES) or later on demand.
+# UNVERIFIED (nothing ran): both 14B graphs (two experts through KSamplerAdvanced 0-2 then 2-4, the lightx2v 4-step
+# LoRAs at strength 1, shift 5, cfg 1, euler/simple), the file names, 16 fps, VRAM of two 14B fp8 experts on a 24 GB
+# card (ComfyUI loads one expert at a time; it may still need offloading) and the time per clip. Disk: the family's
+# files are 69.2 GB with the shared text encoder (62.5 GB without it), so a start with this family alone rents about
+# VAST_DISK_GB + 70 GB (120 GB with the default 50).
+video_families:
+  - id: wan22_a14b
+    title: "Quality (14B, 4 steps)"
+    models:
+      - {file: wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors, dest: models/diffusion_models/}
+      - {file: wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors, dest: models/diffusion_models/}
+      - {file: wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors, dest: models/diffusion_models/}
+      - {file: wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors, dest: models/diffusion_models/}
+      - {file: wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors, dest: models/loras/}
+      - {file: wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors, dest: models/loras/}
+      - {file: wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors, dest: models/loras/}
+      - {file: wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors, dest: models/loras/}
+      - {file: umt5_xxl_fp8_e4m3fn_scaled.safetensors, dest: models/text_encoders/}
+      - {file: wan_2.1_vae.safetensors, dest: models/vae/}
+      - {file: calisthenics_moves_high_noise.safetensors, dest: models/loras/}
+    node_classes: [UNETLoader, LoraLoaderModelOnly, ModelSamplingSD3, CLIPLoader, VAELoader, CLIPTextEncode, EmptyHunyuanLatentVideo, WanImageToVideo, KSamplerAdvanced, VAEDecode, CreateVideo, SaveVideo, LoadImage]
+    fps: 16
+    sizes:
+      - {name: "Landscape", width: 832, height: 480}
+      - {name: "Portrait", width: 480, height: 832}
+    durations:
+      - {name: "About 3 s", frames: 49}
+      - {name: "About 5 s", frames: 81}
+    text:
+      workflow: video-14b-t2v.json
+      params:
+        prompt: {node: "9", input: text}
+        seed: {node: "12", input: noise_seed}
+        width: {node: "11", input: width}
+        height: {node: "11", input: height}
+        length: {node: "11", input: length}
+        fps: {node: "15", input: fps}
+      output_node: "16"
+      experts:
+        - {slot: high, file: wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors}
+        - {slot: low, file: wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors}
+      fixed:
+        - {node: "3", input: strength_model, value: 1.0}
+        - {node: "4", input: strength_model, value: 1.0}
+        - {node: "5", input: shift, value: 5.0}
+        - {node: "6", input: shift, value: 5.0}
+      # Where an extra LoRA joins each expert's branch: after this node (the 4-step LoRA), before ModelSamplingSD3.
+      lora_after: {high: "3", low: "4"}
+    image:
+      workflow: video-14b-i2v.json
+      params:
+        prompt: {node: "9", input: text}
+        seed: {node: "12", input: noise_seed}
+        width: {node: "11", input: width}
+        height: {node: "11", input: height}
+        length: {node: "11", input: length}
+        fps: {node: "15", input: fps}
+      start_image: {node: "11", input: start_image}
+      output_node: "16"
+      experts:
+        - {slot: high, file: wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors}
+        - {slot: low, file: wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors}
+      fixed:
+        - {node: "3", input: strength_model, value: 1.0}
+        - {node: "4", input: strength_model, value: 1.0}
+        - {node: "5", input: shift, value: 5.0}
+        - {node: "6", input: shift, value: 5.0}
+      lora_after: {high: "3", low: "4"}
+    # Optional extra LoRAs a user may add to a job (one at a time, the page's "Extra LoRA"; strength 0 to 1). Each
+    # names its files per expert branch (`high` and/or `low`: a missing side gets no extra LoRA node); every file must
+    # be one of the family's `models` (so it is downloaded with the family). `modes`, `strength` (the default) and
+    # `trigger_words` are profile data shown to the user. UNVERIFIED: whether this LoRA suits text and/or image to
+    # video (both offered until known), how it stacks with the 4-step LoRAs, the 0.6 default strength (the usual
+    # recommendation, not tested), and its trigger words: nobody here has read its model card, so trigger_words is
+    # empty; the owner should fill it from the card.
+    extra_loras:
+      - id: calisthenic_moves
+        title: "Calisthenic moves"
+        description: "Adds calisthenics moves (high-noise expert only)."
+        modes: [text, image]
+        high: {file: calisthenics_moves_high_noise.safetensors}
+        strength: 0.6
+        trigger_words: ""

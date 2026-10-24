@@ -39,7 +39,7 @@ export interface ServerDeps {
   cfg: AppsConfig;
   auth: Pick<Auth, "identify" | "role">;
   lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "offers" | "parseFilters" | "start" | "destroy" | "destroyUnknown" | "extend" | "console" | "history"> &
-    Partial<Pick<Lifecycle, "downloadVideoModels">>;
+    Partial<Pick<Lifecycle, "downloadVideoModels" | "downloadVideoFamily">>;
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
@@ -53,6 +53,8 @@ export interface ServerDeps {
   upscaleTemplate?: unknown;
   /** The video workflow template; null/absent when the profile has no enabled video section (video is then off). */
   videoTemplate?: unknown;
+  /** The workflows of the enabled video families besides the base section, by file name (each must be there). */
+  videoFamilyTemplates?: Readonly<Record<string, unknown>>;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
   /** Saved images (MinIO); absent means saving and the gallery are off (the routes answer 503). */

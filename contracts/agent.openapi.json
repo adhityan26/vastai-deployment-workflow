@@ -330,6 +330,20 @@
             ],
             "title": "Uptime S"
           },
+          "video_families": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/VideoFamilyStatus"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Families"
+          },
           "video_models": {
             "anyOf": [
               {
@@ -401,6 +415,110 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VideoExpertInfo": {
+        "description": "One diffusion expert of a video family mode: the pinned file, or a linked one (not integrity-pinned).",
+        "properties": {
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "linked": {
+            "title": "Linked",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "text",
+              "image"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
+          "slot": {
+            "title": "Slot",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "slot",
+          "file",
+          "linked"
+        ],
+        "title": "VideoExpertInfo",
+        "type": "object"
+      },
+      "VideoFamilyStatus": {
+        "description": "The model files of one enabled video family on this instance (the base section's too, without experts).",
+        "properties": {
+          "boot": {
+            "title": "Boot",
+            "type": "boolean"
+          },
+          "bytes_done": {
+            "title": "Bytes Done",
+            "type": "integer"
+          },
+          "bytes_total": {
+            "title": "Bytes Total",
+            "type": "integer"
+          },
+          "experts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/VideoExpertInfo"
+            },
+            "title": "Experts",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "unavailable",
+              "not_installed",
+              "downloading",
+              "ready",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "boot",
+          "bytes_done",
+          "bytes_total"
+        ],
+        "title": "VideoFamilyStatus",
+        "type": "object"
+      },
       "VideoModelInfo": {
         "description": "The diffusion model the video workflow loads: the pinned one, or a linked one (not integrity-pinned).",
         "properties": {
@@ -434,6 +552,48 @@
       "VideoModelsRequest": {
         "additionalProperties": false,
         "properties": {
+          "family": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "links": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 4,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Links"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "text",
+                  "image"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
           "url": {
             "anyOf": [
               {
@@ -699,7 +859,7 @@
     },
     "/video-models": {
       "post": {
-        "description": "Download the missing video model files in the background (single-flight); the progress is in /status.\n`url`: a Hugging Face .safetensors link that replaces the diffusion model (NOT integrity-pinned).",
+        "description": "Download the missing video model files in the background (single-flight); the progress is in /status.\n`url`: a Hugging Face .safetensors or .gguf link that replaces the base section's diffusion model; `family`\nanother enabled video family, with `mode` and `links` (every expert slot of the mode) replacing its experts.\nLinks are NOT integrity-pinned.",
         "operationId": "start_video_models_video_models_post",
         "parameters": [
           {
@@ -741,7 +901,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/VideoModelsStatus"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/VideoModelsStatus"
+                    },
+                    {
+                      "$ref": "#/components/schemas/VideoFamilyStatus"
+                    }
+                  ],
+                  "title": "Response Start Video Models Video Models Post"
                 }
               }
             },
@@ -751,10 +919,10 @@
             "description": "A refused model link (codes invalid_model_link, model_link_host_not_allowed, model_link_unsupported_type, model_link_name_clash)"
           },
           "404": {
-            "description": "No enabled video section (code video_unavailable)"
+            "description": "No enabled video section or family (code video_unavailable)"
           },
           "409": {
-            "description": "Not now: the instance is not ready, ComfyUI lacks the video node classes, the disk is too small, or the link's host refused (codes not_ready, video_nodes_missing, disk_insufficient, model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed)"
+            "description": "Not now: the instance is not ready, another video download runs, ComfyUI lacks the video node classes, the disk is too small, or the link's host refused (codes not_ready, video_download_busy, video_nodes_missing, video_gguf_loader_missing, disk_insufficient, model_link_too_large, model_link_unreachable, model_link_redirect_not_allowed)"
           },
           "422": {
             "content": {
