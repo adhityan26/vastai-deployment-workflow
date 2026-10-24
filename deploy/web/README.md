@@ -94,9 +94,15 @@ minted keys stay in memory only; none is written to the registry, a log line or 
 
 Verify: with no file in the key volume (or `TS_AUTHKEY_FILE` pointing nowhere), Start works and the
 new node shows up in the admin console as ephemeral with tag `tag:gpu`. A failure shows as
-`start failed: StartError (internal: ts_key_mint_failed)` in the log, and the cause as
+`start failed: StartError (internal: ts_key_mint_failed/<detail>)` in the log, and the cause as
 `tailscale token request failed: ...` or `tailscale key request failed: ...` (a fixed code plus
 the HTTP status, never the provider's text).
+
+Network errors, timeouts and 5xx answers of the token and key requests are retried (at most 3
+attempts, 1 s then 2 s back-off plus jitter, logged as `tailscale ... retry 2/3 after ...`) within
+one budget of `TS_RETRY_TOTAL_S` seconds per Start (default 15, 1..120). A 4xx (refused client,
+missing scope, rejected tag, rate limit) is never retried. The read-only Vast offer search is
+retried the same way (3 attempts on a network error or 5xx); the instance create call never is.
 
 Revoking the OAuth client in the admin console stops all key minting at once (Start then fails
 with `ts_key_mint_failed`); keys already handed to running instances are single-use and expire on
@@ -122,6 +128,30 @@ and `.env` sets `TS_AUTHKEY_FILE=/run/secrets/ts-authkey`.
 The volume is declared `external: true` with `name: vast-comfy-keys`, so the order is: create/fill
 the volume first, then `docker compose up`. Compose refuses to start if it is missing. Make a new
 key (rerun the command) whenever the previous one was used or expired.
+
+## Start failed: what the messages mean
+
+A failed Start keeps the Start dialog open with a plain-English line, then `Reason: <reason>` (and
+`(<detail>)` for a Tailscale key failure). The same reason and detail are in the web log as
+`start failed: StartError (internal: <reason>[/<detail>])`. Failures of Vast, Tailscale, the
+instance or ComfyUI answer HTTP **424**, never 502/504: Cloudflare replaces an origin 502/504 with
+its own error page, and the text below would be lost. A line saying "a proxy replaced the answer
+(HTTP 502)" therefore means the answer never came from the routes: the web container is down or
+unreachable through the tunnel (look at the Status card and `docker logs`).
+
+| reason (detail) | Meaning | What to do |
+| --- | --- | --- |
+| `ts_key_mint_failed` (`tailscale_unavailable`) | The server could not reach the Tailscale API (network error, timeout or 5xx after the retries, or a 429). Nothing was rented. | Check the server's internet connection; try again in a minute. |
+| `ts_key_mint_failed` (`oauth_failed`) | Tailscale refused the OAuth client, or only one of the two OAuth keys is set. Nothing was rented. | Check `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` (both set) and the Auth Keys write scope. |
+| `ts_key_mint_failed` (`key_rejected`) | Tailscale refused to create the key. Nothing was rented. | Check `TS_OAUTH_TAG` and that the tag is in the ACL `tagOwners` for the client. |
+| `ts_key_mint_failed` (`invalid_response`) | Tailscale sent an unusable answer. Nothing was rented. | Try again in a minute; see the log. |
+| `ts_key_missing` | No OAuth client and the `TS_AUTHKEY_FILE` key file is missing or empty. Nothing was rented. | Set the OAuth client, or put a key in the file. |
+| `vast_unavailable` | The Vast offer list could not be read (network problem at the server or a Vast outage; retried). Nothing was rented. | Try again in a minute; check the server's internet connection. |
+| `config_invalid` | A start setting is missing or invalid. Nothing was rented. | Compare `.env` with `.env.example`. |
+| `vast_rejected` | Vast refused the create (the offer may have just been taken). Nothing was rented. | Try Start again. |
+| `create_uncertain` (code `start_uncertain`) | Vast's answer to the create was lost: the machine may exist. | Do not start again yet; reconcile links or releases it within minutes (Status card). |
+| `registry_failed` | The machine was created but could not be recorded and was destroyed. | Check the Status card, then try again. |
+| `unexpected` | Anything else. | Check the Status card before retrying; see the log. |
 
 ## Authentik setup
 

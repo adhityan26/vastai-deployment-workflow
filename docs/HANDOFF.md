@@ -17,6 +17,11 @@ live step counter + rough preview over the ComfyUI websocket; "Generated in N s"
 on `feat/server-panel` the log is a dialog opened from the server panel);
 stuck-start and slow-boot protection (below); Tailscale OAuth key minting (LIVE and verified: `tailscale auth key minted`).
 
+**Start failures (2026-10-24, on `master`):** dependency failures answer HTTP 424 (not 502: Cloudflare swallowed the JSON body,
+so the owner saw only "The request failed (HTTP 502)"); every Start failure has a specific plain-English text, Tailscale mint failures
+carry `error.detail`; Tailscale token/key requests and the Vast offer search retry network errors and 5xx (`TS_RETRY_TOTAL_S`, default 15).
+Table of messages: `deploy/web/README.md`, "Start failed: what the messages mean". NOT deployed yet.
+
 **Branch `feat/tool-menu` (pushed, NOT merged, NOT deployed): the next task for a cloud session.** See "Task A".
 
 **Sample presets:** six sample styles (`portrait_photo`, `family_photo`, `anime`, `outfit_swap`, `photo_restore`, `to_anime`) are
