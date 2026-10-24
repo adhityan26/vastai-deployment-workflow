@@ -3,7 +3,7 @@
   "info": {
     "title": "vast-comfy web API",
     "version": "1",
-    "description": "Hand-kept contract of apps/web (apps/web/tests/routes.test.ts fails when it and the registered Fastify routes diverge). Identity is a signed session cookie set by GET /auth/callback after an OIDC login at Authentik (authorization code flow with PKCE); every /api route needs it (401 without, 403 for the wrong role or for an account whose groups map to no role). Public routes are exactly /healthz, the static files and /auth/login, /auth/callback, /auth/logout. CSRF rule for every POST (/api/* and /auth/logout): an Origin header, when present, must equal the origin of WEB_PUBLIC_URL; a Sec-Fetch-Site header, when present, must be same-origin; without Origin the request needs Sec-Fetch-Site: same-origin; otherwise 403 csrf. POSTs need Content-Type application/json (415). /api and /auth responses carry Cache-Control: no-store. Unknown routes are 404; errors are {error: {code, message}}. The static route is listed as /{path}; Fastify registers it as the wildcard /*."
+    "description": "Hand-kept contract of apps/web (apps/web/tests/routes.test.ts fails when it and the registered Fastify routes diverge). Identity is a signed session cookie set by GET /auth/callback after an OIDC login at Authentik (authorization code flow with PKCE); every /api route needs it (401 without, 403 for the wrong role or for an account whose groups map to no role). Public routes are exactly /healthz, the static files and /auth/login, /auth/callback, /auth/logout. CSRF rule for every POST (/api/* and /auth/logout): an Origin header, when present, must equal the origin of WEB_PUBLIC_URL; a Sec-Fetch-Site header, when present, must be same-origin; without Origin the request needs Sec-Fetch-Site: same-origin; otherwise 403 csrf. POSTs need Content-Type application/json (415). /api and /auth responses carry Cache-Control: no-store. Unknown routes are 404; errors are {error: {code, message}}. The static route is listed as /{path}; Fastify registers it as the wildcard /*. Failures of a dependency (Vast, Tailscale, the instance agent, ComfyUI, the object store) answer 424 Failed Dependency with the JSON error body, never 502/504: Cloudflare replaces an origin 502/504 with its own error page."
   },
   "components": {
     "securitySchemes": {
@@ -38,6 +38,9 @@
               },
               "reason": {
                 "$ref": "#/components/schemas/StartFailReason"
+              },
+              "detail": {
+                "$ref": "#/components/schemas/StartFailDetail"
               }
             }
           }
@@ -151,6 +154,15 @@
           "unexpected"
         ],
         "description": "Fixed identifier of why a start failed (also logged as 'start failed: <ErrorName> (internal: <reason>)')"
+      },
+      "StartFailDetail": {
+        "enum": [
+          "tailscale_unavailable",
+          "oauth_failed",
+          "key_rejected",
+          "invalid_response"
+        ],
+        "description": "Fixed sub-cause of a ts_key_mint_failed start (POST /api/start error.detail; also logged as 'internal: ts_key_mint_failed/<detail>'). tailscale_unavailable: the server could not reach the Tailscale API (network error, timeout or 5xx still failing after the TS_RETRY_TOTAL_S retries, or a 429); oauth_failed: the OAuth client was refused (or OAuth is half-configured); key_rejected: Tailscale refused to create the key (tag or ACL tagOwners); invalid_response: an unusable answer. Never provider text"
       },
       "Job": {
         "oneOf": [
@@ -2491,7 +2503,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast unavailable (code vast_unavailable)",
             "content": {
               "application/json": {
@@ -2663,7 +2675,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast unavailable (code vast_unavailable)",
             "content": {
               "application/json": {
@@ -2847,7 +2859,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast could not be read (code vast_unavailable)",
             "content": {
               "application/json": {
@@ -3008,7 +3020,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "The gallery storage could not be reached (code gallery_error)",
             "content": {
               "application/json": {
@@ -3171,7 +3183,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI or the gallery storage could not be reached, or the file is not an image (codes image_unavailable, image_rejected, image_too_large, gallery_error)",
             "content": {
               "application/json": {
@@ -3278,7 +3290,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "The gallery storage could not be reached (code gallery_error)",
             "content": {
               "application/json": {
@@ -3390,7 +3402,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "The gallery storage could not be reached (code gallery_error)",
             "content": {
               "application/json": {
@@ -3622,8 +3634,8 @@
               }
             }
           },
-          "502": {
-            "description": "Start failed (codes start_failed, start_uncertain); error.reason is one of the fixed StartFailReason values",
+          "424": {
+            "description": "Start failed (codes start_failed, start_uncertain); error.reason is one of the fixed StartFailReason values and, for ts_key_mint_failed, error.detail is the fixed StartFailDetail sub-cause; error.message is plain English saying what happened, whether anything was rented and what to do. 424 (not 502): a proxy such as Cloudflare replaces an origin 502/504 body with its own page",
             "content": {
               "application/json": {
                 "schema": {
@@ -3744,7 +3756,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast destroy failed (codes destroy_failed, destroy_error)",
             "content": {
               "application/json": {
@@ -3893,7 +3905,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Agent unreachable or oversized response (codes agent_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
@@ -4017,7 +4029,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast failed (codes destroy_failed, vast_unavailable)",
             "content": {
               "application/json": {
@@ -4360,7 +4372,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI unavailable or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
@@ -4578,7 +4590,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI unavailable (also while uploading a reference) or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
@@ -4672,7 +4684,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI unreachable, poll again (code comfy_unavailable); history over WEB_JSON_MAX_BYTES fails the job (code upstream_too_large)",
             "content": {
               "application/json": {
@@ -4855,7 +4867,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Unsafe reference, non-image body, body over WEB_IMAGE_MAX_BYTES or ComfyUI unavailable (codes image_rejected, image_too_large, image_unavailable)",
             "content": {
               "application/json": {
@@ -5001,7 +5013,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI unavailable (also while uploading the image) or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
@@ -5096,7 +5108,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Vast unavailable (code vast_unavailable)",
             "content": {
               "application/json": {
@@ -5388,7 +5400,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "ComfyUI unavailable (also while uploading the start image) or oversized response (codes comfy_unavailable, upstream_too_large)",
             "content": {
               "application/json": {
@@ -5498,7 +5510,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "Unsafe reference, a body that is not an mp4 or WebM video, a body over VIDEO_MAX_BYTES, or ComfyUI unavailable (codes video_rejected, video_too_large, video_unavailable)",
             "content": {
               "application/json": {
@@ -5700,7 +5712,7 @@
               }
             }
           },
-          "502": {
+          "424": {
             "description": "The agent could not be reached or answered with an error (code agent_unavailable), or an oversized answer (code upstream_too_large)",
             "content": {
               "application/json": {

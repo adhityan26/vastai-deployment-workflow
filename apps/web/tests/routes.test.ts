@@ -25,6 +25,8 @@ import {
   type InstanceRecord,
   type Offer,
   type OfferFilters,
+  type StartFailReason,
+  type TailscaleErrorCode,
   type VastInstance,
 } from "@vast-comfy/core";
 import { createAuthStack } from "../src/auth.js";
@@ -39,6 +41,36 @@ const repo = (p: string) => fileURLToPath(new URL(`../../../${p}`, import.meta.u
 const REGISTRY_SCHEMA = repo("contracts/instance-registry.schema.json");
 const STATUS_SCHEMA = repo("contracts/status.schema.json");
 const OPENAPI = repo("contracts/web.openapi.json");
+
+// The Start failure texts the page shows (apps/web/src/routes.ts startFailText).
+const START_TEXT: Record<StartFailReason, string> = {
+  ts_key_missing:
+    "The Tailscale auth key is missing on the server (the OAuth client is not set and the TS_AUTHKEY_FILE key file is missing or empty). Nothing was rented. Set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET, or put a key in the key file, then try again.",
+  ts_key_mint_failed:
+    "A Tailscale auth key could not be created through the OAuth client. Nothing was rented. Try again in a minute; the server log has the details.",
+  vast_unavailable:
+    "The server could not get the list of offers from Vast (a network problem at the server, or a Vast outage). Nothing was rented. Try again in a minute; if it keeps failing, check the server's internet connection.",
+  config_invalid:
+    "The server's start settings are incomplete or invalid. Nothing was rented. Check the server settings (.env) against .env.example.",
+  vast_rejected:
+    "Vast refused to create the machine (the offer may have just been taken). Nothing was rented. Try Start again; another offer may be chosen.",
+  create_uncertain:
+    "It is not clear whether Vast created the machine (its answer was lost). Do not start again yet: within a few minutes the server either takes it over or releases it. Watch the Status card.",
+  registry_failed:
+    "The machine was created but could not be recorded, so it was destroyed again. Check the Status card, then try Start again.",
+  unexpected:
+    "The start failed for an unexpected reason. Check the Status card before trying again; the server log has the details.",
+};
+const MINT_TEXT: Record<TailscaleErrorCode, string> = {
+  tailscale_unavailable:
+    "The server could not reach the Tailscale API (a network problem at the server; it retried a few times). Nothing was rented. Check the server's internet connection and try again in a minute.",
+  oauth_failed:
+    "Tailscale refused the OAuth client. Nothing was rented. Check TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET (both must be set) and that the client has the Auth Keys write scope.",
+  key_rejected:
+    "Tailscale refused to create the auth key. Nothing was rented. Check TS_OAUTH_TAG and that this tag is in the ACL tagOwners for the OAuth client.",
+  invalid_response:
+    "Tailscale sent an answer the server could not use. Nothing was rented. Try again in a minute; the server log has the details.",
+};
 const profile = loadProfile(repo("instance/profiles/image.yaml"));
 const template = JSON.parse(readFileSync(repo(`instance/workflows/${profile.generate.workflow}`), "utf8"));
 const upscaleTemplate = JSON.parse(readFileSync(repo("instance/workflows/image-upscale.json"), "utf8"));
@@ -183,6 +215,7 @@ class FakeVast {
   offers: Offer[] = [{ id: 11, dph_total: 0.3, gpu_name: "RTX A5000", gpu_ram: 24564 }];
   instances: VastInstance[] = [];
   listError: Error | null = null;
+  searchError: Error | null = null;
   creates = 0;
   searches: OfferFilters[] = [];
   nextId = 1000;
@@ -194,6 +227,7 @@ class FakeVast {
   }
   async searchOffers(filters: OfferFilters): Promise<Offer[]> {
     this.searches.push(filters);
+    if (this.searchError) throw this.searchError;
     return this.offers;
   }
   createdOffers: number[] = [];
@@ -799,10 +833,10 @@ describe("start, estimate, destroy, extend", () => {
     expect((await post("/api/destroy-unknown", a, { vast_id: VAST_ID })).statusCode).toBe(409);
     const ok = await post("/api/destroy-unknown", a, { vast_id: 6 });
     expect(ok.json()).toEqual({ outcome: "destroyed" });
-    // A plain failure is not a refusal: generic 502, no message relayed.
+    // A plain failure is not a refusal: generic 424, no message relayed.
     h.vast.listError = new Error(`boom ${VAST_KEY}`);
     const failed = await post("/api/destroy-unknown", a, { vast_id: 6 });
-    expect(failed.statusCode).toBe(502);
+    expect(failed.statusCode).toBe(424);
     expect(failed.json().error.code).toBe("vast_unavailable");
     expect(failed.body).not.toContain("boom");
   });
@@ -922,7 +956,7 @@ describe("generate", () => {
     expect(done.properties.queued_seconds.type).toEqual(["number", "null"]);
   });
 
-  it("maps an unreachable ComfyUI during a poll to 502 without internals", async () => {
+  it("maps an unreachable ComfyUI during a poll to 424 without internals", async () => {
     h.setComfy((s, res) => {
       if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-1" });
       res.destroy();
@@ -930,7 +964,7 @@ describe("generate", () => {
     const m = await member();
     await post("/api/generate", m, okGen);
     const res = await call("GET", "/api/generate/p-1", m);
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.json()).toEqual({ error: { code: "comfy_unavailable", message: "ComfyUI could not be reached" } });
   });
 
@@ -951,7 +985,7 @@ describe("generate", () => {
     await post("/api/generate", m, okGen);
     expect((await call("GET", "/api/generate/p-1", m)).json().status).toBe("done");
     const res = await call("GET", "/api/image/p-1/0", m);
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.json().error.code).toBe("image_rejected");
     expect(res.body).not.toContain("passwd");
     expect(h.comfySeen.filter((s) => s.url.startsWith("/view"))).toHaveLength(0);
@@ -969,11 +1003,11 @@ describe("generate", () => {
     await post("/api/generate", m, okGen);
     await call("GET", "/api/generate/p-1", m);
     const res = await call("GET", "/api/image/p-1/0", m);
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.body).not.toContain("<script>");
   });
 
-  it("maps an oversized /view (honest content-length or endless chunked) to 502 image_too_large", async () => {
+  it("maps an oversized /view (honest content-length or endless chunked) to 424 image_too_large", async () => {
     const LIMIT = 65536;
     for (const mode of ["length", "chunked"] as const) {
       let written = 0;
@@ -993,7 +1027,7 @@ describe("generate", () => {
       await post("/api/generate", m, okGen);
       await call("GET", "/api/generate/p-1", m);
       const res = await call("GET", "/api/image/p-1/0", m);
-      expect(res.statusCode, mode).toBe(502);
+      expect(res.statusCode, mode).toBe(424);
       expect(res.json()).toEqual({ error: { code: "image_too_large", message: expect.any(String) } });
       await new Promise((r) => setTimeout(r, 50));
       const at = written;
@@ -1004,14 +1038,14 @@ describe("generate", () => {
     }
   });
 
-  it("maps an oversized /history to 502 upstream_too_large and fails the job", async () => {
+  it("maps an oversized /history to 424 upstream_too_large and fails the job", async () => {
     h.setComfy((s, res) =>
       s.url === "/prompt" ? json(res, 200, { prompt_id: "p-1" }) : json(res, 200, { "p-1": { junk: "x".repeat(70000) } }),
     );
     const m = await member();
     await post("/api/generate", m, okGen);
     const res = await call("GET", "/api/generate/p-1", m);
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.json().error.code).toBe("upstream_too_large");
     expect((await call("GET", "/api/generate/p-1", m)).json()).toEqual({ status: "failed", message: expect.any(String) });
   });
@@ -1207,14 +1241,14 @@ describe("gallery", () => {
     expect(peak).toBe(1);
   });
 
-  it("502 gallery_error when the object store fails, with nothing from the store in the response or the logs", async () => {
+  it("424 gallery_error when the object store fails, with nothing from the store in the response or the logs", async () => {
     const broken = new MemoryObjectStore();
     broken.list = async () => { throw new (await import("@vast-comfy/core")).ObjectStoreError(`boom ${VAST_KEY} minio.internal`); };
     h = await harness({ gallery: new Gallery(broken, { maxImages: 3, maxBytes: 100_000, pageSize: 2, adminScanMax: 100, maxImageBytes: 65_536 }) });
     const m = await member();
     const job = await finishedJob(m);
     const res = await save(m, job);
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.json().error.code).toBe("gallery_error");
     for (const text of [res.body, h.logs.join("\n")]) {
       expect(text).not.toContain(VAST_KEY);
@@ -1407,12 +1441,12 @@ describe("GET /api/credit", () => {
     expect(reads).toBe(1);
   });
 
-  it("502 vast_unavailable when Vast fails, nothing leaks, and the failure is not cached", async () => {
+  it("424 vast_unavailable when Vast fails, nothing leaks, and the failure is not cached", async () => {
     let fail = true;
     h = await harness({ credit: async () => { if (fail) throw new Error(`401 for ${VAST_KEY} owner@example.test`); return 3; } });
     const a = await admin();
     const bad = await call("GET", "/api/credit", a);
-    expect(bad.statusCode).toBe(502);
+    expect(bad.statusCode).toBe(424);
     expect(bad.json().error.code).toBe("vast_unavailable");
     for (const text of [bad.body, h.logs.join("\n")]) {
       expect(text).not.toContain(VAST_KEY);
@@ -1612,7 +1646,7 @@ describe("edit with reference images", () => {
     expect(third.json().error.code).toBe("rate_limited");
   });
 
-  it("502 when a reference cannot be uploaded, no job is created and nothing leaks", async () => {
+  it("424 when a reference cannot be uploaded, no job is created and nothing leaks", async () => {
     let uploads = 0;
     h.setComfy((s, res) => {
       if (s.url === "/upload/image" && ++uploads === 2) return json(res, 500, { error: `disk full on ${HOST} ${TOKEN}` });
@@ -1620,7 +1654,7 @@ describe("edit with reference images", () => {
     });
     const m = await member();
     const res = await post("/api/edit", m, { ...okEdit, images: [REF_A, REF_B].map((b) => b.toString("base64")) });
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(424);
     expect(res.json().error.code).toBe("comfy_unavailable");
     for (const text of [res.body, h.logs.join("\n")]) {
       for (const secret of [HOST, TOKEN, "disk full", "REF-A-UNIQUE-MARKER"]) expect(text).not.toContain(secret);
@@ -2164,9 +2198,9 @@ describe("GPU choice", () => {
     for (const authKey of [async () => "", async () => Promise.reject(new Error(`ENOENT ${AUTH_KEY} ${VAST_KEY}`))]) {
       h = await harness({ ready: false, authKey });
       const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
-      expect(res.statusCode).toBe(502);
+      expect(res.statusCode).toBe(424);
       expect(res.json()).toEqual({
-        error: { code: "start_failed", reason: "ts_key_missing", message: "the Tailscale auth key is missing or empty on the server" },
+        error: { code: "start_failed", reason: "ts_key_missing", message: START_TEXT.ts_key_missing },
       });
       expect(h.logs).toContain("warn start failed: StartError (internal: ts_key_missing)");
       for (const text of [res.body, h.logs.join("\n")]) {
@@ -2176,24 +2210,64 @@ describe("GPU choice", () => {
     }
   });
 
-  it("a failed OAuth key mint is start_failed with reason ts_key_mint_failed and a fixed English message", async () => {
-    h = await harness({ ready: false, authKey: async () => Promise.reject(new TailscaleError("oauth_failed")) });
-    const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
-    expect(res.statusCode).toBe(502);
-    expect(res.json()).toEqual({
-      error: {
-        code: "start_failed",
-        reason: "ts_key_mint_failed",
-        message: "a Tailscale auth key could not be created through the OAuth client; nothing was rented",
-      },
-    });
-    expect(h.logs).toContain("warn start failed: StartError (internal: ts_key_mint_failed)");
-    for (const text of [res.body, h.logs.join("\n")]) {
-      for (const secret of [AUTH_KEY, VAST_KEY, TOKEN]) expect(text).not.toContain(secret);
+  it("a failed OAuth key mint is start_failed with reason ts_key_mint_failed, a fixed detail and a specific message", async () => {
+    for (const [detail, text] of Object.entries(MINT_TEXT)) {
+      h = await harness({ ready: false, authKey: async () => Promise.reject(new TailscaleError(detail as TailscaleErrorCode)) });
+      const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
+      expect(res.statusCode).toBe(424);
+      expect(res.headers["content-type"]).toMatch(/^application\/json/);
+      expect(res.json()).toEqual({ error: { code: "start_failed", reason: "ts_key_mint_failed", detail, message: text } });
+      expect(h.logs).toContain(`warn start failed: StartError (internal: ts_key_mint_failed/${detail})`);
+      for (const t of [res.body, h.logs.join("\n")]) {
+        for (const secret of [AUTH_KEY, VAST_KEY, TOKEN]) expect(t).not.toContain(secret);
+      }
+      expect(h.vast.searches).toHaveLength(0);
     }
-    expect(h.vast.searches).toHaveLength(0);
-    const doc = JSON.parse(readFileSync(OPENAPI, "utf8")) as { components: { schemas: Record<string, { enum?: string[] }> } };
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8")) as { components: { schemas: Record<string, { enum?: string[]; properties?: Record<string, unknown> }> } };
     expect(doc.components.schemas["StartFailReason"]?.enum).toContain("ts_key_mint_failed");
+    expect(doc.components.schemas["StartFailDetail"]?.enum).toEqual(["tailscale_unavailable", "oauth_failed", "key_rejected", "invalid_response"]);
+  });
+
+  it("every start failure says in plain English what happened and what to do, and whether anything was rented", async () => {
+    const { startFailText } = await import("../src/routes.js");
+    for (const [reason, text] of Object.entries(START_TEXT)) {
+      expect(startFailText(reason as StartFailReason, null)).toBe(text);
+      expect(text).toMatch(/^[A-Z]/);
+      expect(text).toMatch(/\.$/);
+    }
+    for (const reason of ["ts_key_missing", "ts_key_mint_failed", "vast_unavailable", "config_invalid", "vast_rejected"] as const) {
+      expect(startFailText(reason, null)).toContain("Nothing was rented.");
+    }
+    for (const reason of ["create_uncertain", "registry_failed", "unexpected"] as const) {
+      expect(startFailText(reason, null)).not.toContain("Nothing was rented.");
+    }
+    for (const [detail, text] of Object.entries(MINT_TEXT)) {
+      expect(startFailText("ts_key_mint_failed", detail as TailscaleErrorCode)).toBe(text);
+      expect(text).toContain("Nothing was rented.");
+    }
+    // A detail only ever refines ts_key_mint_failed.
+    expect(startFailText("vast_unavailable", "oauth_failed")).toBe(START_TEXT.vast_unavailable);
+  });
+
+  it("an offer search failure on Start is 424 vast_unavailable with a specific message", async () => {
+    h = await harness({ ready: false });
+    h.vast.searchError = new Error(`ETIMEDOUT ${VAST_KEY}`);
+    const res = await post("/api/start", await admin(), { confirm: true, gpu: "RTX A5000" });
+    expect(res.statusCode).toBe(424);
+    expect(res.json()).toEqual({ error: { code: "start_failed", reason: "vast_unavailable", message: START_TEXT.vast_unavailable } });
+    expect(res.body).not.toContain("ETIMEDOUT");
+    expect(h.vast.creates).toBe(0);
+  });
+
+  it("no route answers 502 or 504 in the OpenAPI document: a proxy may replace those bodies", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8")) as { paths: Record<string, Record<string, { responses?: Record<string, unknown> }>> };
+    for (const [path, ops] of Object.entries(doc.paths)) {
+      for (const [method, op] of Object.entries(ops)) {
+        for (const status of Object.keys(op.responses ?? {})) expect(["502", "504"], `${method} ${path}`).not.toContain(status);
+      }
+    }
+    const routesSource = readFileSync(repo("apps/web/src/routes.ts"), "utf8");
+    expect(routesSource).not.toMatch(/(sendError\(reply, |failure\(|code\()50[24]\b/);
   });
 });
 
@@ -2755,7 +2829,7 @@ describe("video", () => {
       const id = (await post("/api/video", m, ok)).json().id as string;
       expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
       const file = await call("GET", `/api/video/${id}/0`, m);
-      expect(file.statusCode).toBe(502);
+      expect(file.statusCode).toBe(424);
       expect(file.json().error.code).toBe("video_rejected");
       expect(file.body).not.toContain("script");
     }
@@ -2768,7 +2842,7 @@ describe("video", () => {
     const id = (await post("/api/video", m, ok)).json().id as string;
     await call("GET", `/api/generate/${id}`, m);
     const file = await call("GET", `/api/video/${id}/0`, m);
-    expect(file.statusCode).toBe(502);
+    expect(file.statusCode).toBe(424);
     expect(file.json().error.code).toBe("video_too_large");
   });
 
@@ -3570,11 +3644,11 @@ describe("advanced server choice (offers, filters, explicit offer)", () => {
     expect((await post("/api/start", a, { confirm: true })).statusCode).toBe(200);
   });
 
-  it("a malformed VAST_MAX_DPH is a plain 502 config_invalid on the read routes and on Start, never a 500", async () => {
+  it("a malformed VAST_MAX_DPH is a plain 424 config_invalid on the read routes and on Start, never a 500", async () => {
     h = await harness({ ready: false, cfg: { vastMaxDph: "abc" } });
     const a = await admin();
     for (const res of [await call("GET", "/api/offers", a), await call("GET", "/api/estimate", a), await post("/api/start", a, { confirm: true, region: "europe" })]) {
-      expect(res.statusCode).toBe(502);
+      expect(res.statusCode).toBe(424);
       expect(res.json().error.code).toBe("config_invalid");
       expect(res.body).not.toContain("abc");
     }

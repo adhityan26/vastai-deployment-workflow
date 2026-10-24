@@ -1146,6 +1146,7 @@ describe("Lifecycle start failure reasons", () => {
       const err = await errorOf(life.start());
       expect(err).toBeInstanceOf(StartError);
       expect((err as StartError).reason).toBe("ts_key_mint_failed");
+      expect((err as StartError).detail).toBe(code);
       expect((err as StartError).ambiguous).toBe(false);
       expect(err.message).toBe(`start failed before create: the Tailscale auth key could not be minted (${code})`);
       expect(vast.calls.filter((c) => c.startsWith("vast."))).toEqual([]);
@@ -1153,7 +1154,9 @@ describe("Lifecycle start failure reasons", () => {
     }
     // Any other error from the source stays ts_key_missing (the key file path).
     const other = setup({ authKey: async () => Promise.reject(new Error(`boom ${AUTH_KEY}`)) });
-    expect(((await errorOf(other.life.start())) as StartError).reason).toBe("ts_key_missing");
+    const otherErr = (await errorOf(other.life.start())) as StartError;
+    expect(otherErr.reason).toBe("ts_key_missing");
+    expect(otherErr.detail).toBeNull();
   });
 
   it("redacts each freshly minted key from start errors", async () => {

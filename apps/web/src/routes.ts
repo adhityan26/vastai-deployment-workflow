@@ -57,6 +57,7 @@ import {
   type ProgressLimits,
   type ReferenceLimits,
   type Viewer,
+  type StartFailDetail,
   type StartFailReason,
   type StartFailureCode,
   type ServerInfo,
@@ -86,20 +87,54 @@ const HOSTNAME_TEXT = /\bvast-[A-Za-z0-9-]+/g;
 const LABEL_TEXT = /\bvastcomfy:[A-Za-z0-9.-]*/g;
 const URL_TEXT = /\bhttps?:\/\/\S+/gi; // config-lint: ok (pattern that removes URLs from messages)
 const MESSAGE_MAX = 300;
+/**
+ * Status of every application-level failure of a dependency (Vast, Tailscale, the instance, ComfyUI,
+ * the object store): 424 Failed Dependency. Never 502/504: Cloudflare answers an origin 502/504 with
+ * its own branded error page, so the JSON body (the text the page shows) never reaches the browser.
+ */
+const UPSTREAM_FAILED = 424;
 const GPU_NAME_MAX = 64;
 const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 
-// Short English text per fixed start-failure reason (the page shows it as is).
+// Plain English per fixed start-failure reason (the page shows it as is): what happened, whether
+// anything was rented, and what the owner can do. Never provider text.
+const NOTHING_RENTED = "Nothing was rented.";
 const START_FAIL_MESSAGES: Record<StartFailReason, string> = {
-  ts_key_missing: "the Tailscale auth key is missing or empty on the server",
-  ts_key_mint_failed: "a Tailscale auth key could not be created through the OAuth client; nothing was rented",
-  vast_unavailable: "Vast could not be asked for offers; nothing was rented",
-  config_invalid: "the server start configuration is incomplete; nothing was rented",
-  vast_rejected: "Vast refused to create the instance; nothing was rented",
-  create_uncertain: "instance creation is uncertain; reconcile will resolve it",
-  registry_failed: "the instance could not be recorded and was destroyed",
-  unexpected: "the instance could not be started",
+  ts_key_missing:
+    `The Tailscale auth key is missing on the server (the OAuth client is not set and the TS_AUTHKEY_FILE key file is missing or empty). ${NOTHING_RENTED} ` +
+    "Set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET, or put a key in the key file, then try again.",
+  ts_key_mint_failed:
+    `A Tailscale auth key could not be created through the OAuth client. ${NOTHING_RENTED} Try again in a minute; the server log has the details.`,
+  vast_unavailable:
+    `The server could not get the list of offers from Vast (a network problem at the server, or a Vast outage). ${NOTHING_RENTED} ` +
+    "Try again in a minute; if it keeps failing, check the server's internet connection.",
+  config_invalid: `The server's start settings are incomplete or invalid. ${NOTHING_RENTED} Check the server settings (.env) against .env.example.`,
+  vast_rejected: `Vast refused to create the machine (the offer may have just been taken). ${NOTHING_RENTED} Try Start again; another offer may be chosen.`,
+  create_uncertain:
+    "It is not clear whether Vast created the machine (its answer was lost). Do not start again yet: within a few minutes the server " +
+    "either takes it over or releases it. Watch the Status card.",
+  registry_failed: "The machine was created but could not be recorded, so it was destroyed again. Check the Status card, then try Start again.",
+  unexpected: "The start failed for an unexpected reason. Check the Status card before trying again; the server log has the details.",
 };
+
+// ts_key_mint_failed, refined by the fixed TailscaleError code (StartError.detail).
+const MINT_FAIL_MESSAGES: Record<StartFailDetail, string> = {
+  tailscale_unavailable:
+    `The server could not reach the Tailscale API (a network problem at the server; it retried a few times). ${NOTHING_RENTED} ` +
+    "Check the server's internet connection and try again in a minute.",
+  oauth_failed:
+    `Tailscale refused the OAuth client. ${NOTHING_RENTED} Check TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET (both must be set) ` +
+    "and that the client has the Auth Keys write scope.",
+  key_rejected:
+    `Tailscale refused to create the auth key. ${NOTHING_RENTED} Check TS_OAUTH_TAG and that this tag is in the ACL tagOwners for the OAuth client.`,
+  invalid_response: `Tailscale sent an answer the server could not use. ${NOTHING_RENTED} Try again in a minute; the server log has the details.`,
+};
+
+/** The fixed text of a failed Start; a detail refines ts_key_mint_failed only. */
+export function startFailText(reason: StartFailReason, detail: StartFailDetail | null): string {
+  if (reason === "ts_key_mint_failed" && detail !== null) return MINT_FAIL_MESSAGES[detail];
+  return START_FAIL_MESSAGES[reason];
+}
 
 // Plain text per fixed code of a start that failed after Start returned (GET /api/state start_failure).
 const SLOW_NETWORK_TEXT = "The rented machine's network is too slow";
@@ -574,7 +609,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     return scrubber(deps, active ? [active.agent_token, active.tailnet_hostname] : []);
   };
   const tooLarge = (reply: FastifyReply, code = "upstream_too_large") =>
-    sendError(reply, 502, code, "the instance sent a response larger than allowed");
+    sendError(reply, UPSTREAM_FAILED, code, "the instance sent a response larger than allowed");
   const admin = { config: { access: "admin" as const } };
   const member = { config: { access: "member" as const } };
 
@@ -714,7 +749,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     }
     log("warn", `${what} submit failed: ${errorName(err)}`);
     if (err instanceof ResponseTooLarge) return tooLarge(reply);
-    return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not accept the job");
+    return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI could not accept the job");
   };
 
   /** The job if the caller may read it; otherwise null (unknown and foreign jobs look alike). */
@@ -932,7 +967,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       // A malformed VAST_* value is a server configuration problem, reported like the lifecycle's config_invalid.
       if (err instanceof VastError) {
         log("warn", `filters refused: ${errorName(err)} (internal: config_invalid)`);
-        sendError(reply, 502, "config_invalid", "the server configuration for Vast offers is invalid");
+        sendError(reply, UPSTREAM_FAILED, "config_invalid", "the server configuration for Vast offers is invalid");
         return null;
       }
       if (gpuRefusal(reply, err) === null) throw err;
@@ -949,7 +984,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
       log("warn", `gpu list failed: ${errorName(err)}`);
-      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+      return sendError(reply, UPSTREAM_FAILED, "vast_unavailable", "could not read Vast offers");
     }
   });
 
@@ -961,7 +996,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       return { credit: reading.credit, as_of: Math.floor(reading.at / 1000) };
     } catch (err) {
       log("warn", `credit read failed: ${errorName(err)}`);
-      return sendError(reply, 502, "vast_unavailable", "could not read the Vast account credit");
+      return sendError(reply, UPSTREAM_FAILED, "vast_unavailable", "could not read the Vast account credit");
     }
   });
 
@@ -976,7 +1011,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
       log("warn", `offers failed: ${errorName(err)}`);
-      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+      return sendError(reply, UPSTREAM_FAILED, "vast_unavailable", "could not read Vast offers");
     }
   });
 
@@ -990,7 +1025,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       const refused = gpuRefusal(reply, err);
       if (refused) return refused;
       log("warn", `estimate failed: ${errorName(err)}`);
-      return sendError(reply, 502, "vast_unavailable", "could not read Vast offers");
+      return sendError(reply, UPSTREAM_FAILED, "vast_unavailable", "could not read Vast offers");
     }
   });
 
@@ -1025,11 +1060,14 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       if (refused) return refused;
       // A fixed reason only: the error message may carry provider text.
       const reason: StartFailReason = err instanceof StartError ? err.reason : "unexpected";
+      const detail: StartFailDetail | null = err instanceof StartError && reason === "ts_key_mint_failed" ? err.detail : null;
       const ambiguous = err instanceof StartError && err.ambiguous;
-      log("warn", `start failed: ${errorName(err)} (internal: ${reason})${ambiguous ? " (ambiguous)" : ""}`);
+      log("warn", `start failed: ${errorName(err)} (internal: ${reason}${detail === null ? "" : `/${detail}`})${ambiguous ? " (ambiguous)" : ""}`);
       const code = ambiguous ? "start_uncertain" : "start_failed";
-      const text = ambiguous && reason !== "create_uncertain" ? START_FAIL_MESSAGES.create_uncertain : START_FAIL_MESSAGES[reason];
-      return sendError(reply, 502, code, text, reason);
+      const text = ambiguous && reason !== "create_uncertain" ? START_FAIL_MESSAGES.create_uncertain : startFailText(reason, detail);
+      // 424, not 502: a proxy in front (Cloudflare) replaces an origin 502/504 with its own page,
+      // and the page would lose this text.
+      return sendError(reply, UPSTREAM_FAILED, code, text, reason, detail ?? undefined);
     }
   });
 
@@ -1042,9 +1080,9 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       log("warn", `destroy failed: ${(err as Error).name}`);
       if (err instanceof DestroyFailedError) {
-        return sendError(reply, 502, "destroy_failed", "Vast destroy failed; it will be retried");
+        return sendError(reply, UPSTREAM_FAILED, "destroy_failed", "Vast destroy failed; it will be retried");
       }
-      return sendError(reply, 502, "destroy_error", "destroy could not be completed");
+      return sendError(reply, UPSTREAM_FAILED, "destroy_error", "destroy could not be completed");
     }
   });
 
@@ -1077,7 +1115,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         }
         if (err instanceof ResponseTooLarge) return tooLarge(reply);
         log("warn", `extend failed: ${(err as Error).name}`);
-        return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+        return sendError(reply, UPSTREAM_FAILED, "agent_unavailable", "the instance agent could not be reached");
       }
     },
   );
@@ -1101,11 +1139,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       try {
         return { outcome: await deps.lifecycle.destroyUnknown(vast_id) };
       } catch (err) {
-        if (err instanceof DestroyFailedError) return sendError(reply, 502, "destroy_failed", "Vast destroy failed");
+        if (err instanceof DestroyFailedError) return sendError(reply, UPSTREAM_FAILED, "destroy_failed", "Vast destroy failed");
         // Not a project instance, or the active one.
         if (err instanceof RefusedError) return sendError(reply, 409, "refused", (await activeScrubber())(err.message));
         log("warn", `destroy-unknown failed: ${(err as Error).name}`);
-        return sendError(reply, 502, "vast_unavailable", "Vast could not be reached");
+        return sendError(reply, UPSTREAM_FAILED, "vast_unavailable", "Vast could not be reached");
       }
     },
   );
@@ -1156,7 +1194,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     }
     if (!PROMPT_ID.test(promptId)) {
       started?.live.end();
-      return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+      return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI returned an unusable id");
     }
     started?.live.socket?.setPromptId(promptId);
     const asked = req.body as GenerateRequest;
@@ -1196,7 +1234,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       if (!PROMPT_ID.test(promptId)) {
         started?.live.end();
-        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+        return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI returned an unusable id");
       }
       started?.live.socket?.setPromptId(promptId);
       const asked = req.body as EditRequest;
@@ -1239,7 +1277,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       const { promptId, width, height } = submitted;
       if (!PROMPT_ID.test(promptId)) {
         started?.live.end();
-        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+        return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI returned an unusable id");
       }
       started?.live.socket?.setPromptId(promptId);
       // An upscale has no prompt; the label says what was done, so a saved image can say so too.
@@ -1322,7 +1360,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       const { promptId, startImage } = submitted;
       if (!PROMPT_ID.test(promptId)) {
         started?.live.end();
-        return sendError(reply, 502, "comfy_unavailable", "ComfyUI returned an unusable id");
+        return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI returned an unusable id");
       }
       started?.live.socket?.setPromptId(promptId);
       const asked = req.body as VideoRequest;
@@ -1359,7 +1397,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     }
     if (err instanceof ResponseTooLarge) return tooLarge(reply);
     log("warn", `video model download failed: ${errorName(err)}`);
-    return sendError(reply, 502, "agent_unavailable", "the instance agent could not be reached");
+    return sendError(reply, UPSTREAM_FAILED, "agent_unavailable", "the instance agent could not be reached");
   };
   app.post("/api/video-models", { ...admin, schema: { body: VIDEO_MODELS_BODY } }, async (req, reply) => {
     if (videoLimits === null || typeof deps.lifecycle.downloadVideoModels !== "function") {
@@ -1455,7 +1493,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
           } else {
             // Unreachable or ComfyError: transient from the browser's view; it may poll again.
             log("warn", `generate poll failed: ${(err as Error).name}`);
-            return sendError(reply, 502, "comfy_unavailable", "ComfyUI could not be reached");
+            return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI could not be reached");
           }
         }
       }
@@ -1520,18 +1558,18 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       if (err instanceof ComfyError && err.status === 0) {
         log("warn", "ComfyUI history named an unsafe image path; refused");
-        return failure(502, "image_rejected", "the image reference was refused");
+        return failure(UPSTREAM_FAILED, "image_rejected", "the image reference was refused");
       }
       if (err instanceof ResponseTooLarge) {
         log("warn", "image larger than WEB_IMAGE_MAX_BYTES; refused");
-        return failure(502, "image_too_large", "the instance sent a response larger than allowed");
+        return failure(UPSTREAM_FAILED, "image_too_large", "the instance sent a response larger than allowed");
       }
       if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
-      return failure(502, "image_unavailable", "the image could not be fetched");
+      return failure(UPSTREAM_FAILED, "image_unavailable", "the image could not be fetched");
     }
     const type = fetched.contentType.split(";")[0]!.trim().toLowerCase();
     const ext = IMAGE_TYPES[type];
-    if (ext === undefined) return failure(502, "image_rejected", "ComfyUI did not return an image");
+    if (ext === undefined) return failure(UPSTREAM_FAILED, "image_rejected", "ComfyUI did not return an image");
     return { job, bytes: fetched.bytes, type, ext };
   };
 
@@ -1564,19 +1602,19 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     } catch (err) {
       if (err instanceof ComfyError && err.status === 0) {
         log("warn", "ComfyUI history named an unsafe video path; refused");
-        return sendError(reply, 502, "video_rejected", "the video reference was refused");
+        return sendError(reply, UPSTREAM_FAILED, "video_rejected", "the video reference was refused");
       }
       if (err instanceof ResponseTooLarge) {
         log("warn", "video larger than VIDEO_MAX_BYTES; refused");
-        return sendError(reply, 502, "video_too_large", "the instance sent a response larger than allowed");
+        return sendError(reply, UPSTREAM_FAILED, "video_too_large", "the instance sent a response larger than allowed");
       }
       if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
-      return sendError(reply, 502, "video_unavailable", "the video could not be fetched");
+      return sendError(reply, UPSTREAM_FAILED, "video_unavailable", "the video could not be fetched");
     }
     const type = sniffVideo(fetched.bytes);
     if (type === null) {
       log("warn", "ComfyUI returned a file that is not an mp4 or WebM video; refused");
-      return sendError(reply, 502, "video_rejected", "ComfyUI did not return a video");
+      return sendError(reply, UPSTREAM_FAILED, "video_rejected", "ComfyUI did not return a video");
     }
     return reply
       .code(200)
@@ -1612,13 +1650,13 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         case "quota_bytes":
           return sendError(reply, 409, "gallery_quota", err.message);
         case "invalid_image":
-          return sendError(reply, 502, "image_rejected", "the image could not be stored");
+          return sendError(reply, UPSTREAM_FAILED, "image_rejected", "the image could not be stored");
       }
     }
     if (err instanceof ObjectStoreError) {
       // A fixed line: the store's own text may name hosts or buckets.
       log("warn", `gallery ${what} failed: ObjectStoreError`);
-      return sendError(reply, 502, "gallery_error", "the gallery storage could not be reached");
+      return sendError(reply, UPSTREAM_FAILED, "gallery_error", "the gallery storage could not be reached");
     }
     throw err;
   };

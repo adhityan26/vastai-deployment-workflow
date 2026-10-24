@@ -2,7 +2,7 @@ import { camelCase, type AppsConfig } from "./config.js";
 import type { AgentStatus, VideoFamilyStatus, VideoModelsStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
-import { TailscaleError } from "./tailscale.js";
+import { TailscaleError, type TailscaleErrorCode } from "./tailscale.js";
 import { BAD_MACHINE_CODES, measuredMbS, type StopReason, type StuckCode, type StuckStart, type UsageHistory, type UsageItem } from "./usage.js";
 import {
   ConsoleBuffer,
@@ -155,15 +155,25 @@ export type StartFailReason =
   | "registry_failed"
   | "unexpected";
 
+/**
+ * The sub-cause of a start failure, as a fixed identifier (never provider text). Only
+ * ts_key_mint_failed has one today: the TailscaleError code (tailscale_unavailable: the Tailscale
+ * API could not be reached; oauth_failed: the OAuth client was refused or OAuth is half-configured;
+ * key_rejected: Tailscale refused to create the key; invalid_response: an unusable answer).
+ */
+export type StartFailDetail = TailscaleErrorCode;
+
 /** Start failed after the write-ahead record; `ambiguous` means the instance may exist on Vast. */
 export class StartError extends Error {
   readonly ambiguous: boolean;
   readonly reason: StartFailReason;
-  constructor(message: string, ambiguous: boolean, reason: StartFailReason = "unexpected") {
+  readonly detail: StartFailDetail | null;
+  constructor(message: string, ambiguous: boolean, reason: StartFailReason = "unexpected", detail: StartFailDetail | null = null) {
     super(message);
     this.name = "StartError";
     this.ambiguous = ambiguous;
     this.reason = reason;
+    this.detail = detail;
   }
 }
 
@@ -857,13 +867,13 @@ export class Lifecycle {
     this.withUsage((u) => u.begin(hostname, record.created_at, by));
 
     // Until create is called nothing exists on Vast: every failure marks the record gone.
-    const failBeforeCreate = async (err: unknown, reason: StartFailReason): Promise<never> => {
+    const failBeforeCreate = async (err: unknown, reason: StartFailReason, detail: StartFailDetail | null = null): Promise<never> => {
       this.withUsage((u) => u.requestStop(hostname, "boot_failed"));
       await registry.markGone(record.tailnet_hostname);
       this.endUsage(hostname);
       this.endConsole(record.tailnet_hostname, "start_failed");
       if (err instanceof NoOffersError || err instanceof OfferGoneError) throw err;
-      throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason);
+      throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, reason, detail);
     };
 
     let authKey = "";
@@ -873,7 +883,7 @@ export class Lifecycle {
       // Fixed text: a read error may name the file or, from a broken reader, echo its content.
       // A TailscaleError carries only a fixed code. Never a fallback to another key source.
       if (err instanceof TailscaleError) {
-        return failBeforeCreate(new Error(`the Tailscale auth key could not be minted (${err.code})`), "ts_key_mint_failed");
+        return failBeforeCreate(new Error(`the Tailscale auth key could not be minted (${err.code})`), "ts_key_mint_failed", err.code);
       }
       return failBeforeCreate(new Error("the Tailscale auth key could not be read"), "ts_key_missing");
     }
