@@ -149,6 +149,13 @@ the model card. The 5B behaviour, its API fields and its tests are unchanged. UN
 with text/image to video, its stacking with the 4-step LoRAs and its strength; the 14B graphs, recipe values,
 16 fps, VRAM, time per clip, GGUF support of the pinned fork for these experts. Runbook: README "Video families".
 
+**Experimental 12 s clips (branch `feat/video-12s`, 2026-10-24, pushed, NOT merged).** Both video families offer
+"About 12 s (experimental)" (5B: 289 frames at 24 fps; 14B: 193 frames at 16 fps; profile `experimental: true`; the
+frame cap is now 289). The page labels it and warns while it is chosen. Defaults unchanged: `VIDEO_TIMEOUT_S` 2400
+may be too short for 12 s; README "Longer clips" says what to raise (e.g. 5400 with `WEB_JOB_TTL_S` 7200; the
+timeout must stay shorter). UNVERIFIED: quality beyond about 5 s, VRAM for 289/193 frames (try 832x480 first on
+24 GB), time per clip, result size (estimated well under `VIDEO_MAX_BYTES`).
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)

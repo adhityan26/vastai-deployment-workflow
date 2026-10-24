@@ -106,6 +106,7 @@ import {
   startFiltersAreDefault,
   VIDEO_WAIT_TEXT,
   durationLabel,
+  EXPERIMENTAL_DURATION_WARNING,
   videoAsEdit,
   videoHint,
   videoLabel,
@@ -1422,5 +1423,25 @@ describe("extra LoRAs of a video family", () => {
     expect(read([lora])).toEqual([lora]);
     expect(read([{ ...lora, strength: 2 }, { ...lora, modes: ["video"] }, { ...lora, id: "Bad" }, "x"])).toEqual([]);
     expect(read(undefined)).toEqual([]);
+  });
+});
+
+
+describe("an experimental video duration", () => {
+  const video = {
+    sizes: [{ name: "Landscape", width: 1280, height: 704 }],
+    durations: [{ name: "About 5 s", seconds: 5 }, { name: "About 12 s (experimental)", seconds: 12, experimental: true as const }],
+    max_bytes: 1000, max_pixels: 1000, types: ["png"], download_bytes: 1, models: null, model: null,
+  };
+  it("is read from the state (only a literal true counts) and labelled experimental", () => {
+    expect(parseState({ ...base, video })!.video!.durations).toEqual(video.durations);
+    const odd = parseState({ ...base, video: { ...video, durations: [{ name: "Long", seconds: 12, experimental: "yes" }] } })!.video!.durations;
+    expect(odd).toEqual([{ name: "Long", seconds: 12 }]);
+    expect(durationLabel(video.durations[1]!)).toBe("About 12 s (experimental)");
+    expect(durationLabel({ name: "Long", seconds: 12, experimental: true })).toBe("Long (about 12 s, experimental)");
+    expect(durationLabel(video.durations[0]!)).toBe("About 5 s");
+  });
+  it("comes with the owner's warning", () => {
+    expect(EXPERIMENTAL_DURATION_WARNING).toBe("Longer than the model was trained for (about 5 s): quality may drop and it may run out of memory or time out.");
   });
 });

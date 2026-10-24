@@ -132,6 +132,7 @@ import {
   extraLoraMembers,
   extraLoraNote,
   durationLabel,
+  EXPERIMENTAL_DURATION_WARNING,
   videoAsEdit,
   videoHint,
   videoLabel,
@@ -1297,6 +1298,9 @@ export function mountApp(doc: Document, env: Env): App {
   const videoBox = $("video-box");
   const videoSizeSelect = $<HTMLSelectElement>("video-size");
   const videoDurationSelect = $<HTMLSelectElement>("video-duration");
+  videoDurationSelect.addEventListener("change", () => {
+    if (state) renderForm(state);
+  });
   const qualityBox = $("quality-box");
   const videoModelsBox = $("video-models");
   const videoModelsBtn = $<HTMLButtonElement>("video-models-download");
@@ -1568,6 +1572,10 @@ export function mountApp(doc: Document, env: Env): App {
     // A video has its own size and length; only the seed of the sampling box applies.
     qualityBox.hidden = filming;
     renderVideoModels(s, filming);
+    // A duration longer than the model was trained for: warn while it is chosen.
+    const longClip = filming && shown?.durations.find((d) => d.name === videoDurationSelect.value)?.experimental === true;
+    $("video-duration-warning").textContent = longClip ? EXPERIMENTAL_DURATION_WARNING : "";
+    $("video-duration-warning").hidden = !longClip;
     renderVideoLora(s, filming);
     sizeBox.hidden = editing || upscaling || filming;
     promptBox.placeholder = notes

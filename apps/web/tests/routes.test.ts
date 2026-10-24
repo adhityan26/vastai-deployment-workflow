@@ -2664,7 +2664,7 @@ describe("video", () => {
         { name: "Landscape, faster", width: 832, height: 480 },
         { name: "Portrait, faster", width: 480, height: 832 },
       ],
-      durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }],
+      durations: [{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }, { name: "About 12 s (experimental)", seconds: 12, experimental: true }],
       download_bytes: 9_999_658_848 + 1_409_400_960 + 6_735_906_897, // the three pinned video files
       models: { state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null },
       model: null,
@@ -2674,7 +2674,7 @@ describe("video", () => {
     });
     expect(body.menu.items.find((i: { id: string }) => i.id === "video")).toMatchObject({ available: true, icon: "film", category: "create" });
     const text = JSON.stringify(body.video);
-    for (const secret of ["safetensors", "frames", "\"node\"", "workflow", "73"]) expect(text).not.toContain(secret);
+    for (const secret of ["safetensors", "frames", "\"node\"", "workflow", "73", "289"]) expect(text).not.toContain(secret);
   });
 
   it("text to video: submits the filled workflow, polls to done and serves the mp4 checked by its first bytes", async () => {
@@ -2702,6 +2702,16 @@ describe("video", () => {
     expect(file.body).not.toContain("vastcomfy_00001_");
     const view = h.comfySeen.find((x) => x.url.startsWith("/view"))!;
     expect(view.url).toContain("filename=vastcomfy_00001_.mp4");
+  });
+
+  it("the experimental 12 s: 289 frames reach the workflow; a longer timeout works when WEB_JOB_TTL_S stays longer", async () => {
+    h = await vharness({ profile: videoProfile() });
+    h.setComfy(comfyVideo());
+    expect((await post("/api/video", await member(), { ...ok, size: "Landscape, faster", duration: "About 12 s (experimental)" })).statusCode).toBe(202);
+    expect(sentPrompt()["7"].inputs).toMatchObject({ width: 832, height: 480, length: 289 });
+    // What README "Longer clips" suggests for it: both raised, the job timeout still shorter than the job memory.
+    await expect(harness({ profile: videoProfile(), cfg: { videoTimeoutS: 5400, webJobTtlS: 7200 } })).resolves.toBeDefined();
+    await expect(harness({ profile: videoProfile(), cfg: { videoTimeoutS: 5400, webJobTtlS: 5400 } })).rejects.toThrow("VIDEO_TIMEOUT_S must be shorter than WEB_JOB_TTL_S");
   });
 
   it("image to video: uploads the one start image and wires a LoadImage node; the label says so", async () => {
@@ -3677,7 +3687,7 @@ describe("video families", () => {
     ]);
     const big = m.video_families[1];
     expect(big.sizes).toEqual([{ name: "Landscape", width: 832, height: 480 }, { name: "Portrait", width: 480, height: 832 }]);
-    expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }]);
+    expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }, { name: "About 12 s (experimental)", seconds: 12, experimental: true }]);
     expect(big.models).toEqual({ state: "ready", bytes_done: 9, bytes_total: 9, percent: 100, reason: null });
     expect(big.slots).toEqual({ text: ["high", "low"], image: ["high", "low"] });
     expect(big.download_bytes).toBe(69_228_418_399); // its ten own pins (the extra LoRA's too) and the shared text encoder

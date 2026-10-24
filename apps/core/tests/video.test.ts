@@ -81,10 +81,20 @@ describe("parseVideo", () => {
     expect(s.sizes.map((z) => [z.name, z.width, z.height])).toEqual([
       ["Landscape", 1280, 704], ["Portrait", 704, 1280], ["Landscape, faster", 832, 480], ["Portrait, faster", 480, 832],
     ]);
-    expect(s.durations).toEqual([{ name: "About 3 s", frames: 73, seconds: 3 }, { name: "About 5 s", frames: 121, seconds: 5 }]);
+    expect(s.durations).toEqual([
+      { name: "About 3 s", frames: 73, seconds: 3 },
+      { name: "About 5 s", frames: 121, seconds: 5 },
+      { name: "About 12 s (experimental)", frames: 289, seconds: 12, experimental: true },
+    ]);
     expect(s.params.seed).toEqual({ node: "8", input: "seed" });
     expect(s.startImage).toEqual({ node: "7", input: "start_image" });
     expect(s.outputNode).toBe("11");
+  });
+
+  it("takes up to 289 frames (about 12 s at 24 fps), 4n+1; only the 12 s entry is experimental", () => {
+    expect(parseVideo(section((s) => (s.durations[2].frames = 285)), MODELS, true)!.durations[2]).toMatchObject({ frames: 285, experimental: true });
+    expect(spec().durations.filter((d) => d.experimental === true).map((d) => d.name)).toEqual(["About 12 s (experimental)"]);
+    expect(spec().durations.slice(0, 2).every((d) => !("experimental" in d))).toBe(true);
   });
 
   it("refuses an enabled section whose model is missing or downloads into another folder", () => {
@@ -123,6 +133,10 @@ describe("parseVideo", () => {
     ["duplicate durations", (s) => (s.durations[1].name = s.durations[0].name)],
     ["a duration with an extra key", (s) => (s.durations[0].seconds = 3)],
     ["a blank duration name", (s) => (s.durations[0].name = " ")],
+    ["frames past about 12 s at 24 fps", (s) => (s.durations[2].frames = 293)],
+    ["the 12 s frames not 4n+1", (s) => (s.durations[2].frames = 288)],
+    ["experimental that is not true", (s) => (s.durations[2].experimental = "yes")],
+    ["experimental false (leave it out instead)", (s) => (s.durations[2].experimental = false)],
   ])("refuses a section with %s (also when disabled)", (name, mutate) => {
     void name;
     expect(() => parseVideo(section(mutate), MODELS, true)).toThrow(ProfileError);
@@ -160,6 +174,11 @@ describe("buildVideoPrompt", () => {
     expect(p[VIDEO_START_NODE]).toBeUndefined();
     expect(p["6"]).toEqual(template["6"]);
     expect(template["5"].inputs.text).toBe(""); // the template is not mutated
+  });
+
+  it("the experimental 12 s duration asks the latent for 289 frames", () => {
+    const p = buildVideoPrompt(spec(), template, { prompt: "x", seed: 1, size: "Landscape, faster", duration: "About 12 s (experimental)" });
+    expect(p["7"]!.inputs["length"]).toBe(289);
   });
 
   it("image to video: adds one LoadImage node and wires it to the start image input", () => {
