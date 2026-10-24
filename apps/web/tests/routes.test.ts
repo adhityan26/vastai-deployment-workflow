@@ -3630,16 +3630,9 @@ describe("edit output size", () => {
 
 describe("video families", () => {
   const FAMILY = "wan22_a14b";
-  /** The shipped profile with the 14B family's files pinned (pin-shaped entries) and VIDEO_FAMILIES naming it. */
+  /** The shipped profile (the 14B family pinned 2026-10-24) with VIDEO_ENABLED and VIDEO_FAMILIES naming it. */
   function familyProfile(): typeof profile {
-    const doc = parseYaml(readFileSync(repo("instance/profiles/image.yaml"), "utf8"));
-    const have = new Set((doc.models as { file: string }[]).map((m) => m.file.split("/").pop()));
-    for (const m of doc.video_families[0].models as { file: string; dest: string }[]) {
-      if (!have.has(m.file)) doc.models.push({ file: `split_files/x/${m.file}`, repo: "o/r", revision: "a".repeat(40), dest: m.dest, size_bytes: 15_000_000_000 });
-    }
-    const path = join(mkdtempSync(join(tmpdir(), "fam-")), "image.yaml");
-    writeFileSync(path, stringifyYaml(doc));
-    return loadProfile(path, { videoEnabled: true, videoFamilies: [FAMILY] });
+    return loadProfile(repo("instance/profiles/image.yaml"), { videoEnabled: true, videoFamilies: [FAMILY] });
   }
   const ok = { prompt: "a fox runs through snow", size: "Landscape", duration: "About 5 s", family: FAMILY };
   const BASE_READY = { state: "ready", boot: true, bytes_done: 50, bytes_total: 50, reason: null };
@@ -3687,7 +3680,7 @@ describe("video families", () => {
     expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }]);
     expect(big.models).toEqual({ state: "ready", bytes_done: 9, bytes_total: 9, percent: 100, reason: null });
     expect(big.slots).toEqual({ text: ["high", "low"], image: ["high", "low"] });
-    expect(big.download_bytes).toBe(9 * 15_000_000_000 + 6_735_906_897); // nine pinned here, the shared encoder's real pin
+    expect(big.download_bytes).toBe(69_074_964_839); // its nine own pins and the shared text encoder
     expect(big.experts).toBeNull(); // file names are for admins
     expect(m.video_families[0].models).toEqual({ state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null });
     const a = (await call("GET", "/api/state", await admin())).json();
@@ -3825,11 +3818,17 @@ describe("video families", () => {
     const started = await post("/api/start", a, { confirm: true, video_models: true, video_families: [FAMILY] });
     expect(started.statusCode, started.body).toBe(200);
     const disk = h.vast.searches.at(-1)!.diskGb;
-    expect(disk).toBe(50 + 142); // VAST_DISK_GB plus the family's files (141.7 GB here), above VAST_VIDEO_DISK_GB
+    expect(disk).toBe(50 + 70); // VAST_DISK_GB plus the family's 69.07 GB of files, above VAST_VIDEO_DISK_GB (80)
     expect(h.vast.requests.at(-1)!.env).toMatchObject({ INCLUDE_VIDEO_MODELS: "true", VIDEO_BOOT_FAMILIES: FAMILY });
     const est = await call("GET", `/api/estimate?video_models=true&video_families=${FAMILY}`, a);
     expect(est.statusCode, est.body).toBe(200);
     expect(h.vast.searches.at(-1)!.diskGb).toBe(disk);
+    // Both families: the 5B's own 11.41 GB on top (the text encoder once): 80.48 GB of video files.
+    expect((await call("GET", `/api/estimate?video_models=true&video_families=wan22_5b,${FAMILY}`, a)).statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)!.diskGb).toBe(50 + 81);
+    // The base family alone keeps the disk of before: max(VAST_DISK_GB, VAST_VIDEO_DISK_GB).
+    expect((await call("GET", "/api/estimate?video_models=true&video_families=wan22_5b", a)).statusCode).toBe(200);
+    expect(h.vast.searches.at(-1)!.diskGb).toBe(80);
     for (const [body, code] of [
       [{ video_models: true, video_families: ["nope"] }, "unknown_family"],
       [{ video_families: [FAMILY] }, "invalid_filter"],

@@ -2,9 +2,10 @@
 # Source: mirror 0xSojalSec/Qwen-Image-2.1-Uncensored-HF, byte-identical to the author's repo
 # abenzerps/Qwen-Image-2.1-Uncensored-GGUF (renamed ...-Uncensored-Quantized); SHA256 of all three files match.
 name: image
-# disk_gb counts the video model files (about 18 GB) too. Only a boot that includes them (Start dialog "Include video
-# models") needs it: the web app then rents VAST_VIDEO_DISK_GB; an image-only boot keeps VAST_DISK_GB.
-requires: {vram_gb: 24, disk_gb: 80}
+# disk_gb counts the files of every video family too (about 18 GB for the 5B, 62 GB more for the 14B; with the 15 GB
+# of image files about 96 GB, kept under half of it). Only a boot that includes video needs it: the web app then rents
+# what the chosen families need (VAST_VIDEO_DISK_GB at least); an image-only boot keeps VAST_DISK_GB.
+requires: {vram_gb: 24, disk_gb: 200}
 nodes:
   # leejet fork: native Qwen-Image 2.1 GGUF support (city96/ComfyUI-GGUF fails with "Unknown model architecture").
   - {repo: leejet/ComfyUI-GGUF, commit: 373048b8403a7820620065210a691263d4da0a61}
@@ -28,22 +29,21 @@ models:
   - {file: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 9999658848}
   - {file: "split_files/vae/wan2.2_vae.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/vae/", size_bytes: 1409400960}
   - {file: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged", revision: "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", dest: "models/text_encoders/", size_bytes: 6735906897}
-  # Video family wan22_a14b (video_families: below): NOT pinned yet (a cloud session cannot reach Hugging Face and no
-  # pin is ever written from memory). Before listing the family in VIDEO_FAMILIES the owner runs on the laptop (licence
-  # check first; the repo and file names below are FROM MEMORY: if pin_model.py says a file is not in a repo, find
-  # the right name on the repo page and correct the family's `models:` and workflows to match):
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors models/loras/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors models/loras/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors models/loras/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors models/loras/
-  #   python3 scripts/pin_model.py Comfy-Org/Wan_2.1_ComfyUI_repackaged split_files/vae/wan_2.1_vae.safetensors models/vae/
+  # Video family wan22_a14b (video_families: below): its files pinned 2026-10-24 with scripts/pin_model.py by the owner
+  # (licences checked by the owner), about 62.3 GB besides the text encoder above, which it shares with the 5B family.
+  # Downloaded only when VIDEO_FAMILIES lists the family and a boot includes it (Start dialog) or on demand.
   # The LoRAs are the lightx2v 4-step LoRAs as repackaged by Comfy-Org (unique file names; the lightx2v originals in
   # lightx2v/Wan2.2-Lightning share the names high_noise_model / low_noise_model across T2V and I2V, which would
-  # collide in models/loras/). The text encoder is the one already pinned above (shared with the 5B family).
+  # collide in models/loras/).
+  - {file: "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14293923632}
+  - {file: "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14293923632}
+  - {file: "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14294742832}
+  - {file: "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/diffusion_models/", size_bytes: 14294742832}
+  - {file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", revision: "ee6f4a40737a995bf5818954cfce6d59443b0f04", dest: "models/loras/", size_bytes: 1226977424}
+  - {file: "split_files/vae/wan_2.1_vae.safetensors", repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged", revision: "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", dest: "models/vae/", size_bytes: 253815318}
 workflows: [qwen-image-t2i.json, qwen-image-edit.json, image-upscale.json, video-ti2v.json, video-14b-t2v.json, video-14b-i2v.json]
 # How the web app fills workflows/qwen-image-t2i.json (node ids refer to that file; sizes are multiples of 32).
 generate:
@@ -336,8 +336,9 @@ video:
 # Boot downloads a family only when it is chosen in the Start dialog (VIDEO_BOOT_FAMILIES) or later on demand.
 # UNVERIFIED (nothing ran): both 14B graphs (two experts through KSamplerAdvanced 0-2 then 2-4, the lightx2v 4-step
 # LoRAs at strength 1, shift 5, cfg 1, euler/simple), the file names, 16 fps, VRAM of two 14B fp8 experts on a 24 GB
-# card (ComfyUI loads one expert at a time; it may still need offloading), the time per clip, and the disk need
-# (about 60 GB of files for the family: start such an instance with about 110 GB of disk).
+# card (ComfyUI loads one expert at a time; it may still need offloading) and the time per clip. Disk: the family's
+# files are 69.2 GB with the shared text encoder (62.3 GB without it), so a start with this family alone rents about
+# VAST_DISK_GB + 70 GB (120 GB with the default 50).
 video_families:
   - id: wan22_a14b
     title: "Quality (14B, 4 steps)"

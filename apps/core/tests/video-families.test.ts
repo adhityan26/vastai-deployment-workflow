@@ -50,13 +50,42 @@ describe("parseVideo: the base family's id and title", () => {
 });
 
 describe("parseVideoFamilies", () => {
-  it("the shipped 14B family is validated but off unless VIDEO_FAMILIES names it (its files are not pinned yet)", () => {
+  it("the shipped 14B family is pinned, validated, and on only when VIDEO_FAMILIES names it with VIDEO_ENABLED", () => {
     const doc = shipped();
     expect(parseVideoFamilies(doc.video_families, doc.models, { enabled: [], videoEnabled: true, baseId: "wan22_5b" })).toEqual([]);
     expect(parseVideoFamilies(doc.video_families, doc.models, { enabled: ["wan22_a14b"], videoEnabled: false, baseId: "wan22_5b" })).toEqual([]);
-    expect(() => parseVideoFamilies(doc.video_families, doc.models, { enabled: ["wan22_a14b"], videoEnabled: true, baseId: "wan22_5b" }))
+    expect(parseVideoFamilies(doc.video_families, doc.models, { enabled: ["wan22_a14b"], videoEnabled: true, baseId: "wan22_5b" }).map((f) => f.id)).toEqual(["wan22_a14b"]);
+    // Without its own pins (as before 2026-10-24) the family is refused while it is on.
+    const own = new Set((doc.video_families[0].models as Doc[]).map((m) => m.file).filter((f) => f !== "umt5_xxl_fp8_e4m3fn_scaled.safetensors"));
+    const unpinned = (doc.models as Doc[]).filter((e) => !own.has(e.file.split("/").pop()));
+    expect(() => parseVideoFamilies(doc.video_families, unpinned, { enabled: ["wan22_a14b"], videoEnabled: true, baseId: "wan22_5b" }))
       .toThrow(/wan2\.2_t2v_high_noise_14B_fp8_scaled\.safetensors is not listed in models \(pin it with scripts\/pin_model\.py\)/);
     expect(parseVideoFamilies(undefined, [], { enabled: [], videoEnabled: true, baseId: null })).toEqual([]);
+  });
+
+  it("ships the owner's pins of the family (2026-10-24): repo, revision, folder and size of each file", () => {
+    const W22 = ["Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "ee6f4a40737a995bf5818954cfce6d59443b0f04"];
+    const W21 = ["Comfy-Org/Wan_2.1_ComfyUI_repackaged", "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d"];
+    const expected: [string, string[], string, number][] = [
+      ["split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", W22, "models/diffusion_models/", 14293923632],
+      ["split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", W22, "models/diffusion_models/", 14293923632],
+      ["split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", W22, "models/diffusion_models/", 14294742832],
+      ["split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", W22, "models/diffusion_models/", 14294742832],
+      ["split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", W22, "models/loras/", 1226977424],
+      ["split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", W22, "models/loras/", 1226977424],
+      ["split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", W22, "models/loras/", 1226977424],
+      ["split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", W22, "models/loras/", 1226977424],
+      ["split_files/vae/wan_2.1_vae.safetensors", W21, "models/vae/", 253815318],
+      ["split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", W21, "models/text_encoders/", 6735906897], // shared with the 5B
+    ];
+    const doc = shipped();
+    for (const [file, [repo, revision], dest, size] of expected) {
+      expect((doc.models as Doc[]).filter((m) => m.file === file), file).toEqual([{ file, repo, revision, dest, size_bytes: size }]);
+    }
+    const familyFiles = new Set((doc.video_families[0].models as Doc[]).map((m) => m.file));
+    expect([...familyFiles].sort()).toEqual(expected.map(([f]) => f.split("/").pop()).sort());
+    // 62.34 GB of its own files plus the shared 6.74 GB text encoder.
+    expect(expected.reduce((n, e) => n + e[3], 0)).toBe(69_074_964_839);
   });
 
   it("reads an enabled, pinned family: both modes, fixed inputs and the expert slots", () => {

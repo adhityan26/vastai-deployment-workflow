@@ -75,9 +75,25 @@ def test_video_families_switches_a_family_on_only_with_video_enabled_and_its_pin
     assert video_family_ids(load_profile(path, video_enabled=True)) == ("wan22_5b",)
 
 
+def _unpin_family(raw):
+    """The profile without the family's own pins (as before the owner pinned them on 2026-10-24)."""
+    base = {m["file"] for m in raw["video"]["models"]}
+    own = {m["file"] for m in _family(raw)["models"]} - base
+    raw["models"] = [m for m in raw["models"] if m["file"].rsplit("/", 1)[-1] not in own]
+    return raw
+
+
+def test_the_shipped_family_is_pinned_and_switches_on(tmp_path):
+    on = load_profile(SHIPPED, video_enabled=True, video_families=(FAMILY,))
+    assert video_family_ids(on) == ("wan22_5b", FAMILY)
+    specs = family_model_specs(on, FAMILY)
+    assert len(specs) == 10 and all(len(m.revision) == 40 for m in specs)
+    assert sum(m.size_bytes for m in specs) == 69_074_964_839  # 62.34 GB of its own plus the shared text encoder
+
+
 def test_an_enabled_family_without_its_pins_or_an_unknown_id_is_refused(tmp_path):
     with pytest.raises(ProfileError, match="wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors is not listed in models"):
-        load_profile(SHIPPED, video_enabled=True, video_families=(FAMILY,))
+        load_profile(_write(tmp_path, _unpin_family(_raw())), video_enabled=True, video_families=(FAMILY,))
     for enabled in (True, False):
         with pytest.raises(ProfileError, match="VIDEO_FAMILIES names an unknown video family: nope"):
             load_profile(SHIPPED, video_enabled=enabled, video_families=("nope",))

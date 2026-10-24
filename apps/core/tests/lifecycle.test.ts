@@ -1233,12 +1233,22 @@ describe("overall download progress", () => {
       { file: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", size_bytes: 9999658848 },
       { file: "split_files/vae/wan2.2_vae.safetensors", size_bytes: 1409400960 },
       { file: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", size_bytes: 6735906897 },
+      // The 14B family (pinned 2026-10-24).
+      { file: "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", size_bytes: 14293923632 },
+      { file: "split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", size_bytes: 14293923632 },
+      { file: "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", size_bytes: 14294742832 },
+      { file: "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", size_bytes: 14294742832 },
+      { file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", size_bytes: 1226977424 },
+      { file: "split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", size_bytes: 1226977424 },
+      { file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", size_bytes: 1226977424 },
+      { file: "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", size_bytes: 1226977424 },
+      { file: "split_files/vae/wan_2.1_vae.safetensors", size_bytes: 253815318 },
     ]);
   });
 
   it("an image-only boot of the shipped profile counts only the image files (about 15 GB), one with video all (about 33 GB)", async () => {
     const shippedProfile = loadProfile(shipped);
-    const { life, vast, agent } = setup({ models: shippedProfile.models, videoFiles: shippedProfile.videoFiles });
+    const { life, vast, agent } = setup({ models: shippedProfile.models, videoFiles: shippedProfile.videoFiles, familyFiles: shippedProfile.videoFamilyFiles });
     await life.start();
     vast.instances[0]!.actual_status = "running";
     const prog = { phase: "models", file: "qwen-image-2.1-UC-Q4_K_M.gguf", bytes_done: 5, bytes_total: 1 };
@@ -1246,6 +1256,10 @@ describe("overall download progress", () => {
     expect((await life.view()).download).toMatchObject({ files_total: 5, bytes_total: 15_016_544_196 });
     agent.statusImpl = async () => status("downloading", { progress: prog, video_models: { state: "not_installed", boot: true, bytes_done: 0, bytes_total: 1 } });
     expect((await life.view()).download).toMatchObject({ files_total: 8, bytes_total: 15_016_544_196 + 18_144_966_705 });
+    // A boot of the 14B family alone: its nine own files and the shared text encoder (69.07 GB), none of the 5B's own.
+    const fam = (id: string, boot: boolean) => ({ id, state: "not_installed" as const, boot, bytes_done: 0, bytes_total: 1 });
+    agent.statusImpl = async () => status("downloading", { progress: prog, video_families: [fam("wan22_5b", false), fam("wan22_a14b", true)] });
+    expect((await life.view()).download).toMatchObject({ files_total: 15, bytes_total: 15_016_544_196 + 69_074_964_839 });
   });
 
   it("sums earlier files, the current file's bytes (clamped) and nothing after it", () => {

@@ -17,7 +17,7 @@ def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
     raw = yaml.safe_load(text)
     from_yaml = [{k: str(v) for k, v in m.items()} for m in raw["models"]]
     assert net_probe._flow_models(text) == from_yaml
-    assert len(from_yaml) == 8  # five image files, three video files
+    assert len(from_yaml) == 17  # five image files, three 5B video files, nine 14B video files
     families = {m["file"] for f in raw["video_families"] for m in f["models"]}
     assert net_probe._flow_video_files(text) == {m["file"] for m in raw["video"]["models"]} | families
 
@@ -25,10 +25,9 @@ def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
 def test_a_pinned_video_familys_files_are_left_out_with_and_without_pyyaml(tmp_path, monkeypatch):
     import builtins
 
+    # The shipped profile pins the 14B family (2026-10-24); a re-dumped copy checks the parser on other formatting.
     raw = yaml.safe_load((PROFILES / "image.yaml").read_text())
-    for m in raw["video_families"][0]["models"]:
-        raw["models"].append({"file": f"split_files/x/{m['file']}", "repo": "o/r", "revision": "a" * 40,
-                              "dest": m["dest"], "size_bytes": 10**11})
+    assert any("14B" in m["file"] for m in raw["models"])
     path = tmp_path / "image.yaml"
     path.write_text(yaml.safe_dump(raw, default_flow_style=None, width=1000))
     with_yaml = net_probe.read_models(path)

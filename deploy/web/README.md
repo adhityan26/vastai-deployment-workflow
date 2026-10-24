@@ -742,32 +742,20 @@ base family's workflow.
 
 **Switching it on (owner):**
 
-1. Pin its files on the laptop (licences first). The repo and file names are from memory: if `pin_model.py` says a
-   file is not in the repo, find the right name on the repo page and correct the family's `models:`, its `experts`
-   and the two workflow files to match. The text encoder is already pinned.
-
-   ```
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors models/diffusion_models/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors models/loras/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors models/loras/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors models/loras/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.2_ComfyUI_Repackaged split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors models/loras/
-   python3 scripts/pin_model.py Comfy-Org/Wan_2.1_ComfyUI_repackaged split_files/vae/wan_2.1_vae.safetensors models/vae/
-   ```
-
-   The LoRAs are taken from Comfy-Org's repackaging because their names are unique; the lightx2v originals share the
-   names `high_noise_model` / `low_noise_model` across text and image to video and would overwrite each other in
-   `models/loras/`.
+1. Its files are pinned (owner, 2026-10-24, with `scripts/pin_model.py`, licences checked by the owner) in
+   `models:` of the profile: the four fp8 experts and the four 4-step LoRAs from
+   `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` (revision `ee6f4a4...`), the VAE from `Comfy-Org/Wan_2.1_ComfyUI_repackaged`
+   (revision `123acf1...`); the text encoder is the 5B family's own pin. The LoRAs are Comfy-Org's repackaging
+   because their names are unique; the lightx2v originals share the names `high_noise_model` / `low_noise_model`
+   across text and image to video and would overwrite each other in `models/loras/`.
 2. Set `VIDEO_FAMILIES=wan22_a14b` in `.env` (besides `VIDEO_ENABLED=true`; a csv, apps and instance). The web app
    passes it to every instance it starts. Both loaders refuse the profile while a listed family has a file missing
    from `models:` or in another folder (same message as the base section), and refuse an id that names no family.
    With only `VIDEO_ENABLED=true` (and `VIDEO_FAMILIES` empty, the default) everything is as before: the base family
    only, and the 14B family is validated but never downloaded or offered.
-3. Disk: the family's new files are about 60 GB (four experts, two per mode, about 14-15 GB each; four LoRAs; the VAE).
-   **A start with both 5B and 14B, or 14B alone, needs about 110 GB of disk**: the Start dialog rents
+3. Disk: the family's own files are 62.3 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE), 69.1 GB
+   with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
+   with both families 131 GB** (the 5B alone stays at `VAST_VIDEO_DISK_GB`, 80): the Start dialog rents
    max(`VAST_DISK_GB`, `VAST_VIDEO_DISK_GB`, `VAST_DISK_GB` + the ticked families' pinned files in GB, a shared file
    counted once), computed from the pins, so `VAST_VIDEO_DISK_GB` needs no change for it. An on-demand download onto
    an instance started without the family checks the free disk first (`disk_insufficient`).
@@ -796,7 +784,7 @@ they are given on demand only (decision: two links per mode in the Start dialog 
 case). **Whether the pinned `leejet/ComfyUI-GGUF` fork loads the 14B experts' GGUF files is UNVERIFIED.**
 
 UNVERIFIED (nothing ran): both 14B graphs and every node and input name in them (written from memory of the native
-nodes, not exported from ComfyUI), the file names and repos of the pin commands above, the 4-step recipe values
+nodes, not exported from ComfyUI; the file names they load are the pinned ones), the 4-step recipe values
 (strength 1.0, shift 5, cfg 1, euler/simple, the 0-2 / 2-4 split), 16 fps, the 49/81 frame lengths, VRAM of the two
 14B fp8 experts on a 24 GB card (ComfyUI loads one expert at a time; it may still need offloading), the time a clip
 takes (`VIDEO_TIMEOUT_S` 2400 s is a guess for both families), the disk need above, and GGUF support for these
