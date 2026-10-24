@@ -47,7 +47,12 @@ text over port 2375, and anyone on the LAN who can reach that port can read them
 `docker inspect vast-comfy-web`. Same trusted-LAN caveat; do not expose port 2375 anywhere else.
 Run everything from the laptop checkout:
 
-    DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d --build
+    DOCKER_HOST=tcp://192.168.88.113:2375 docker compose build --pull
+    DOCKER_HOST=tcp://192.168.88.113:2375 docker compose up -d
+
+`--pull` matters: `up --build` alone reuses the cached `node:24-alpine` layer, so a Node.js security release
+(for example CVE-2026-111497, the Brotli decoder, fixed in 22.23.4 / 24.22.1 / 26.12.1) never reaches the image.
+`scripts/check-node-version.js` also stops the build when either stage has an unfixed Node.js.
 
 The build context (the repository, minus `.dockerignore` entries) is uploaded to the remote
 daemon, and `.env` is read on the laptop, so host paths in the compose file would resolve on
