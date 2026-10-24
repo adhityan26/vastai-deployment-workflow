@@ -17,6 +17,7 @@ instance/agent
 instance/*.sh
 instance/allowed-keys.txt
 scripts
+!scripts/check-node-version.js
 output
 *.key
 *.pem

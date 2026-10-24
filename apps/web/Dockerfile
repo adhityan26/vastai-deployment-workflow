@@ -4,9 +4,13 @@
 # Base image: Node 24 (current LTS line, matches @types/node ^24) on Alpine. Alpine keeps the
 # image small and the app has no native dependencies. The tag is a moving minor tag on purpose
 # (security patches); pin a digest in your own build if you need bit-exact images.
+# `docker compose up --build` reuses a cached base layer: build with `--pull` (README). scripts/check-node-version.js
+# stops the build when the Node.js of either stage is older than the CVE-2026-111497 (Brotli) fix.
 
 FROM node:24-alpine AS build
 WORKDIR /repo
+COPY scripts/check-node-version.js /tmp/check-node-version.js
+RUN node /tmp/check-node-version.js
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY apps/core/package.json apps/core/tsconfig.json apps/core/tsconfig.build.json apps/core/
 COPY apps/web/package.json apps/web/tsconfig.json apps/web/tsconfig.page.json apps/web/tsconfig.build.json apps/web/
@@ -22,6 +26,8 @@ RUN node -e 'const fs=require("fs");const p="apps/core/package.json";const j=JSO
 FROM node:24-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+COPY scripts/check-node-version.js /tmp/check-node-version.js
+RUN node /tmp/check-node-version.js && rm /tmp/check-node-version.js
 COPY package.json package-lock.json ./
 COPY --from=build /repo/apps/core/package.json apps/core/package.json
 COPY apps/web/package.json apps/web/package.json
