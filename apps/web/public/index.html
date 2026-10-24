@@ -107,6 +107,13 @@
         <select id="video-size" name="video_size"></select>
         <label for="video-duration">Length</label>
         <select id="video-duration" name="duration"></select>
+        <div id="video-lora-box" hidden>
+          <label for="video-lora">Extra LoRA</label>
+          <select id="video-lora" name="video_lora"></select>
+          <label for="video-lora-strength">LoRA strength (0 to 1)</label>
+          <input id="video-lora-strength" name="video_lora_strength" type="number" min="0" max="1" step="0.05" inputmode="decimal">
+          <p id="video-lora-note" class="muted"></p>
+        </div>
         <div id="video-models" class="video-models" hidden>
           <p id="video-models-text" role="status"></p>
           <div id="video-models-link" hidden>

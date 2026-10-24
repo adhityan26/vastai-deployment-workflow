@@ -58,7 +58,10 @@ def test_the_shipped_family_is_validated_off_and_its_workflows_load_its_files():
     for mode in ("text", "image"):
         graph = json.loads((INSTANCE / "workflows" / fam[mode]["workflow"]).read_text())
         used |= {v for n in graph.values() for v in n["inputs"].values() if isinstance(v, str)}
-    assert {m["file"] for m in fam["models"]} <= used
+    # Every file is loaded by a workflow, except the extra LoRA, which the web app adds when a user picks it.
+    extra = {e[side]["file"] for e in fam["extra_loras"] for side in ("high", "low") if side in e}
+    assert extra == {"calisthenics_moves_high_noise.safetensors"}
+    assert {m["file"] for m in fam["models"]} - extra <= used
     # The text encoder is the base family's own pin, shared (never a second entry).
     assert sum(1 for m in raw["models"] if m["file"].endswith("umt5_xxl_fp8_e4m3fn_scaled.safetensors")) == 1
 
@@ -68,7 +71,7 @@ def test_video_families_switches_a_family_on_only_with_video_enabled_and_its_pin
     on = load_profile(path, video_enabled=True, video_families=(FAMILY,))
     assert video_family_ids(on) == ("wan22_5b", FAMILY)
     fam = on.video_families[0]
-    assert fam.enabled and fam.title == "Quality (14B, 4 steps)" and len(fam.models) == 10
+    assert fam.enabled and fam.title == "Quality (14B, 4 steps)" and len(fam.models) == 11
     assert ("text", "high", "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors") in fam.experts
     assert ("image", "low", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors") in fam.experts
     assert video_family_ids(load_profile(path, video_enabled=False, video_families=(FAMILY,))) == ()
@@ -87,8 +90,10 @@ def test_the_shipped_family_is_pinned_and_switches_on(tmp_path):
     on = load_profile(SHIPPED, video_enabled=True, video_families=(FAMILY,))
     assert video_family_ids(on) == ("wan22_5b", FAMILY)
     specs = family_model_specs(on, FAMILY)
-    assert len(specs) == 10 and all(len(m.revision) == 40 for m in specs)
-    assert sum(m.size_bytes for m in specs) == 69_074_964_839  # 62.34 GB of its own plus the shared text encoder
+    assert len(specs) == 11 and all(len(m.revision) == 40 for m in specs)
+    # 62.49 GB of its own (the extra LoRA's 153 MB included) plus the shared text encoder.
+    assert sum(m.size_bytes for m in specs) == 69_228_418_399
+    assert "calisthenics_moves_high_noise.safetensors" in {PurePosixPath(m.file).name for m in specs}
 
 
 def test_an_enabled_family_without_its_pins_or_an_unknown_id_is_refused(tmp_path):
@@ -116,7 +121,7 @@ def test_a_boot_downloads_only_the_chosen_families_files(tmp_path):
     assert "wan2.2_ti2v_5B_fp16.safetensors" not in only14 and "wan2.2_vae.safetensors" not in only14
     assert set(only14) - set(image_only) == {m["file"] for m in _family(_raw())["models"]}
     both = _names(boot_models(profile, True, ("wan22_5b", FAMILY)))
-    assert len(both) == len(set(both)) == 5 + 3 + 9
+    assert len(both) == len(set(both)) == 5 + 3 + 10
     # Not included: no video file at all, whatever families are named.
     assert _names(boot_models(profile, False, (FAMILY,))) == image_only
 
@@ -139,7 +144,7 @@ def test_a_boot_family_that_is_not_on_is_refused(tmp_path):
 
 def test_family_model_specs(tmp_path):
     profile = load_profile(_write(tmp_path, _pin_family(_raw())), video_enabled=True, video_families=(FAMILY,))
-    assert len(family_model_specs(profile, FAMILY)) == 10
+    assert len(family_model_specs(profile, FAMILY)) == 11
     assert _names(family_model_specs(profile, "wan22_5b")) == ["wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_vae.safetensors",
                                                               "umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
     with pytest.raises(ProfileError):
@@ -160,6 +165,12 @@ def test_family_model_specs(tmp_path):
     (lambda f, r: f["text"]["experts"][0].update(file="wan_2.1_vae.safetensors"), "diffusion"),
     (lambda f, r: f["text"]["experts"][0].update(file="other.safetensors"), "family's models"),
     (lambda f, r: f["text"]["experts"][1].update(slot="high"), "unique"),
+    (lambda f, r: f.update(extra_loras="x"), "extra_loras must be a list"),
+    (lambda f, r: f["extra_loras"][0].update(id="Bad"), "id"),
+    (lambda f, r: f["extra_loras"].append(dict(f["extra_loras"][0])), "unique"),
+    (lambda f, r: f["extra_loras"][0].pop("high"), "needs a high or a low file"),
+    (lambda f, r: f["extra_loras"][0].update(high={"file": "other.safetensors"}), "one of the family's models"),
+    (lambda f, r: f["extra_loras"][0].update(low={"file": "wan_2.1_vae.safetensors"}), "must be a LoRA"),
 ])
 def test_a_malformed_family_fails_the_profile_even_while_off(tmp_path, change, message):
     raw = _raw()

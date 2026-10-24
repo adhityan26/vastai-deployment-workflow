@@ -753,8 +753,8 @@ base family's workflow.
    from `models:` or in another folder (same message as the base section), and refuse an id that names no family.
    With only `VIDEO_ENABLED=true` (and `VIDEO_FAMILIES` empty, the default) everything is as before: the base family
    only, and the 14B family is validated but never downloaded or offered.
-3. Disk: the family's own files are 62.3 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE), 69.1 GB
-   with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
+3. Disk: the family's own files are 62.5 GB (four experts of 14.3 GB, four LoRAs of 1.2 GB, the 0.25 GB VAE, the
+   0.15 GB extra LoRA), 69.2 GB with the shared text encoder. **With the default `VAST_DISK_GB=50` a start with the 14B family alone rents 120 GB,
    with both families 131 GB** (the 5B alone stays at `VAST_VIDEO_DISK_GB`, 80): the Start dialog rents
    max(`VAST_DISK_GB`, `VAST_VIDEO_DISK_GB`, `VAST_DISK_GB` + the ticked families' pinned files in GB, a shared file
    counted once), computed from the pins, so `VAST_VIDEO_DISK_GB` needs no change for it. An on-demand download onto
@@ -770,6 +770,25 @@ is more than one family); its sizes and lengths are the chosen family's. A famil
 the same note as the base one: admins get "Download video models (about N GB, several minutes)"
 (`POST /api/video-models` with `family`), members "Ask an admin to download them"; Make video stays disabled until
 that family's files are there. One video download runs at a time on an instance (`video_download_busy` otherwise).
+
+**Extra LoRA.** A family may offer optional extra LoRAs (profile `extra_loras:` of the family; one per job). The
+shipped one is "Calisthenic moves" (`calisthenic_moves`): `calisthenics_moves_high_noise.safetensors` from
+`Aisha-AI-Official/wan2.2-calisthenic-moves` (pinned by the owner 2026-10-24, 153 MB), a high-noise-only LoRA, so only
+the high branch gets it. Its file is part of the family's `models:` and is **downloaded with the family** (the
+simplest robust choice: no separate download state, and the family's disk and progress figures include it; it costs
+153 MB on a 69 GB family). With the 14B family chosen the Video tool shows "Extra LoRA" (None by default), a strength
+(0 to 1, step 0.05, starting at the entry's default 0.6) and a note with the description and the trigger words. The
+job then carries `extra_lora` (the entry's id) and `extra_lora_strength`; the web app adds a `LoraLoaderModelOnly`
+node (`video_lora_high`, `video_lora_low` for an entry with a low file) right after the branch's 4-step LoRA node
+(`lora_after:` of each mode names it) and before `ModelSamplingSD3`, with the file name from the profile only. It is
+refused (400) for the base family or a family without extra LoRAs (`extra_lora_unavailable`), for an unknown id
+(`unknown_extra_lora`), for a mode the entry does not list (`extra_lora_mode`) and for a strength outside 0 to 1 or
+without a LoRA (`invalid_strength`). An entry has `id`, `title`, `description`, `modes` (text and/or image), `high`
+and/or `low` (`{file}`, one of the family's `models` in `models/loras/`), `strength` (default 0.6) and
+`trigger_words`. **UNVERIFIED:** whether this LoRA suits text and/or image to video (both are offered until someone
+knows), how it stacks with the lightx2v 4-step LoRAs, the 0.6 default (the usual recommendation, not tested), and its
+trigger words: nobody here has read its model card, so `trigger_words` is empty; the owner should fill it from the
+card (and narrow `modes` if the card says so).
 
 **Expert links (GGUF).** For a family an admin may link both experts of one mode instead of the pinned fp8 files:
 choose "Text to video" or "Image to video" under "Expert links for", then give the high-noise and the low-noise link

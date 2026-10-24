@@ -17,7 +17,7 @@ def test_the_flow_parser_reads_the_shipped_profile_like_yaml():
     raw = yaml.safe_load(text)
     from_yaml = [{k: str(v) for k, v in m.items()} for m in raw["models"]]
     assert net_probe._flow_models(text) == from_yaml
-    assert len(from_yaml) == 17  # five image files, three 5B video files, nine 14B video files
+    assert len(from_yaml) == 18  # five image files, three 5B video files, ten 14B video files (its extra LoRA too)
     families = {m["file"] for f in raw["video_families"] for m in f["models"]}
     assert net_probe._flow_video_files(text) == {m["file"] for m in raw["video"]["models"]} | families
 

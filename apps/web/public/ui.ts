@@ -129,6 +129,8 @@ import {
   expertsNote,
   familyDownloadBody,
   familyVideo,
+  extraLoraMembers,
+  extraLoraNote,
   durationLabel,
   videoAsEdit,
   videoHint,
@@ -162,6 +164,7 @@ import {
   pillView,
   windowSpeed,
   type ApiState,
+  type VideoExtraLoraView,
   type VideoFamilyInfo,
   type VideoInfo,
   type Estimate,
@@ -1307,6 +1310,40 @@ export function mountApp(doc: Document, env: Env): App {
     const f = s.video_families?.find((x) => x.id === videoFamilySelect.value) ?? null;
     return f === null || f.base ? null : f;
   }
+  const videoLoraSelect = $<HTMLSelectElement>("video-lora");
+  const videoLoraStrength = $<HTMLInputElement>("video-lora-strength");
+  let videoLoraKey = "";
+  /** The chosen extra LoRA of the chosen family (null: none). */
+  function chosenLora(s: ApiState): VideoExtraLoraView | null {
+    return chosenFamily(s)?.extra_loras.find((l) => l.id === videoLoraSelect.value) ?? null;
+  }
+  /** The extra LoRA choice: only for a family that has some; "None" first; the strength starts at the entry's default. */
+  function renderVideoLora(s: ApiState, filming: boolean): void {
+    const family = chosenFamily(s);
+    const loras = family?.extra_loras ?? [];
+    const key = JSON.stringify([family?.id ?? null, loras]);
+    if (key !== videoLoraKey) {
+      videoLoraKey = key;
+      const none = make("option", "None");
+      none.value = "";
+      videoLoraSelect.replaceChildren(none, ...loras.map((l) => {
+        const o = make("option", l.title);
+        o.value = l.id;
+        return o;
+      }));
+      videoLoraStrength.value = "";
+    }
+    $("video-lora-box").hidden = !filming || loras.length === 0;
+    const lora = chosenLora(s);
+    videoLoraStrength.disabled = lora === null;
+    if (lora !== null && videoLoraStrength.value === "") videoLoraStrength.value = String(lora.strength);
+    $("video-lora-note").textContent = lora === null ? "" : extraLoraNote(lora);
+  }
+  videoLoraSelect.addEventListener("change", () => {
+    videoLoraStrength.value = "";
+    if (state) renderForm(state);
+  });
+
   /** The video offer as the chosen family sees it (sizes, lengths, model state). */
   function currentVideo(s: ApiState): VideoInfo | null {
     return s.video === null ? null : familyVideo(s.video, s.video_families, videoFamilySelect.value);
@@ -1531,6 +1568,7 @@ export function mountApp(doc: Document, env: Env): App {
     // A video has its own size and length; only the seed of the sampling box applies.
     qualityBox.hidden = filming;
     renderVideoModels(s, filming);
+    renderVideoLora(s, filming);
     sizeBox.hidden = editing || upscaling || filming;
     promptBox.placeholder = notes
       ? "Optional notes for this style"
@@ -2281,17 +2319,21 @@ export function mountApp(doc: Document, env: Env): App {
     const duration = videoDurationSelect.value;
     if (size === "" || duration === "") return formFail("Choose a size and a length.");
     const file = references[0]?.file ?? null;
+    const lora = chosenLora(state);
+    const loraChoice = extraLoraMembers(lora, videoLoraStrength.value, file !== null);
+    if ("error" in loraChoice) return formFail(loraChoice.error);
     jobPending = true; // also blocks a second submit while the image is being read and sent
     if (state) renderForm(state);
     try {
       const body: Record<string, unknown> = { prompt, size, duration };
       if (family !== null) body["family"] = family.id;
+      Object.assign(body, loraChoice.members);
       if (seed.value !== undefined) body["seed"] = seed.value;
       if (file !== null) body["image"] = await readBase64(file);
       const res = await call("POST", API.video, body);
       const id = typeof res === "object" && res !== null ? (res as Record<string, unknown>)["id"] : undefined;
       if (!isJobId(id)) throw new ApiError("The server returned an unusable job id.");
-      const entry = addEntry(id, "video", prompt, videoLabel(size, duration, file !== null, family?.title ?? null));
+      const entry = addEntry(id, "video", prompt, videoLabel(size, duration, file !== null, family?.title ?? null, lora?.title ?? null));
       void pollJob(entry, 0);
     } catch (err) {
       jobPending = false;

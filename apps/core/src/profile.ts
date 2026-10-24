@@ -413,7 +413,7 @@ export function loadProfile(path: string, opts: { videoEnabled?: boolean; videoF
     const baseFamily: VideoFamily[] =
       video === null || base === null
         ? []
-        : [{ id: base.id, title: base.title, base: true, models: video.models, fps: video.fps, sizes: video.sizes, durations: video.durations, text: video, image: video }];
+        : [{ id: base.id, title: base.title, base: true, models: video.models, fps: video.fps, sizes: video.sizes, durations: video.durations, text: video, image: video, extraLoras: [] }];
     return {
       name: required(raw["name"], "name"),
       generate,

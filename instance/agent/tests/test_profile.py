@@ -250,6 +250,8 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
         # the 14B family's own files (pinned 2026-10-24): four experts, four 4-step LoRAs, its VAE
         "models/diffusion_models/", "models/diffusion_models/", "models/diffusion_models/", "models/diffusion_models/",
         "models/loras/", "models/loras/", "models/loras/", "models/loras/", "models/vae/",
+        # its extra LoRA (extra_loras:), downloaded with the family
+        "models/loras/",
     ]
     # An image-only boot (the default) downloads and disk-checks only these; the style LoRA and the upscale model add
     # about 0.39 GB to the 14.6 GB base.
@@ -260,8 +262,8 @@ def test_the_shipped_image_profile_loads_and_its_workflow_exists():
     on = load_profile(instance / "profiles" / "image.yaml", video_enabled=True)
     assert sum(m.size_bytes for m in boot_models(on, True)) == image_only + 9999658848 + 1409400960 + 6735906897
     # Its own files: 2 x 14293923632 + 2 x 14294742832 (experts), 4 x 1226977424 (LoRAs), 253815318 (VAE).
-    family_14b = 2 * 14293923632 + 2 * 14294742832 + 4 * 1226977424 + 253815318
-    assert family_14b == 62_339_057_942
+    family_14b = 2 * 14293923632 + 2 * 14294742832 + 4 * 1226977424 + 253815318 + 153453560  # + the extra LoRA
+    assert family_14b == 62_492_511_502
     assert sum(m.size_bytes for m in profile.models) == image_only + 9999658848 + 1409400960 + 6735906897 + family_14b
     # The 14B family alone at boot: its own files and the shared text encoder, none of the 5B's own.
     both = load_profile(instance / "profiles" / "image.yaml", video_enabled=True, video_families=("wan22_a14b",))

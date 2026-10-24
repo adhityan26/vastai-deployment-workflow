@@ -98,6 +98,7 @@ describe("loadProfile", () => {
       "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
       "split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
       "split_files/vae/wan_2.1_vae.safetensors",
+      "calisthenics_moves_high_noise.safetensors", // its extra LoRA
     ]);
     expect(loadProfile(shipped).video).toBeNull(); // VIDEO_ENABLED unset
     expect(loadProfile(shipped).videoFiles).toEqual(["wan2.2_ti2v_5B_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "wan2.2_vae.safetensors"]);
@@ -341,7 +342,7 @@ describe("video families in the profile", () => {
     expect(p.videoFamilies).toEqual([]);
     expect(Object.keys(p.videoFamilyFiles)).toEqual(["wan22_5b", "wan22_a14b"]);
     expect(p.videoFamilyFiles["wan22_5b"]).toEqual(p.videoFiles);
-    expect(p.videoFamilyFiles["wan22_a14b"]).toHaveLength(10);
+    expect(p.videoFamilyFiles["wan22_a14b"]).toHaveLength(11);
   });
 
   it("VIDEO_ENABLED alone switches on the base family only; VIDEO_FAMILIES adds a pinned family after it", () => {

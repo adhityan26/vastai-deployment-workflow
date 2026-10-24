@@ -2606,6 +2606,57 @@ describe("video families", () => {
     expect(q("#video-models-text b")).toBeNull();
   });
 
+  it("an extra LoRA: None by default, its note, the strength starting at its default; sent with the job and named in the label", async () => {
+    const lora = { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds moves.", modes: ["text"], strength: 0.6, trigger_words: "" };
+    const withLora = { ...big(), extra_loras: [lora] };
+    await mount({ menu, video, video_families: [baseFam, withLora] }, { "POST /api/video": { status: 202, body: { id: "v-1" } }, "GET /api/generate/v-1": { body: { status: "pending" } } });
+    chooseTool("video");
+    expect(q("#video-lora-box")!.hidden).toBe(true); // the base family has none
+    await pickFamily("wan22_a14b");
+    expect(q("#video-lora-box")!.hidden).toBe(false);
+    expect([...document.querySelectorAll("#video-lora option")].map((o) => o.textContent)).toEqual(["None", "Calisthenic moves"]);
+    expect(q<HTMLInputElement>("#video-lora-strength")!.disabled).toBe(true);
+    const sel = q<HTMLSelectElement>("#video-lora")!;
+    sel.value = "calisthenic_moves";
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+    const strength = q<HTMLInputElement>("#video-lora-strength")!;
+    expect(strength.value).toBe("0.6");
+    expect([strength.min, strength.max, strength.step]).toEqual(["0", "1", "0.05"]);
+    expect(q("#video-lora-note")!.textContent).toBe("Adds moves. No trigger words are known for it yet. Untested with this 4-step model: results may vary.");
+    strength.value = "2";
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("The LoRA strength must be a number from 0 to 1.");
+    expect(posts("/api/video")).toHaveLength(0);
+    strength.value = "0.35";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(posts("/api/video")[0]!.body).toEqual({ prompt: "a fox", size: "Landscape", duration: "About 5 s", family: "wan22_a14b", extra_lora: "calisthenic_moves", extra_lora_strength: 0.35 });
+    expect(q(".job .muted")!.textContent).toBe("Video: Landscape, About 5 s, Quality (14B, 4 steps), Calisthenic moves");
+  });
+
+  it("an extra LoRA not offered for image to video is refused with a start image attached", async () => {
+    const lora = { id: "calisthenic_moves", title: "Calisthenic moves", description: "", modes: ["text"], strength: 0.6, trigger_words: "" };
+    await mount({ menu, video, video_families: [baseFam, { ...big(), extra_loras: [lora] }] });
+    chooseTool("video");
+    await pickFamily("wan22_a14b");
+    const sel = q<HTMLSelectElement>("#video-lora")!;
+    sel.value = "calisthenic_moves";
+    sel.dispatchEvent(new Event("change"));
+    await flush();
+    const input = q<HTMLInputElement>("#ref-input")!;
+    Object.defineProperty(input, "files", { value: [new File(["STARTBYTES"], "a.png", { type: "image/png" })], configurable: true });
+    input.dispatchEvent(new Event("change"));
+    await flush();
+    q<HTMLTextAreaElement>("#prompt")!.value = "a fox";
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+    expect(q("#form-error")!.textContent).toBe("Calisthenic moves is not offered for image to video.");
+    expect(posts("/api/video")).toHaveLength(0);
+  });
+
   it("the Start dialog offers each family (the base one ticked) and sends the ticked ones with the video models", async () => {
     const families = [baseFam, big(missing)];
     const routes14: Record<string, Handler> = {

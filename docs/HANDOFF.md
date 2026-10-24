@@ -142,7 +142,11 @@ encoder is shared with the 5B). The Start dialog chooses which families a boot d
 (`video_families`, `VIDEO_BOOT_FAMILIES`; the disk follows the pins: 120 GB for 14B alone, 131 GB with both, at
 `VAST_DISK_GB=50`), the Video tool has a
 model choice, per-family download and per-expert links (both of a mode together; GGUF swaps that expert's loader).
-The 5B behaviour, its API fields and its tests are unchanged. UNVERIFIED: the 14B graphs, recipe values,
+An optional extra LoRA per job (profile `extra_loras:`; shipped: "Calisthenic moves", a
+high-noise-only LoRA pinned 2026-10-24 and downloaded with the family) is inserted after the 4-step LoRA of each
+branch it has a file for, strength 0 to 1 (default 0.6); its trigger words are empty until the owner fills them from
+the model card. The 5B behaviour, its API fields and its tests are unchanged. UNVERIFIED (also): the extra LoRA's fit
+with text/image to video, its stacking with the 4-step LoRAs and its strength; the 14B graphs, recipe values,
 16 fps, VRAM, time per clip, GGUF support of the pinned fork for these experts. Runbook: README "Video families".
 
 ## Next work, in order

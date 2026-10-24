@@ -136,6 +136,15 @@ export interface VideoInfo {
 }
 /** One linked or pinned diffusion expert of a video family mode (admins only). */
 export interface VideoExpertView { mode: "text" | "image"; slot: string; file: string; linked: boolean; sha256: string | null }
+/** An optional extra LoRA of a video family (profile data; its files are named for admins only). */
+export interface VideoExtraLoraView {
+  id: string;
+  title: string;
+  description: string;
+  modes: ("text" | "image")[];
+  strength: number;
+  trigger_words: string;
+}
 /** One video family to choose from (GET /api/state video_families; the base section first). */
 export interface VideoFamilyInfo {
   id: string;
@@ -150,6 +159,8 @@ export interface VideoFamilyInfo {
   slots: { text: string[]; image: string[] } | null;
   /** The experts in use (admins only; null for members and for the base section). */
   experts: VideoExpertView[] | null;
+  /** The optional extra LoRAs (empty when the family has none). */
+  extra_loras: VideoExtraLoraView[];
 }
 export interface UnknownInstance { vast_instance_id: number; actual_status: string | null; start_date: number; dph: number }
 
@@ -422,7 +433,16 @@ function parseVideoFamilies(v: unknown, video: VideoInfo | null): VideoFamilyInf
             : [],
         )
       : null;
-    out.push({ id: f["id"], title: f["title"], base: f["base"] === true, sizes: shape.sizes, durations: shape.durations, download_bytes: shape.download_bytes, models: shape.models, slots, experts });
+    const extraLoras = Array.isArray(f["extra_loras"])
+      ? (f["extra_loras"] as unknown[]).flatMap((e): VideoExtraLoraView[] => {
+          if (!isObj(e) || typeof e["id"] !== "string" || !FAMILY_ID.test(e["id"]) || typeof e["title"] !== "string" || e["title"] === "") return [];
+          const modes = Array.isArray(e["modes"]) ? (e["modes"] as unknown[]).filter((m): m is "text" | "image" => m === "text" || m === "image") : [];
+          const strength = num(e["strength"]);
+          if (modes.length === 0 || strength === null || strength < 0 || strength > 1) return [];
+          return [{ id: e["id"], title: e["title"], description: typeof e["description"] === "string" ? e["description"] : "", modes, strength, trigger_words: typeof e["trigger_words"] === "string" ? e["trigger_words"] : "" }];
+        })
+      : [];
+    out.push({ id: f["id"], title: f["title"], base: f["base"] === true, sizes: shape.sizes, durations: shape.durations, download_bytes: shape.download_bytes, models: shape.models, slots, experts, extra_loras: extraLoras });
   }
   if (out[0]?.base !== true || out.slice(1).some((f) => f.base || f.slots === null) || new Set(out.map((f) => f.id)).size !== out.length) return null;
   return out;
@@ -1359,8 +1379,28 @@ export function durationLabel(d: VideoDurationInfo): string {
 }
 
 /** The job label, the way the server labels the same job (a family besides the base one adds its title). */
-export function videoLabel(size: string, duration: string, fromImage: boolean, family: string | null = null): string {
-  return `Video: ${size}, ${duration}${family === null ? "" : `, ${family}`}${fromImage ? ", from an image" : ""}`;
+export function videoLabel(size: string, duration: string, fromImage: boolean, family: string | null = null, lora: string | null = null): string {
+  return `Video: ${size}, ${duration}${family === null ? "" : `, ${family}`}${lora === null ? "" : `, ${lora}`}${fromImage ? ", from an image" : ""}`;
+}
+
+/** What the page says under the extra LoRA choice: its description, its trigger words (if known) and the caveat. */
+export function extraLoraNote(l: VideoExtraLoraView): string {
+  const words = l.trigger_words.trim() === "" ? "No trigger words are known for it yet." : `Trigger words: ${l.trigger_words}`;
+  return `${l.description === "" ? "" : `${l.description} `}${words} Untested with this 4-step model: results may vary.`;
+}
+
+/**
+ * The request members of an extra LoRA choice (none for "None"), with the strength checked (0 to 1) and the mode
+ * (text, or image when a start image is attached) one the LoRA is offered for.
+ */
+export function extraLoraMembers(l: VideoExtraLoraView | null, strengthText: string, fromImage: boolean): { members: Record<string, unknown> } | { error: string } {
+  if (l === null) return { members: {} };
+  const mode = fromImage ? "image" : "text";
+  if (!l.modes.includes(mode)) return { error: `${l.title} is not offered for ${mode} to video.` };
+  const text = strengthText.trim();
+  const strength = text === "" ? l.strength : Number(text);
+  if (!Number.isFinite(strength) || strength < 0 || strength > 1) return { error: "The LoRA strength must be a number from 0 to 1." };
+  return { members: { extra_lora: l.id, extra_lora_strength: strength } };
 }
 
 /**

@@ -116,6 +116,8 @@ import {
   expertsNote,
   familyDownloadBody,
   familyVideo,
+  extraLoraMembers,
+  extraLoraNote,
 } from "../../public/model.js";
 import {
   PANEL_STORAGE_KEY,
@@ -1331,12 +1333,13 @@ describe("video families", () => {
     model: { file: "x.safetensors", linked: true, sha256: null },
   };
   const ready = { state: "ready" as const, bytes_done: 5, bytes_total: 5, percent: 100, reason: null };
-  const baseFam = { id: "wan22_5b", title: "Fast (5B)", base: true, sizes: video.sizes, durations: video.durations, download_bytes: 18_000_000_000, models: video.models, slots: null, experts: null };
+  const baseFam = { id: "wan22_5b", title: "Fast (5B)", base: true, sizes: video.sizes, durations: video.durations, download_bytes: 18_000_000_000, models: video.models, slots: null, experts: null, extra_loras: [] };
   const big = {
     id: "wan22_a14b", title: "Quality (14B, 4 steps)", base: false,
     sizes: [{ name: "Landscape", width: 832, height: 480 }], durations: [{ name: "About 5 s", seconds: 5 }],
     download_bytes: 60_000_000_000, models: ready, slots: { text: ["high", "low"], image: ["high", "low"] },
     experts: [{ mode: "text" as const, slot: "high", file: "h.gguf", linked: true, sha256: "a".repeat(64) }, { mode: "text" as const, slot: "low", file: "l.gguf", linked: true, sha256: null }],
+    extra_loras: [{ id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds moves.", modes: ["text" as const], strength: 0.6, trigger_words: "" }],
   };
   const state = (over: Record<string, unknown> = {}) => parseState({ ...base, video, ...over })!;
 
@@ -1392,5 +1395,32 @@ describe("video families", () => {
     expect(expertsNote({ ...big, experts: null })).toBe("");
     expect(EXPERT_LINK_NOTICE).toMatch(/both .* together/);
     expect(EXPERT_LINK_NOTICE).toMatch(/UNVERIFIED/);
+  });
+});
+
+
+describe("extra LoRAs of a video family", () => {
+  const lora = { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds moves.", modes: ["text" as const], strength: 0.6, trigger_words: "" };
+  it("sends the LoRA's id and a strength from 0 to 1 (its default when empty), only for a mode it is offered for", () => {
+    expect(extraLoraMembers(null, "0.3", false)).toEqual({ members: {} });
+    expect(extraLoraMembers(lora, "", false)).toEqual({ members: { extra_lora: "calisthenic_moves", extra_lora_strength: 0.6 } });
+    expect(extraLoraMembers(lora, " 0.25 ", false)).toEqual({ members: { extra_lora: "calisthenic_moves", extra_lora_strength: 0.25 } });
+    for (const bad of ["1.5", "-0.1", "x", "NaN"]) expect(extraLoraMembers(lora, bad, false), bad).toEqual({ error: "The LoRA strength must be a number from 0 to 1." });
+    expect(extraLoraMembers(lora, "0.5", true)).toEqual({ error: "Calisthenic moves is not offered for image to video." });
+  });
+
+  it("describes the LoRA with its trigger words, or says none are known, and that it is untested", () => {
+    expect(extraLoraNote(lora)).toBe("Adds moves. No trigger words are known for it yet. Untested with this 4-step model: results may vary.");
+    expect(extraLoraNote({ ...lora, description: "", trigger_words: "push-up" })).toBe("Trigger words: push-up Untested with this 4-step model: results may vary.");
+  });
+
+  it("reads the entries strictly: an odd one is left out", () => {
+    const fam = (extra: unknown) => ({ id: "big", title: "Big", base: false, sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], download_bytes: 1, models: null, slots: { text: ["high", "low"], image: ["high", "low"] }, experts: null, extra_loras: extra });
+    const baseFam = { id: "small", title: "Small", base: true, sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], download_bytes: 1, models: null, slots: null, experts: null, extra_loras: [] };
+    const video = { sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], max_bytes: 10, max_pixels: 10, types: ["png"], download_bytes: 1, models: null, model: null };
+    const read = (extra: unknown) => parseState({ ...base, video, video_families: [baseFam, fam(extra)] })!.video_families![1]!.extra_loras;
+    expect(read([lora])).toEqual([lora]);
+    expect(read([{ ...lora, strength: 2 }, { ...lora, modes: ["video"] }, { ...lora, id: "Bad" }, "x"])).toEqual([]);
+    expect(read(undefined)).toEqual([]);
   });
 });

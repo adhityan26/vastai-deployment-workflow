@@ -3594,7 +3594,7 @@ describe("edit output size", () => {
     expect(JSON.stringify(body.edit)).not.toContain("latent_image");
   });
 
-  it("an edit with a size feeds the sampler an empty latent of that size, and the label names it", async () => {
+  it("an edit with a size feeds the sampler an empty latent of that size, and with the chosen strength", async () => {
     h.setComfy(comfyEdit());
     const res = await post("/api/edit", await member(), { ...okEdit, size: "9:16" });
     expect(res.statusCode).toBe(202);
@@ -3680,12 +3680,12 @@ describe("video families", () => {
     expect(big.durations).toEqual([{ name: "About 3 s", seconds: 3 }, { name: "About 5 s", seconds: 5 }]);
     expect(big.models).toEqual({ state: "ready", bytes_done: 9, bytes_total: 9, percent: 100, reason: null });
     expect(big.slots).toEqual({ text: ["high", "low"], image: ["high", "low"] });
-    expect(big.download_bytes).toBe(69_074_964_839); // its nine own pins and the shared text encoder
+    expect(big.download_bytes).toBe(69_228_418_399); // its ten own pins (the extra LoRA's too) and the shared text encoder
     expect(big.experts).toBeNull(); // file names are for admins
     expect(m.video_families[0].models).toEqual({ state: "ready", bytes_done: 50, bytes_total: 50, percent: 100, reason: null });
     const a = (await call("GET", "/api/state", await admin())).json();
     expect(a.video_families[1].experts[0]).toEqual({ mode: "text", slot: "high", file: "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", linked: false, sha256: null });
-    for (const secret of ["\"node\"", "workflow", "\"length\"", "frames", "shift", "strength"]) expect(JSON.stringify(m.video_families)).not.toContain(secret);
+    for (const secret of ["\"node\"", "workflow", "\"length\"", "frames", "shift", "strength_model"]) expect(JSON.stringify(m.video_families)).not.toContain(secret);
   });
 
   it("refuses to start with a family workflow that does not match its profile entry, or that did not load", async () => {
@@ -3812,18 +3812,55 @@ describe("video families", () => {
     }
   });
 
+  it("lists the family's extra LoRAs (profile data; file names for admins only); the base family has none", async () => {
+    h = await fharness();
+    const m = (await call("GET", "/api/state", await member())).json();
+    expect(m.video_families[0].extra_loras).toEqual([]);
+    expect(m.video_families[1].extra_loras).toEqual([
+      { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds calisthenics moves (high-noise expert only).", modes: ["text", "image"], strength: 0.6, trigger_words: "", files: null },
+    ]);
+    expect(JSON.stringify(m)).not.toContain("calisthenics_moves_high_noise");
+    const a = (await call("GET", "/api/state", await admin())).json();
+    expect(a.video_families[1].extra_loras[0].files).toEqual({ high: "calisthenics_moves_high_noise.safetensors" });
+  });
+
+  it("a job with the extra LoRA gets its node after the 4-step LoRA of the high branch, with the strength; with the chosen strength", async () => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, extra_lora: "calisthenic_moves", extra_lora_strength: 0.35 });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: "calisthenics_moves_high_noise.safetensors", strength_model: 0.35 } });
+    expect(p["5"].inputs.model).toEqual(["video_lora_high", 0]);
+    expect(p["video_lora_low"]).toBeUndefined();
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an unknown extra LoRA", { extra_lora: "nope" }, "unknown_extra_lora"],
+    ["a file name as the LoRA", { extra_lora: "calisthenics_moves_high_noise.safetensors" }, "unknown_extra_lora"],
+    ["a strength above 1", { extra_lora: "calisthenic_moves", extra_lora_strength: 1.5 }, "invalid_strength"],
+    ["a strength as text", { extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
+    ["a strength without a LoRA", { extra_lora_strength: 0.5 }, "invalid_strength"],
+    ["a LoRA for the base family", { family: "wan22_5b", size: "Landscape", duration: "About 3 s", extra_lora: "calisthenic_moves" }, "extra_lora_unavailable"],
+  ])("refuses %s and sends nothing to ComfyUI", async (_n, over, code) => {
+    h = await fharness();
+    const res = await post("/api/video", await member(), { ...ok, ...over });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe(code);
+    expect(h.comfySeen).toHaveLength(0);
+  });
+
   it("Start with families: the disk for their files and VIDEO_BOOT_FAMILIES; checked before anything is rented", async () => {
     h = await fharness(fam(), { ready: false, cfg: { vastVideoDiskGb: 80, videoFamilies: [FAMILY] } });
     const a = await admin();
     const started = await post("/api/start", a, { confirm: true, video_models: true, video_families: [FAMILY] });
     expect(started.statusCode, started.body).toBe(200);
     const disk = h.vast.searches.at(-1)!.diskGb;
-    expect(disk).toBe(50 + 70); // VAST_DISK_GB plus the family's 69.07 GB of files, above VAST_VIDEO_DISK_GB (80)
+    expect(disk).toBe(50 + 70); // VAST_DISK_GB plus the family's 69.23 GB of files, above VAST_VIDEO_DISK_GB (80)
     expect(h.vast.requests.at(-1)!.env).toMatchObject({ INCLUDE_VIDEO_MODELS: "true", VIDEO_BOOT_FAMILIES: FAMILY });
     const est = await call("GET", `/api/estimate?video_models=true&video_families=${FAMILY}`, a);
     expect(est.statusCode, est.body).toBe(200);
     expect(h.vast.searches.at(-1)!.diskGb).toBe(disk);
-    // Both families: the 5B's own 11.41 GB on top (the text encoder once): 80.48 GB of video files.
+    // Both families: the 5B's own 11.41 GB on top (the text encoder once): 80.64 GB of video files.
     expect((await call("GET", `/api/estimate?video_models=true&video_families=wan22_5b,${FAMILY}`, a)).statusCode).toBe(200);
     expect(h.vast.searches.at(-1)!.diskGb).toBe(50 + 81);
     // The base family alone keeps the disk of before: max(VAST_DISK_GB, VAST_VIDEO_DISK_GB).

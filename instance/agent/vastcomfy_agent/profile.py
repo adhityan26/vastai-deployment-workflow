@@ -269,6 +269,36 @@ def _base_id(raw: object) -> str:
     return _DEFAULT_BASE_ID if video.get("id") is None else _family_id(video.get("id"), "video")
 
 
+_EXTRA_LORAS_MAX = 8
+_LORA_FOLDER = "models/loras"
+
+
+def _check_extra_loras(raw: object, files: list[tuple[str, str]], what: str) -> None:
+    """The part of `extra_loras:` that decides downloads: each entry's files are LoRAs of the family's own `models`
+    (downloaded with the family, never on their own). The web app validates the rest."""
+    if raw is None:
+        return
+    if not isinstance(raw, list) or len(raw) > _EXTRA_LORAS_MAX:
+        raise ProfileError(f"{what} extra_loras must be a list of at most {_EXTRA_LORAS_MAX} entries")
+    ids: list[str] = []
+    for item in raw:
+        entry = _mapping(item, f"{what} extra LoRA")
+        lid = _family_id(entry.get("id"), f"{what} extra LoRA")
+        if lid in ids:
+            raise ProfileError(f"{what} extra LoRA ids must be unique")
+        ids.append(lid)
+        sides = [s for s in ("high", "low") if s in entry]
+        if not sides:
+            raise ProfileError(f"{what} extra LoRA {lid} needs a high or a low file")
+        for side in sides:
+            name = _mapping(entry[side], f"{what} extra LoRA {lid} {side}").get("file")
+            dest = next((d for n, d in files if n == name), None)
+            if dest is None:
+                raise ProfileError(f"{what} extra LoRA {lid} {side} file must be one of the family's models")
+            if _dest_folder(dest) != _LORA_FOLDER:
+                raise ProfileError(f"{what} extra LoRA {lid} {side} file must be a LoRA ({_LORA_FOLDER}/)")
+
+
 def _parse_families(
     raw: object, models: list[ModelSpec], workflows: tuple[str, ...], video_enabled: bool, wanted_ids: tuple[str, ...],
     base_id: str,
@@ -318,6 +348,7 @@ def _parse_families(
                 if _dest_folder(dest) != _DIFFUSION_FOLDER:
                     raise ProfileError(f"{what} {mode} expert {slot} must be a diffusion model ({_DIFFUSION_FOLDER}/)")
                 experts.append((mode, slot, file))
+        _check_extra_loras(fam.get("extra_loras"), files, what)
         enabled = video_enabled and fid in wanted_ids
         if enabled:
             _check_pinned(files, models, what)

@@ -77,6 +77,7 @@ describe("parseVideoFamilies", () => {
       ["split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", W22, "models/loras/", 1226977424],
       ["split_files/vae/wan_2.1_vae.safetensors", W21, "models/vae/", 253815318],
       ["split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", W21, "models/text_encoders/", 6735906897], // shared with the 5B
+      ["calisthenics_moves_high_noise.safetensors", ["Aisha-AI-Official/wan2.2-calisthenic-moves", "32a3d164f03f18624bbbd2754efeccc926354c80"], "models/loras/", 153453560], // its extra LoRA
     ];
     const doc = shipped();
     for (const [file, [repo, revision], dest, size] of expected) {
@@ -84,8 +85,8 @@ describe("parseVideoFamilies", () => {
     }
     const familyFiles = new Set((doc.video_families[0].models as Doc[]).map((m) => m.file));
     expect([...familyFiles].sort()).toEqual(expected.map(([f]) => f.split("/").pop()).sort());
-    // 62.34 GB of its own files plus the shared 6.74 GB text encoder.
-    expect(expected.reduce((n, e) => n + e[3], 0)).toBe(69_074_964_839);
+    // 62.49 GB of its own files (the extra LoRA's 0.15 GB included) plus the shared 6.74 GB text encoder.
+    expect(expected.reduce((n, e) => n + e[3], 0)).toBe(69_228_418_399);
   });
 
   it("reads an enabled, pinned family: both modes, fixed inputs and the expert slots", () => {
@@ -102,7 +103,7 @@ describe("parseVideoFamilies", () => {
     expect(f.image.experts.map((e) => e.file)).toEqual(["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"]);
     expect(f.text.fixed).toContainEqual({ node: "5", input: "shift", value: 5 });
     expect(f.text.fixed).toContainEqual({ node: "3", input: "strength_model", value: 1 });
-    expect(f.models).toHaveLength(10);
+    expect(f.models).toHaveLength(11);
   });
 
   it("refuses an unknown id in VIDEO_FAMILIES (also while video is off) and accepts the base id", () => {
@@ -318,5 +319,136 @@ describe("video with a family", () => {
     await expect(video(deps, { prompt: "a fox", size: "Landscape, faster", duration: "About 3 s" })).rejects.toMatchObject({ code: "unknown_size" });
     await expect(video(deps, { prompt: "a fox", size: "Landscape", duration: "About 3 s".replace("3", "4") })).rejects.toMatchObject({ code: "unknown_duration" });
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe("extra LoRAs of a family", () => {
+  const LORA = "calisthenics_moves_high_noise.safetensors";
+  const withLow = (f: Doc) => {
+    f.models.push({ file: "low_extra.safetensors", dest: "models/loras/" });
+    f.extra_loras[0].low = { file: "low_extra.safetensors" };
+  };
+  const pinsWithLow = [...PINS, { file: "split_files/x/low_extra.safetensors", dest: "models/loras/" }];
+
+  it("reads the shipped entry: title, modes, default strength, its high-side file and no trigger words yet", () => {
+    const f = fam();
+    expect(f.extraLoras).toEqual([
+      { id: "calisthenic_moves", title: "Calisthenic moves", description: "Adds calisthenics moves (high-noise expert only).", modes: ["text", "image"], files: { high: LORA }, strength: 0.6, triggerWords: "" },
+    ]);
+    expect(f.text.extraLoras).toBe(f.extraLoras);
+    expect(f.text.loraAfter).toEqual({ high: "3", low: "4" });
+    expect(f.models.map((m) => m.file)).toContain(LORA); // downloaded with the family
+  });
+
+  it.each<[string, (f: Doc) => void]>([
+    ["an unknown key", (f) => (f.extra_loras[0].weight = 1)],
+    ["a bad id", (f) => (f.extra_loras[0].id = "Bad")],
+    ["a duplicate id", (f) => f.extra_loras.push(structuredClone(f.extra_loras[0]))],
+    ["a blank title", (f) => (f.extra_loras[0].title = " ")],
+    ["a description that is not text", (f) => (f.extra_loras[0].description = 5)],
+    ["no modes", (f) => (f.extra_loras[0].modes = [])],
+    ["an unknown mode", (f) => (f.extra_loras[0].modes = ["video"])],
+    ["a mode twice", (f) => (f.extra_loras[0].modes = ["text", "text"])],
+    ["no file at all", (f) => delete f.extra_loras[0].high],
+    ["a file that is not a family model", (f) => (f.extra_loras[0].high.file = "other.safetensors")],
+    ["a file that is not a LoRA", (f) => (f.extra_loras[0].high.file = "wan_2.1_vae.safetensors")],
+    ["a side with an extra key", (f) => (f.extra_loras[0].high.strength = 1)],
+    ["a strength above 1", (f) => (f.extra_loras[0].strength = 1.5)],
+    ["a negative strength", (f) => (f.extra_loras[0].strength = -0.1)],
+    ["a strength that is not a number", (f) => (f.extra_loras[0].strength = "0.6")],
+    ["trigger words that are not text", (f) => (f.extra_loras[0].trigger_words = ["x"])],
+    ["a mode without lora_after", (f) => delete f.text.lora_after],
+    ["a lora_after missing the used side", (f) => (f.image.lora_after = { low: "4" })],
+    ["a lora_after with an unknown slot", (f) => (f.text.lora_after = { high: "3", low: "4", mid: "5" })],
+    ["a lora_after with a bad node id", (f) => (f.text.lora_after = { high: "a b", low: "4" })],
+    ["a lora_after on a param's node input", (f) => (f.text.lora_after = 5)],
+  ])("refuses an entry with %s (also when off)", (_n, mutate) => {
+    expect(() => families(mutate)).toThrow(ProfileError);
+    expect(() => families(mutate, [], false)).toThrow(ProfileError);
+  });
+
+  it("an entry without a strength gets 0.6, the usual recommendation (UNVERIFIED for this LoRA)", () => {
+    expect(families((f) => delete f.extra_loras[0].strength)[0]!.extraLoras[0]!.strength).toBe(0.6);
+  });
+
+  it("a family without extra_loras has none, and needs no lora_after", () => {
+    const f = families((x) => {
+      delete x.extra_loras;
+      delete x.text.lora_after;
+      delete x.image.lora_after;
+      x.models = x.models.filter((m: Doc) => m.file !== LORA);
+    })[0]!;
+    expect(f.extraLoras).toEqual([]);
+    expect(f.text.loraAfter).toEqual({});
+  });
+
+  it("checkVideoFamily: an extra LoRA file need not be in a workflow; lora_after must be a LoRA node", () => {
+    expect(() => checkVideoFamily(fam(), TEMPLATES)).not.toThrow();
+    const t = { text: structuredClone(T2V), image: structuredClone(I2V) };
+    t.image["3"].class_type = "ModelSamplingSD3";
+    expect(() => checkVideoFamily(fam(), t)).toThrow(/node 3 .*LoraLoaderModelOnly/);
+    const taken = { text: structuredClone(T2V), image: structuredClone(I2V) };
+    taken.text["video_lora_high"] = { class_type: "LoadImage", inputs: {} };
+    expect(() => checkVideoFamily(fam(), taken)).toThrow(/video_lora_high/);
+  });
+
+  it("inserts the chosen LoRA after the 4-step LoRA of its branch, before ModelSamplingSD3, with the strength", () => {
+    const p = buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: { id: "calisthenic_moves", strength: 0.45 } });
+    expect(p["video_lora_high"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["3", 0], lora_name: LORA, strength_model: 0.45 } });
+    expect(p["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
+    expect(p["6"]!.inputs["model"]).toEqual(["4", 0]); // no low file: the low branch is unchanged
+    expect(p["video_lora_low"]).toBeUndefined();
+    expect(T2V["5"].inputs.model).toEqual(["3", 0]); // the template is not mutated
+    const i = buildVideoPrompt(fam().image, I2V, { ...ok, startImage: "a.png", extraLora: { id: "calisthenic_moves", strength: 1 } });
+    expect(i["5"]!.inputs["model"]).toEqual(["video_lora_high", 0]);
+  });
+
+  it("an entry with both sides gets a node in each branch", () => {
+    const f = families(withLow, undefined, true, pinsWithLow)[0]!;
+    const p = buildVideoPrompt(f.text, T2V, { ...ok, extraLora: { id: "calisthenic_moves", strength: 0.6 } });
+    expect(p["video_lora_low"]).toEqual({ class_type: "LoraLoaderModelOnly", inputs: { model: ["4", 0], lora_name: "low_extra.safetensors", strength_model: 0.6 } });
+    expect(p["6"]!.inputs["model"]).toEqual(["video_lora_low", 0]);
+  });
+
+  it("refuses an unknown LoRA, one not of this mode, a strength out of range, and a LoRA for a spec without any", () => {
+    const one = (strength: number) => ({ id: "calisthenic_moves", strength });
+    expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: { id: "nope", strength: 0.5 } })).toThrow(expect.objectContaining({ code: "unknown_extra_lora" }));
+    const textOnly = families((f) => (f.extra_loras[0].modes = ["text"]))[0]!;
+    expect(() => buildVideoPrompt(textOnly.image, I2V, { ...ok, startImage: "a.png", extraLora: one(0.5) })).toThrow(expect.objectContaining({ code: "extra_lora_mode" }));
+    expect(() => buildVideoPrompt(textOnly.text, T2V, { ...ok, extraLora: one(0.5) })).not.toThrow();
+    for (const strength of [-0.01, 1.01, Number.NaN, Infinity]) {
+      expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: one(strength) })).toThrow(expect.objectContaining({ code: "invalid_strength" }));
+    }
+    for (const strength of [0, 1]) expect(() => buildVideoPrompt(fam().text, T2V, { ...ok, extraLora: one(strength) })).not.toThrow();
+    const base = parseVideo(shipped().video, shipped().models, true)!;
+    const baseTpl = tpl(shipped().video.workflow);
+    expect(() => buildVideoPrompt(base, baseTpl, { ...ok, size: "Landscape", duration: "About 3 s", extraLora: one(0.5) })).toThrow(expect.objectContaining({ code: "extra_lora_unavailable" }));
+  });
+
+  it("video(): takes extra_lora and extra_lora_strength (the entry's default when absent), checked before anything is sent", async () => {
+    const f = fam();
+    const sent: unknown[] = [];
+    const comfy = { submit: async (p: unknown) => (sent.push(p), { promptId: "p-x" }), uploadImage: async () => ({ name: "u.png", subfolder: "", type: "input" }) };
+    const cfg = { generateMaxPromptChars: 40, editMaxReferences: 3, editReferenceMaxBytes: 4096, editReferenceMaxPixels: 1_000_000, editReferenceMaxSide: 8192, editReferenceTypes: ["png"], secretNames: [] } as unknown as AppsConfig;
+    const deps: VideoDeps = {
+      comfy: comfy as unknown as VideoDeps["comfy"], profile: { video: null } as unknown as Profile, template: null, cfg, random: () => 0.5,
+      family: { text: { spec: f.text, template: T2V }, image: { spec: f.image, template: I2V } },
+    };
+    const body = { prompt: "a fox", size: "Landscape", duration: "About 5 s" };
+    await video(deps, { ...body, extra_lora: "calisthenic_moves" });
+    expect((sent[0] as Doc)["video_lora_high"].inputs.strength_model).toBe(0.6);
+    await video(deps, { ...body, extra_lora: "calisthenic_moves", extra_lora_strength: 0.25 });
+    expect((sent[1] as Doc)["video_lora_high"].inputs.strength_model).toBe(0.25);
+    await video(deps, { ...body, extra_lora: null });
+    expect((sent[2] as Doc)["video_lora_high"]).toBeUndefined();
+    const bad: [Doc, string][] = [
+      [{ ...body, extra_lora: 5 }, "unknown_extra_lora"],
+      [{ ...body, extra_lora: "nope" }, "unknown_extra_lora"],
+      [{ ...body, extra_lora: "calisthenic_moves", extra_lora_strength: "0.5" }, "invalid_strength"],
+      [{ ...body, extra_lora: "calisthenic_moves", extra_lora_strength: 2 }, "invalid_strength"],
+      [{ ...body, extra_lora_strength: 0.5 }, "invalid_strength"], // a strength without a LoRA
+    ];
+    for (const [input, code] of bad) await expect(video(deps, input), JSON.stringify(input)).rejects.toMatchObject({ code });
+    expect(sent).toHaveLength(3);
   });
 });

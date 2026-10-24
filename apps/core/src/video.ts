@@ -38,6 +38,19 @@ export interface VideoExpert {
   readonly file: string;
 }
 
+/** An optional extra LoRA of a family (profile `extra_loras:`): its files per expert branch, by slot. */
+export interface VideoExtraLora {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly modes: readonly ("text" | "image")[];
+  /** The LoRA file per expert slot (`high` and/or `low`); a branch without one gets no extra LoRA node. */
+  readonly files: Readonly<Record<string, string>>;
+  /** The default strength (0 to 1). */
+  readonly strength: number;
+  readonly triggerWords: string;
+}
+
 export interface VideoSpec {
   readonly workflow: string;
   readonly models: readonly VideoModel[];
@@ -56,6 +69,10 @@ export interface VideoSpec {
   readonly experts: readonly VideoExpert[];
   /** Inputs set on every job. */
   readonly fixed: readonly VideoFixed[];
+  /** Per expert slot, the node after which an extra LoRA joins that branch (empty without extra LoRAs). */
+  readonly loraAfter: Readonly<Record<string, string>>;
+  /** The family's extra LoRAs (each says which modes it is for); empty for the base section. */
+  readonly extraLoras: readonly VideoExtraLora[];
 }
 
 /**
@@ -75,6 +92,8 @@ export interface VideoFamily {
   readonly text: VideoSpec;
   /** Image to video (exactly one start image). For the base section both are the same spec. */
   readonly image: VideoSpec;
+  /** The optional extra LoRAs (empty for the base section). */
+  readonly extraLoras: readonly VideoExtraLora[];
 }
 
 export interface VideoInput {
@@ -94,7 +113,14 @@ export interface VideoInput {
    * its pinned expert file. All of the mode's slots or none.
    */
   links?: Readonly<Record<string, string>>;
+  /** An extra LoRA of the family (its id from the profile) and the strength to use (0 to 1). */
+  extraLora?: { id: string; strength: number };
 }
+
+/** The node id prefix of an extra LoRA node the web app adds (one per branch: video_lora_<slot>). */
+export const VIDEO_LORA_NODE_PREFIX = "video_lora_";
+const LORA_CLASS = "LoraLoaderModelOnly";
+const LORA_FOLDER = "models/loras";
 
 /** The ComfyUI folder of the diffusion model slot (the one a link may replace). */
 export const DIFFUSION_FOLDER = "models/diffusion_models";
@@ -115,8 +141,14 @@ const MODEL_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MODEL_DEST = /^models\/[a-z0-9_]+\/?$/;
 const NAME_MAX = 40;
 const KEYS = new Set(["id", "title", "workflow", "models", "node_classes", "params", "start_image", "output_node", "fps", "sizes", "durations"]);
-const FAMILY_KEYS = new Set(["id", "title", "models", "node_classes", "fps", "sizes", "durations", "text", "image"]);
-const MODE_KEYS = new Set(["workflow", "params", "start_image", "output_node", "experts", "fixed"]);
+const FAMILY_KEYS = new Set(["id", "title", "models", "node_classes", "fps", "sizes", "durations", "text", "image", "extra_loras"]);
+const MODE_KEYS = new Set(["workflow", "params", "start_image", "output_node", "experts", "fixed", "lora_after"]);
+const EXTRA_LORA_KEYS = new Set(["id", "title", "description", "modes", "high", "low", "strength", "trigger_words"]);
+const EXTRA_LORA_SIDES = ["high", "low"] as const;
+const MAX_EXTRA_LORAS = 8;
+const DESCRIPTION_MAX = 300;
+const TRIGGER_WORDS_MAX = 300;
+const DEFAULT_EXTRA_LORA_STRENGTH = 0.6;
 const EXPERT_KEYS = new Set(["slot", "file"]);
 const FIXED_KEYS = new Set(["node", "input", "value"]);
 const FAMILY_ID = /^[a-z][a-z0-9_]{0,31}$/;
@@ -281,7 +313,7 @@ export function parseVideo(raw: unknown, models: readonly ModelEntry[], enabled 
   const fps = parseFps(m["fps"], "video");
   const sizes = parseVideoSizes(m["sizes"], "video");
   const durations = parseDurations(m["durations"], fps, "video");
-  const spec: VideoSpec = { workflow, models: files, params, startImage, outputNode, fps, sizes, durations, experts: [], fixed: [] };
+  const spec: VideoSpec = { workflow, models: files, params, startImage, outputNode, fps, sizes, durations, experts: [], fixed: [], loraAfter: {}, extraLoras: [] };
   if (!enabled) return null;
   checkPinned(files, models, "video");
   return spec;
@@ -291,7 +323,7 @@ function parseMode(
   raw: unknown,
   what: string,
   withStart: boolean,
-  family: { models: readonly VideoModel[]; fps: number; sizes: readonly SizeSpec[]; durations: readonly VideoDuration[] },
+  family: { models: readonly VideoModel[]; fps: number; sizes: readonly SizeSpec[]; durations: readonly VideoDuration[]; extraLoras: readonly VideoExtraLora[] },
 ): VideoSpec {
   const m = mapping(raw, what);
   const unknown = Object.keys(m).filter((k) => !MODE_KEYS.has(k));
@@ -343,7 +375,61 @@ function parseMode(
     taken.add(key);
     return { ...at, value };
   });
-  return { workflow, models: family.models, params, startImage, outputNode, fps: family.fps, sizes: family.sizes, durations: family.durations, experts, fixed };
+  let loraAfter: Record<string, string> = {};
+  if (m["lora_after"] !== undefined) {
+    const raw = mapping(m["lora_after"], `${what} lora_after`);
+    loraAfter = {};
+    for (const [slot, node] of Object.entries(raw)) {
+      if (!experts.some((e) => e.slot === slot)) throw new ProfileError(`${what} lora_after names ${slot}, which is not an expert slot`);
+      if (typeof node !== "string" || !NODE_ID.test(node)) throw new ProfileError(`${what} lora_after ${slot} is not a plain node id`);
+      loraAfter[slot] = node;
+    }
+  }
+  return {
+    workflow, models: family.models, params, startImage, outputNode, fps: family.fps, sizes: family.sizes, durations: family.durations, experts, fixed,
+    loraAfter, extraLoras: family.extraLoras,
+  };
+}
+
+function parseExtraLoras(raw: unknown, what: string, files: readonly VideoModel[]): VideoExtraLora[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_EXTRA_LORAS) throw new ProfileError(`${what} extra_loras must be a list of at most ${MAX_EXTRA_LORAS} entries`);
+  const out = raw.map((item): VideoExtraLora => {
+    const e = mapping(item, `${what} extra LoRA`);
+    const unknown = Object.keys(e).filter((k) => !EXTRA_LORA_KEYS.has(k));
+    if (unknown.length > 0) throw new ProfileError(`a ${what} extra LoRA has unknown keys: ${unknown.sort().join(", ")}`);
+    const id = parseId(e["id"], `${what} extra LoRA`);
+    const at = `${what} extra LoRA ${id}`;
+    const title = plainName(e["title"], `${at} title`);
+    const description = e["description"] ?? "";
+    if (typeof description !== "string" || description.length > DESCRIPTION_MAX || /[\r\n]/.test(description)) {
+      throw new ProfileError(`${at} description must be one line of at most ${DESCRIPTION_MAX} characters`);
+    }
+    const modes = e["modes"];
+    if (!Array.isArray(modes) || modes.length === 0 || !modes.every((x) => x === "text" || x === "image") || new Set(modes).size !== modes.length) {
+      throw new ProfileError(`${at} modes must list text and/or image, each once`);
+    }
+    const sides: Record<string, string> = {};
+    for (const side of EXTRA_LORA_SIDES) {
+      if (e[side] === undefined) continue;
+      const f = mapping(e[side], `${at} ${side}`);
+      if (Object.keys(f).some((k) => k !== "file")) throw new ProfileError(`${at} ${side} takes only file`);
+      const model = files.find((x) => x.file === f["file"]);
+      if (model === undefined) throw new ProfileError(`${at} ${side} file must be one of the family's models`);
+      if (model.dest !== LORA_FOLDER) throw new ProfileError(`${at} ${side} file must be a model with dest ${LORA_FOLDER}/`);
+      sides[side] = model.file;
+    }
+    if (Object.keys(sides).length === 0) throw new ProfileError(`${at} needs a high or a low file`);
+    const strength = e["strength"] ?? DEFAULT_EXTRA_LORA_STRENGTH;
+    if (typeof strength !== "number" || !Number.isFinite(strength) || strength < 0 || strength > 1) throw new ProfileError(`${at} strength must be a number from 0 to 1`);
+    const trigger = e["trigger_words"] ?? "";
+    if (typeof trigger !== "string" || trigger.length > TRIGGER_WORDS_MAX || /[\r\n]/.test(trigger)) {
+      throw new ProfileError(`${at} trigger_words must be one line of at most ${TRIGGER_WORDS_MAX} characters`);
+    }
+    return { id, title, description, modes: modes as ("text" | "image")[], files: sides, strength, triggerWords: trigger };
+  });
+  if (new Set(out.map((x) => x.id)).size !== out.length) throw new ProfileError(`${what} extra LoRA ids must be unique`);
+  return out;
 }
 
 /**
@@ -375,10 +461,20 @@ export function parseVideoFamilies(
     const fps = parseFps(m["fps"], what);
     const sizes = parseVideoSizes(m["sizes"], what);
     const durations = parseDurations(m["durations"], fps, what);
-    const shape = { models: files, fps, sizes, durations };
+    const extraLoras = parseExtraLoras(m["extra_loras"], what, files);
+    const shape = { models: files, fps, sizes, durations, extraLoras };
     const text = parseMode(m["text"], `${what} text`, false, shape);
     const image = parseMode(m["image"], `${what} image`, true, shape);
-    const family: VideoFamily = { id, title, base: false, models: files, fps, sizes, durations, text, image };
+    // Every branch an extra LoRA of a mode uses needs its join point in that mode.
+    for (const lora of extraLoras) {
+      for (const mode of lora.modes) {
+        const spec = mode === "text" ? text : image;
+        for (const side of Object.keys(lora.files)) {
+          if (spec.loraAfter[side] === undefined) throw new ProfileError(`${what} ${mode}: lora_after needs ${side} for the extra LoRA ${lora.id}`);
+        }
+      }
+    }
+    const family: VideoFamily = { id, title, base: false, models: files, fps, sizes, durations, text, image, extraLoras };
     return family;
   });
   const unknownIds = opts.enabled.filter((id) => id !== opts.baseId && !ids.has(id));
@@ -429,6 +525,10 @@ export function checkVideoTemplate(spec: VideoSpec, template: unknown, opts: { a
     const node = nodeOf(template, f.node);
     if (node === null || !(f.input in node.inputs)) throw new ProfileError(`video workflow lacks node ${f.node} input ${f.input} (fixed)`);
   }
+  for (const [slot, node] of Object.entries(spec.loraAfter)) {
+    if (nodeOf(template, node)?.class_type !== LORA_CLASS) throw new ProfileError(`video workflow node ${node} (lora_after ${slot}) must be a ${LORA_CLASS} node`);
+    if (nodeOf(template, `${VIDEO_LORA_NODE_PREFIX}${slot}`) !== null) throw new ProfileError(`video workflow already has a node ${VIDEO_LORA_NODE_PREFIX}${slot}`);
+  }
   for (const e of spec.experts) {
     // A link replaces an expert in its loader node (a .gguf one turns it into the GGUF loader): a UNETLoader only.
     const loaders = Object.values(template as Record<string, { class_type?: unknown; inputs?: Record<string, unknown> }>).filter((n) =>
@@ -465,6 +565,8 @@ export function checkVideoFamily(family: VideoFamily, templates: { text: unknown
   checkVideoTemplate(family.text, templates.text, { allModels: family.base });
   checkVideoTemplate(family.image, templates.image, { allModels: family.base });
   const used = new Set([...filesUsed(templates.text), ...filesUsed(templates.image)]);
+  // An extra LoRA's files are named by the web app when a user picks one, never by the workflow.
+  for (const lora of family.extraLoras) for (const file of Object.values(lora.files)) used.add(file);
   for (const f of family.models) {
     if (!used.has(f.file)) throw new ProfileError(`video family ${family.id}: no workflow loads the listed model file ${f.file}`);
   }
@@ -528,6 +630,29 @@ export function buildVideoPrompt(spec: VideoSpec, workflowJson: unknown, input: 
       throw new GenerateInputError("workflow_mismatch", "linked experts must have their own file names");
     }
     for (const e of spec.experts) useLinkedFile(copy, e.file, input.links[e.slot]!);
+  }
+  if (input.extraLora !== undefined) {
+    if (spec.extraLoras.length === 0) throw new GenerateInputError("extra_lora_unavailable", "this video model has no extra LoRAs");
+    const lora = spec.extraLoras.find((x) => x.id === input.extraLora!.id);
+    if (lora === undefined) throw new GenerateInputError("unknown_extra_lora", "extra_lora is not offered for this video model");
+    const mode = spec.startImage === null ? "text" : "image";
+    if (!lora.modes.includes(mode)) throw new GenerateInputError("extra_lora_mode", `this extra LoRA is not offered for ${mode} to video`);
+    const strength = input.extraLora.strength;
+    if (typeof strength !== "number" || !Number.isFinite(strength) || strength < 0 || strength > 1) {
+      throw new GenerateInputError("invalid_strength", "extra_lora_strength must be a number from 0 to 1");
+    }
+    // One LoRA node per branch, after the branch's join point; everything that read the join point reads it instead.
+    for (const [slot, file] of Object.entries(lora.files)) {
+      const after = spec.loraAfter[slot];
+      const id = `${VIDEO_LORA_NODE_PREFIX}${slot}`;
+      if (after === undefined || copy[after] === undefined || id in copy) throw new GenerateInputError("workflow_mismatch", `workflow cannot take the extra LoRA on ${slot}`);
+      for (const node of Object.values(copy)) {
+        for (const [k, v] of Object.entries(node.inputs ?? {})) {
+          if (Array.isArray(v) && v[0] === after && v[1] === 0) node.inputs[k] = [id, 0];
+        }
+      }
+      copy[id] = { class_type: LORA_CLASS, inputs: { model: [after, 0], lora_name: file, strength_model: strength } };
+    }
   }
   if (input.startImage !== undefined && spec.startImage === null) {
     throw new GenerateInputError("workflow_mismatch", "this workflow takes no start image");

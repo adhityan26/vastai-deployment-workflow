@@ -1353,7 +1353,8 @@
                     "download_bytes",
                     "models",
                     "slots",
-                    "experts"
+                    "experts",
+                    "extra_loras"
                   ],
                   "properties": {
                     "id": {
@@ -1545,6 +1546,69 @@
                         }
                       ],
                       "description": "The experts in use (admins only; null for members and for the base family). A linked one is NOT integrity-pinned: its sha256 is what arrived"
+                    },
+                    "extra_loras": {
+                      "type": "array",
+                      "description": "The family's optional extra LoRAs (profile data; empty for the base family and a family without any). One may be added to a job (POST /api/video extra_lora). UNVERIFIED: their fit with text and image to video, how they stack with the 4-step LoRAs, the default strength, the trigger words",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "id",
+                          "title",
+                          "description",
+                          "modes",
+                          "strength",
+                          "trigger_words",
+                          "files"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "modes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text",
+                                "image"
+                              ]
+                            },
+                            "description": "The modes it is offered for (text: no start image; image: one)"
+                          },
+                          "strength": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "description": "The default strength"
+                          },
+                          "trigger_words": {
+                            "type": "string",
+                            "description": "Words to put in the prompt for it; empty when unknown"
+                          },
+                          "files": {
+                            "oneOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "string"
+                                }
+                              }
+                            ],
+                            "description": "Its LoRA file per expert branch (high, low): admins only, null for members"
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -5145,7 +5209,7 @@
     "/api/video": {
       "post": {
         "operationId": "video",
-        "summary": "Make a short video (member or admin; shares the generate rate limit). 404 video_unavailable when the profile has no enabled video section. Text to video, or image to video when `image` (exactly one base64 start image, validated like an edit reference: magic bytes, size, pixels, side) is sent. Size and duration are names from video in /api/state. Poll the returned id with GET /api/generate/{id} (a video job times out after VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S); when done its file is listed under `videos` and served by GET /api/video/{id}/{index}. The job's label is \"Video: <size>, <duration>\" plus \", from an image\". A video cannot be saved to the gallery (phase 1). With `family` (video_families in /api/state) that family's workflow for the mode is used and its title joins the label: \"Video: <size>, <duration>, <family title>\".",
+        "summary": "Make a short video (member or admin; shares the generate rate limit). 404 video_unavailable when the profile has no enabled video section. Text to video, or image to video when `image` (exactly one base64 start image, validated like an edit reference: magic bytes, size, pixels, side) is sent. Size and duration are names from video in /api/state. Poll the returned id with GET /api/generate/{id} (a video job times out after VIDEO_TIMEOUT_S, not GENERATE_TIMEOUT_S); when done its file is listed under `videos` and served by GET /api/video/{id}/{index}. The job's label is \"Video: <size>, <duration>\" plus \", from an image\". A video cannot be saved to the gallery (phase 1). With `family` (video_families in /api/state) that family's workflow for the mode is used and its title joins the label: \"Video: <size>, <duration>, <family title>\". An extra LoRA joins the label: \"Video: <size>, <duration>, <family title>, <LoRA title>\".",
         "security": [
           {
             "sessionCookie": []
@@ -5193,6 +5257,22 @@
                     "type": "string",
                     "maxLength": 32,
                     "description": "A family id from video_families in /api/state; absent or the base id: the video section. A family's text mode (no image) and image mode (one start image) have their own workflows; its sizes and durations are its own. Refused with 400 unknown_family for an id this server does not offer, 409 video_models_not_ready while the instance lacks the family's files or reports only some of the mode's experts linked"
+                  },
+                  "extra_lora": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Only with a family that has extra LoRAs: the id of one of video_families[].extra_loras. The web app adds a LoraLoaderModelOnly node after the 4-step LoRA of each branch the LoRA has a file for (before ModelSamplingSD3); the file name comes from the profile only. Refused with 400 extra_lora_unavailable (base family or a family without any), unknown_extra_lora, extra_lora_mode (not offered for this mode). Absent or null: none"
+                  },
+                  "extra_lora_strength": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "The extra LoRA's strength, 0 to 1 (400 invalid_strength otherwise, or without extra_lora); absent: the entry's default"
                   }
                 }
               }
@@ -5239,7 +5319,7 @@
             }
           },
           "400": {
-            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the video service (codes unknown_family, invalid_prompt, prompt_too_long, invalid_seed, unknown_size, unknown_duration, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
+            "description": "Body is not valid JSON or does not match the schema (codes invalid_json, invalid_body), or the request is refused by the video service (codes unknown_family, extra_lora_unavailable, unknown_extra_lora, extra_lora_mode, invalid_strength, invalid_prompt, prompt_too_long, invalid_seed, unknown_size, unknown_duration, invalid_reference, reference_too_large, reference_too_many_pixels, reference_side_too_long, reference_animated, reference_type_not_allowed)",
             "content": {
               "application/json": {
                 "schema": {

@@ -439,7 +439,7 @@ const VIDEO_BODY = {
   type: "object",
   additionalProperties: false,
   required: ["prompt", "size", "duration"],
-  properties: { prompt: {}, size: {}, duration: {}, seed: {}, image: {}, family: { type: "string", maxLength: 32 } },
+  properties: { prompt: {}, size: {}, duration: {}, seed: {}, image: {}, family: { type: "string", maxLength: 32 }, extra_lora: {}, extra_lora_strength: {} },
 } as const;
 // JSON adds quotes and a comma around each image; the prompt may need escapes (up to 6 bytes a character).
 const EDIT_JSON_OVERHEAD = 8;
@@ -835,6 +835,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
                 models: publicVideoModels(view.agent?.video_models, scrub),
                 slots: null,
                 experts: null,
+                extra_loras: [],
               },
               ...extraFamilies.map(({ family, downloadBytes }) => {
                 const reported = view.agent?.video_families?.find((f) => f.id === family.id) ?? null;
@@ -846,6 +847,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
                   models: publicVideoModels(reported, scrub),
                   slots: { text: family.text.experts.map((e) => e.slot), image: family.image.experts.map((e) => e.slot) },
                   experts: isAdmin ? publicExperts(reported) : null,
+                  // Profile data only; the file names for admins.
+                  extra_loras: family.extraLoras.map((l) => ({
+                    id: l.id, title: l.title, description: l.description, modes: [...l.modes], strength: l.strength, trigger_words: l.triggerWords,
+                    files: isAdmin ? { ...l.files } : null,
+                  })),
                 };
               }),
             ],
@@ -1315,7 +1321,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       }
       started?.live.socket?.setPromptId(promptId);
       const asked = req.body as VideoRequest;
-      const title = chosen === null ? "" : `, ${chosen.family.title}`;
+      const loraTitle = chosen?.family.extraLoras.find((l) => l.id === (asked as { extra_lora?: unknown }).extra_lora)?.title;
+      const title = (chosen === null ? "" : `, ${chosen.family.title}`) + (loraTitle === undefined ? "" : `, ${loraTitle}`);
       jobs.add({
         id: promptId,
         owner: identity.subject,

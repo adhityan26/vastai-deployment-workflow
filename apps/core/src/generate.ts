@@ -297,6 +297,9 @@ export interface VideoRequest {
   seed?: unknown;
   /** Optional base64 start image (image to video); absent or null is text to video. */
   image?: unknown;
+  /** Optional extra LoRA id of the family (absent or null: none) and its strength (absent: the entry's default). */
+  extra_lora?: unknown;
+  extra_lora_strength?: unknown;
 }
 
 /**
@@ -321,9 +324,22 @@ export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ pro
   const mode = deps.family === undefined ? null : wanted ? deps.family.image : deps.family.text;
   const spec = mode === null ? deps.profile.video! : mode.spec;
   const template = mode === null ? deps.template : mode.template;
+  // The extra LoRA by its profile id only (nothing user-given reaches a file name); the strength is checked in buildVideoPrompt.
+  let extraLora: { id: string; strength: number } | undefined;
+  const loraId = input.extra_lora;
+  if (loraId !== undefined && loraId !== null) {
+    const found = typeof loraId === "string" ? spec.extraLoras.find((x) => x.id === loraId) : undefined;
+    if (found === undefined) throw new GenerateInputError(spec.extraLoras.length === 0 ? "extra_lora_unavailable" : "unknown_extra_lora", "extra_lora is not offered for this video model");
+    const strength = input.extra_lora_strength ?? found.strength;
+    if (typeof strength !== "number") throw new GenerateInputError("invalid_strength", "extra_lora_strength must be a number from 0 to 1");
+    extraLora = { id: found.id, strength };
+  } else if (input.extra_lora_strength !== undefined && input.extra_lora_strength !== null) {
+    throw new GenerateInputError("invalid_strength", "extra_lora_strength needs an extra_lora");
+  }
   // Exactly one start image, decoded and checked like a reference (anything but a base64 string is refused).
   const [image] = wanted ? decodeReferences([input.image], referenceLimits(deps.cfg)) : [];
   // Dry run with a placeholder name: size, duration and workflow mismatches surface before the upload.
+  if (extraLora !== undefined) Object.assign(fields, { extraLora });
   buildVideoPrompt(spec, template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
   if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, template, fields), deps.clientId)).promptId, startImage: false };
   const kind = FILE_TYPES[image.type];
