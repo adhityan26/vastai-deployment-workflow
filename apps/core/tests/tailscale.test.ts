@@ -84,6 +84,7 @@ function config(url: string, over: Record<string, unknown> = {}): AppsConfig {
     tsOauthClientSecret: CLIENT_SECRET,
     tsOauthTag: "tag:gpu",
     tsKeyTtlS: 3600,
+    tsRetryTotalS: 15,
     tsApiUrl: url,
     tsAuthkeyFile: "",
     httpTimeoutSApps: 5,
@@ -96,15 +97,21 @@ function config(url: string, over: Record<string, unknown> = {}): AppsConfig {
 function harness(cfg: AppsConfig, extra: Partial<TailscaleDeps> = {}) {
   const logs: string[] = [];
   const secrets: string[] = [];
+  const sleeps: number[] = [];
   const clock = { ms: 1_800_000_000_000 };
   const deps: TailscaleDeps = {
     now: () => clock.ms,
     log: (level, message) => logs.push(`${level} ${message}`),
     onSecret: (v) => secrets.push(v),
+    // Retry back-off is recorded, not waited for (tests that need real time pass their own).
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    random: () => 0,
     ...extra,
   };
   const minter = createTailscaleKeyMinter(cfg, deps);
-  return { minter, logs, secrets, clock };
+  return { minter, logs, secrets, clock, sleeps };
 }
 
 async function codeOf(p: Promise<unknown>): Promise<TailscaleError> {
@@ -317,8 +324,100 @@ describe("createTailscaleKeyMinter", () => {
 
     // A server that never answers: the configured timeout (1 s) applies.
     const slow = await fake(() => undefined);
-    const err = await codeOf(harness(config(slow.url, { httpTimeoutSApps: 1 })).minter!.mint());
+    const err = await codeOf(harness(config(slow.url, { httpTimeoutSApps: 1, tsRetryTotalS: 1 })).minter!.mint());
     expect(err.code).toBe("tailscale_unavailable");
+  });
+
+  it("retries a network error or 5xx on the token and the key request, then succeeds", async () => {
+    for (const where of ["/api/v2/oauth/token", "/api/v2/tailnet/-/keys"]) {
+      const api = await fake((req, res, n) => {
+        const count = where === "/api/v2/oauth/token" ? n.token : n.keys;
+        if (req.path === where && count === 1) return void res.socket?.destroy(); // a dropped connection
+        if (req.path === where && count === 2) return json(res, 503, { message: BODY_MARKER });
+        if (req.path === "/api/v2/oauth/token") return tokenOk(res);
+        return keyOk(res);
+      });
+      const { minter, logs, secrets, sleeps } = harness(config(api.url));
+      await expect(minter!.mint()).resolves.toBe(MINTED);
+      expect(where === "/api/v2/oauth/token" ? api.n.token : api.n.keys).toBe(3);
+      expect(sleeps).toEqual([1000, 2000]);
+      expect(logs.filter((l) => l.startsWith("warn tailscale") && l.includes("retry"))).toHaveLength(2);
+      expect(secrets).toContain(MINTED);
+      expectClean(logs);
+      server?.closeAllConnections?.();
+      server?.close();
+    }
+  });
+
+  it("gives up after 3 attempts with tailscale_unavailable", async () => {
+    const api = await fake((req, res) => json(res, 502, { message: BODY_MARKER }));
+    const { minter, logs, sleeps } = harness(config(api.url));
+    const err = await codeOf(minter!.mint());
+    expect(err.code).toBe("tailscale_unavailable");
+    expect(api.n.token).toBe(3);
+    expect(api.n.keys).toBe(0);
+    expect(sleeps).toHaveLength(2);
+    expectClean([err.message, ...logs]);
+  });
+
+  it("adds jitter to the back-off", async () => {
+    const api = await fake((req, res, n) => {
+      if (req.path === "/api/v2/oauth/token" && n.token === 1) return json(res, 500, {});
+      if (req.path === "/api/v2/oauth/token") return tokenOk(res);
+      return keyOk(res);
+    });
+    const { minter, sleeps } = harness(config(api.url), { random: () => 0.5 });
+    await expect(minter!.mint()).resolves.toBe(MINTED);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThan(1000);
+    expect(sleeps[0]).toBeLessThan(1500);
+  });
+
+  it("never retries a 4xx (auth, permission, rejected key or rate limit)", async () => {
+    for (const [where, status, code] of [
+      ["/api/v2/oauth/token", 401, "oauth_failed"],
+      ["/api/v2/oauth/token", 429, "tailscale_unavailable"],
+      ["/api/v2/tailnet/-/keys", 401, "oauth_failed"],
+      ["/api/v2/tailnet/-/keys", 403, "oauth_failed"],
+      ["/api/v2/tailnet/-/keys", 404, "key_rejected"],
+      ["/api/v2/tailnet/-/keys", 429, "tailscale_unavailable"],
+    ] as const) {
+      const api = await fake((req, res) => {
+        if (req.path === where) return json(res, status, { message: BODY_MARKER });
+        if (req.path === "/api/v2/oauth/token") return tokenOk(res);
+        return keyOk(res);
+      });
+      const { minter, sleeps } = harness(config(api.url));
+      expect((await codeOf(minter!.mint())).code).toBe(code);
+      expect(where === "/api/v2/oauth/token" ? api.n.token : api.n.keys).toBe(1);
+      expect(sleeps).toHaveLength(0);
+      server?.closeAllConnections?.();
+      server?.close();
+    }
+  });
+
+  it("an endless timeout stops at the TS_RETRY_TOTAL_S deadline with tailscale_unavailable", async () => {
+    const slow = await fake(() => undefined);
+    const started = Date.now();
+    const { minter, logs } = harness(config(slow.url, { httpTimeoutSApps: 1, tsRetryTotalS: 3 }), {
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    });
+    const err = await codeOf(minter!.mint());
+    const took = Date.now() - started;
+    expect(err.code).toBe("tailscale_unavailable");
+    // Attempt 1 (1 s), back-off 1 s, attempt 2 capped by the deadline; no third attempt fits.
+    expect(slow.n.token).toBe(2);
+    expect(took).toBeGreaterThanOrEqual(2900);
+    expect(took).toBeLessThan(4500);
+    expectClean([err.message, ...logs]);
+  }, 10_000);
+
+  it("refuses a TS_RETRY_TOTAL_S that is not a positive integer", async () => {
+    for (const bad of [0, -1, 1.5, "15", undefined]) {
+      const { minter } = harness(config("https://api.tailscale.example", { tsRetryTotalS: bad })); // config-lint: ok (test fixture)
+      expect(minter!.source).toBe("misconfigured");
+      expect(minter!.problem).toMatch(/TS_RETRY_TOTAL_S/);
+    }
   });
 
   it("a redirect is not followed", async () => {
@@ -328,7 +427,10 @@ describe("createTailscaleKeyMinter", () => {
     });
     const err = await codeOf(harness(config(api.url)).minter!.mint());
     expect(err.code).toBe("tailscale_unavailable");
-    expect(api.seen).toHaveLength(1);
+    // A refused redirect looks like a network error (it may be retried), but it is never followed.
+    expect(api.seen.length).toBeGreaterThanOrEqual(1);
+    expect(api.seen.length).toBeLessThanOrEqual(3);
+    for (const s of api.seen) expect(s.path).toBe("/api/v2/oauth/token");
   });
 
   it("non-JSON, oversized or keyless answers are invalid_response", async () => {
@@ -443,6 +545,7 @@ describe("createTsAuthKeyProvider", () => {
     const p = createTsAuthKeyProvider(config(api.url, { tsAuthkeyFile: "/keys/ts" }), { // config-lint: ok (test fixture)
       log: (l, m) => logs.push(`${l} ${m}`),
       readKeyFile: async () => (reads++, "tskey-auth-fromfile"),
+      sleep: async () => undefined,
     });
     expect(p.source).toBe("oauth");
     expect(logs).toContain("info tailscale auth key source: oauth");

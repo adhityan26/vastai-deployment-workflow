@@ -9,6 +9,7 @@ import { ResponseTooLarge, jsonMaxBytes, parseJson, request, timeoutMs, type Raw
 // (TS_AUTHKEY_FILE) is read. When OAuth is configured, or half-configured, there is never a
 // fallback to the file. The client secret, the access token and the minted key never appear in
 // an error or a log line: errors carry a fixed code, logs fixed text and HTTP status numbers.
+// Network errors, timeouts and 5xx answers are retried (bounded by TS_RETRY_TOTAL_S); 4xx never.
 // UNVERIFIED against the live API: the request shapes follow the public Tailscale API docs;
 // the minimum accepted expirySeconds and the 400 wording for a rejected expiry are unmeasured.
 
@@ -23,6 +24,10 @@ const EXPIRY_TEXT = /expir/i;
 /** A key or token is one printable ASCII word: it goes into an env value or a header. */
 const CREDENTIAL_TEXT = /^[\x21-\x7e]{1,1024}$/;
 const TAG_TEXT = /^tag:[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+/** Attempts per Tailscale call (1 + 2 retries) and the back-off before each retry, plus up to RETRY_JITTER_MS. */
+const RETRY_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [1000, 2000] as const;
+const RETRY_JITTER_MS = 500;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]); // config-lint: ok (loopback names allowed plain http for tests)
 
 export type TailscaleErrorCode = "oauth_failed" | "key_rejected" | "tailscale_unavailable" | "invalid_response";
@@ -50,6 +55,12 @@ export interface TailscaleDeps {
   log?: (level: Level, message: string) => void;
   /** Called with every access token and minted key before it is used, so callers can redact it. */
   onSecret?: (value: string) => void;
+  /** Waits before a retry (tests record instead of waiting). */
+  sleep?: (ms: number) => Promise<void>;
+  /** 0 <= x < 1, for the retry jitter. */
+  random?: () => number;
+  /** Monotonic milliseconds for the retry deadline (TS_RETRY_TOTAL_S); defaults to performance.now. */
+  monotonic?: () => number;
 }
 
 export interface TailscaleKeyMinter {
@@ -133,6 +144,10 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
   if (!TAG_TEXT.test(tag)) return refusing("TS_OAUTH_TAG must be one tag such as tag:gpu");
   const ttl = cfg["tsKeyTtlS"];
   if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl <= 0) return refusing("TS_KEY_TTL_S must be a positive integer");
+  const retryTotal = cfg["tsRetryTotalS"];
+  if (typeof retryTotal !== "number" || !Number.isInteger(retryTotal) || retryTotal <= 0) {
+    return refusing("TS_RETRY_TOTAL_S must be a positive integer");
+  }
   let ms: number;
   let maxBytes: number;
   try {
@@ -147,6 +162,9 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => undefined);
   const onSecret = deps.onSecret ?? (() => undefined);
+  const sleep = deps.sleep ?? ((wait: number) => new Promise<void>((r) => setTimeout(r, wait)));
+  const random = deps.random ?? Math.random;
+  const monotonic = deps.monotonic ?? (() => performance.now());
   const opts = { maxBytes, secret: clientSecret, ...(deps.fetch ? { fetch: deps.fetch } : {}) };
 
   let cached: { token: string; until: number } | null = null;
@@ -157,18 +175,38 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
     throw new TailscaleError(code);
   };
 
-  /** One call; transport problems become fixed codes (the underlying message is dropped). */
-  const send = async (what: string, url: string, headers: Record<string, string>, body: unknown): Promise<RawReply> => {
-    try {
-      return await request("POST", url, ms, headers, body, opts);
-    } catch (e) {
-      return fail(e instanceof ResponseTooLarge ? "invalid_response" : "tailscale_unavailable", what);
+  /**
+   * One call, retried on a network error, a timeout or a 5xx only (never on a 4xx: auth, permission,
+   * a rejected key or a rate limit), at most RETRY_ATTEMPTS times and only while the next attempt
+   * starts before `deadline`. A retry's timeout is cut to what is left of the deadline; the first
+   * attempt keeps the full HTTP_TIMEOUT_S_APPS. Transport problems become fixed codes (the
+   * underlying message is dropped); a last 5xx reply is returned for the caller to map.
+   */
+  const send = async (what: string, url: string, headers: Record<string, string>, body: unknown, deadline: number): Promise<RawReply> => {
+    for (let attempt = 1; ; attempt++) {
+      const left = deadline - monotonic();
+      const wait = attempt === 1 ? ms : Math.max(1, Math.min(ms, Math.floor(left)));
+      let reply: RawReply | null = null;
+      try {
+        reply = await request("POST", url, wait, headers, body, opts);
+      } catch (e) {
+        if (e instanceof ResponseTooLarge) return fail("invalid_response", what);
+      }
+      if (reply !== null && reply.status < 500) return reply;
+      const cause = reply === null ? "network error or timeout" : `HTTP ${reply.status}`;
+      const backoff = attempt <= RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt - 1]! + Math.floor(random() * RETRY_JITTER_MS) : 0;
+      if (attempt >= RETRY_ATTEMPTS || monotonic() + backoff >= deadline) {
+        if (reply !== null) return reply;
+        return fail("tailscale_unavailable", what);
+      }
+      log("warn", `tailscale ${what} retry ${attempt + 1}/${RETRY_ATTEMPTS} after ${cause}`);
+      await sleep(backoff);
     }
   };
 
-  const fetchToken = async (): Promise<string> => {
+  const fetchToken = async (deadline: number): Promise<string> => {
     const form = new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret });
-    const reply = await send("token request", `${base}${TOKEN_PATH}`, { Accept: "application/json" }, form);
+    const reply = await send("token request", `${base}${TOKEN_PATH}`, { Accept: "application/json" }, form, deadline);
     if (reply.status === 429 || reply.status >= 500) return fail("tailscale_unavailable", "token request", reply.status);
     if (reply.status < 200 || reply.status >= 300) return fail("oauth_failed", "token request", reply.status);
     const body = parseJson(reply.body);
@@ -188,11 +226,11 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
   };
 
   /** The cached token, or one shared request for a new one. */
-  const token = (): Promise<string> => {
+  const token = (deadline: number): Promise<string> => {
     if (cached !== null && now() < cached.until) return Promise.resolve(cached.token);
     cached = null;
     if (pending === null) {
-      const p = fetchToken();
+      const p = fetchToken(deadline);
       pending = p;
       const clear = (): void => {
         if (pending === p) pending = null;
@@ -202,7 +240,7 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
     return pending;
   };
 
-  const keyRequest = (bearer: string, expirySeconds: number): Promise<RawReply> =>
+  const keyRequest = (bearer: string, expirySeconds: number, deadline: number): Promise<RawReply> =>
     send(
       "key request",
       `${base}${KEYS_PATH}`,
@@ -212,14 +250,17 @@ export function createTailscaleKeyMinter(cfg: AppsConfig, deps: TailscaleDeps = 
         expirySeconds,
         description: KEY_DESCRIPTION,
       },
+      deadline,
     );
 
   const mint = async (): Promise<string> => {
-    const bearer = await token();
-    let reply = await keyRequest(bearer, ttl);
+    // One retry budget (TS_RETRY_TOTAL_S) for the whole mint: token and key request together.
+    const deadline = monotonic() + retryTotal * 1000;
+    const bearer = await token(deadline);
+    let reply = await keyRequest(bearer, ttl, deadline);
     if (reply.status === 400 && ttl !== KEY_TTL_FALLBACK_S && EXPIRY_TEXT.test(reply.body.toString("utf8"))) {
       log("warn", `tailscale key ttl fallback: TS_KEY_TTL_S=${ttl} was refused, retrying once with ${KEY_TTL_FALLBACK_S}`);
-      reply = await keyRequest(bearer, KEY_TTL_FALLBACK_S);
+      reply = await keyRequest(bearer, KEY_TTL_FALLBACK_S, deadline);
     }
     if (reply.status === 401 || reply.status === 403) {
       // The token is no good (revoked client, lost scope): never reuse it.

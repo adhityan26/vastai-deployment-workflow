@@ -112,15 +112,17 @@ describe("deploy files", () => {
   it("the Tailscale OAuth keys exist in the schema and in .env.example (secrets empty, tunables commented)", () => {
     const keys = schema.keys as { name: string; secret?: boolean; components?: string[] }[];
     const byName = new Map(keys.map((k) => [k.name, k]));
-    for (const n of ["TS_OAUTH_CLIENT_ID", "TS_OAUTH_CLIENT_SECRET", "TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_API_URL"]) {
+    for (const n of ["TS_OAUTH_CLIENT_ID", "TS_OAUTH_CLIENT_SECRET", "TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_RETRY_TOTAL_S", "TS_API_URL"]) {
       expect(byName.get(n)?.components, n).toContain("apps");
     }
+    const retry = keys.find((k) => k.name === "TS_RETRY_TOTAL_S") as { default?: number; min?: number; max?: number } | undefined;
+    expect([retry?.default, retry?.min, retry?.max]).toEqual([15, 1, 120]);
     expect(byName.get("TS_OAUTH_CLIENT_SECRET")?.secret).toBe(true);
     expect(byName.get("TS_OAUTH_CLIENT_ID")?.secret).toBe(true);
     const example = read(".env.example");
     expect(example).toMatch(/^TS_OAUTH_CLIENT_ID=$/m);
     expect(example).toMatch(/^TS_OAUTH_CLIENT_SECRET=$/m);
-    for (const n of ["TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_API_URL"]) expect(example).toMatch(new RegExp(`^# ${n}=`, "m"));
+    for (const n of ["TS_OAUTH_TAG", "TS_KEY_TTL_S", "TS_RETRY_TOTAL_S", "TS_API_URL"]) expect(example).toMatch(new RegExp(`^# ${n}=`, "m"));
     const env = (svc["environment"] ?? {}) as Record<string, string>;
     for (const n of ["TS_OAUTH_CLIENT_ID", "TS_OAUTH_CLIENT_SECRET"]) expect(env).not.toHaveProperty(n);
     const readme = read("deploy/web/README.md");
