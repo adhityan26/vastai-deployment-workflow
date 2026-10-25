@@ -74,3 +74,15 @@ def test_build_passes_destroy_assume_yes_to_the_destroy_command(make_cfg):
         wired = wiring.build(cfg, now=lambda: 1000, run=run, http_client=http)
         assert wired.destroyer.attempt() == (True, None)
         assert ("-y" in calls[0]) is expected
+
+
+def test_the_extra_loras_are_wired_only_with_video_on(make_cfg):
+    from vastcomfy_agent.extra_loras import ExtraLoras
+
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+    run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")  # noqa: E731
+    off = wiring.build(make_cfg(), now=lambda: 1000, run=run, http_client=http)
+    assert off.deps.loras is None and off.status.build().extra_loras is None
+    on = wiring.build(make_cfg(VIDEO_ENABLED="true", LORA_LINK_MAX_BYTES="5000000"), now=lambda: 1000, run=run, http_client=http)
+    assert isinstance(on.deps.loras, ExtraLoras) and on.deps.loras._link_max == 5000000
+    assert on.status.build().extra_loras.model_dump() == {"digest": None, "items": []}

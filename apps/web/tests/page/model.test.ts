@@ -120,6 +120,12 @@ import {
   familyVideo,
   extraLoraMembers,
   extraLoraNote,
+  TapCounter,
+  REVEAL_HEADER,
+  parseLoraList,
+  loraFormBody,
+  loraStatusText,
+  LORA_LINK_NOTICE,
 } from "../../public/model.js";
 import {
   PANEL_STORAGE_KEY,
@@ -1463,5 +1469,52 @@ describe("an experimental video duration", () => {
   });
   it("comes with the owner's warning", () => {
     expect(EXPERIMENTAL_DURATION_WARNING).toBe("Longer than the model was trained for (about 5 s): quality may drop and it may run out of memory or time out.");
+  });
+});
+
+
+describe("Manage LoRAs (admins)", () => {
+  it("three taps within a second reveal; slower taps do not", () => {
+    const t = new TapCounter();
+    expect([t.tap(0), t.tap(300), t.tap(900)]).toEqual([false, false, true]);
+    expect([t.tap(1000), t.tap(1500), t.tap(2100)]).toEqual([false, false, false]); // the first fell out of the second
+    expect(t.tap(2400)).toBe(true);
+    expect(REVEAL_HEADER).toBe("x-reveal-hidden");
+  });
+
+  it("reads an added LoRA's state from the state, only when it is a known one", () => {
+    const fam = (extra: unknown) => ({ id: "big", title: "Big", base: false, sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], download_bytes: 1, models: null, slots: { text: ["high", "low"], image: ["high", "low"] }, experts: null, extra_loras: extra });
+    const baseFam = { ...fam([]), id: "small", base: true, slots: null };
+    const video = { sizes: [{ name: "L", width: 832, height: 480 }], durations: [{ name: "5 s", seconds: 5 }], max_bytes: 10, max_pixels: 10, types: ["png"], download_bytes: 1, models: null, model: null };
+    const entry = { id: "lora_0000abcd", title: "Moves", description: "", modes: ["image"], strength: 1, trigger_words: "" };
+    const read = (status: unknown) => parseState({ ...base, video, video_families: [baseFam, fam([{ ...entry, status }])] })!.video_families![1]!.extra_loras[0];
+    expect(read("downloading")).toEqual({ ...entry, status: "downloading" });
+    expect(read(null)).toEqual(entry);
+    expect(read("weird")).toEqual(entry);
+  });
+
+  it("parses GET /api/loras strictly", () => {
+    const lora = {
+      id: "lora_0000abcd", title: "Moves", description: "d", family: "big", modes: ["image"], strength: 0.5, hidden: true, trigger_words: "", status: "ready", created_at: 1,
+      sides: { high: { url: "https://huggingface.co/o/r/resolve/main/x.safetensors", name: "xl_lora_0000abcd_high.safetensors", state: "ready", size_bytes: 9, sha256: "a".repeat(64), reason: null } }, // config-lint: ok (test fixture)
+    };
+    const list = parseLoraList({ loras: [lora, { id: "Bad" }], families: ["big"], max_entries: 20 })!;
+    expect(list.loras).toHaveLength(1);
+    expect(list.loras[0]).toMatchObject({ id: lora.id, hidden: true, status: "ready", sides: { high: { name: "xl_lora_0000abcd_high.safetensors", size_bytes: 9 } } });
+    expect(parseLoraList({ loras: "x" })).toBeNull();
+    expect(loraStatusText("downloading")).toBe("downloading");
+    expect(loraStatusText(null)).toBe("no instance");
+  });
+
+  it("builds the add and change bodies, refusing what the server would refuse", () => {
+    const f = { title: " Moves ", description: "", family: "big", text: false, image: true, strength: "", hidden: true, trigger_words: "", high: " https://huggingface.co/o/r/resolve/main/x.safetensors ", low: "" }; // config-lint: ok (test fixture)
+    expect(loraFormBody(f, true)).toEqual({ body: { title: "Moves", description: "", modes: ["image"], strength: 1, hidden: true, trigger_words: "", family: "big", high: "https://huggingface.co/o/r/resolve/main/x.safetensors" } }); // config-lint: ok (test fixture)
+    expect(loraFormBody(f, false)).toEqual({ body: { title: "Moves", description: "", modes: ["image"], strength: 1, hidden: true, trigger_words: "" } });
+    expect(loraFormBody({ ...f, high: "" }, true)).toEqual({ error: "Give a link for the high-noise or the low-noise branch (or both)." });
+    expect(loraFormBody({ ...f, high: "" }, false)).not.toHaveProperty("error"); // links are not part of a change
+    expect(loraFormBody({ ...f, title: " " }, true)).toHaveProperty("error");
+    expect(loraFormBody({ ...f, image: false }, true)).toEqual({ error: "Choose text to video, image to video or both." });
+    expect(loraFormBody({ ...f, strength: "1.5" }, true)).toEqual({ error: "The strength must be a number from 0 to 1." });
+    expect(LORA_LINK_NOTICE).toMatch(/NOT integrity-pinned or licence-checked/);
   });
 });

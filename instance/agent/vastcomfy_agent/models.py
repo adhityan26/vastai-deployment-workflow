@@ -77,6 +77,37 @@ class VideoModelsStatus(BaseModel):
     model: VideoModelInfo | None = None
 
 
+class LoraItem(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    # The file name on the instance (server-chosen: xl_<id>_<high|low>.safetensors) and its Hugging Face link.
+    name: str = Field(max_length=64)
+    url: str = Field(max_length=2048)
+
+
+class LorasRequest(BaseModel):
+    """The whole set of extra LoRA files the web app wants on this instance (it replaces the previous set)."""
+    model_config = ConfigDict(strict=True, extra="forbid")
+    loras: list[LoraItem] = Field(max_length=64)
+
+
+class LoraStatus(BaseModel):
+    """One extra LoRA file on this instance (vastcomfy_agent.extra_loras)."""
+    name: str
+    state: Literal["not_installed", "downloading", "ready", "failed"]
+    bytes_done: int
+    bytes_total: int
+    # From the host's HEAD (before the download), and the sha256 of what arrived (NOT integrity-pinned).
+    size_bytes: int | None = None
+    sha256: str | None = None
+    reason: str | None = None
+
+
+class LorasStatus(BaseModel):
+    # sha256 of the sorted "<name> <url>" lines of the set last synced; None before the first sync.
+    digest: str | None
+    items: list[LoraStatus]
+
+
 class Status(BaseModel):
     schema_version: Literal[1] = 1
     state: State | None
@@ -96,6 +127,7 @@ class Status(BaseModel):
     destroy: DestroyInfo
     video_models: VideoModelsStatus | None = None
     video_families: list[VideoFamilyStatus] | None = None
+    extra_loras: LorasStatus | None = None
 
 
 class ExtendRequest(BaseModel):

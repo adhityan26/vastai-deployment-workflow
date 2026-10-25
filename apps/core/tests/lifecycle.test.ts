@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppsConfig } from "../src/config.js";
-import type { AgentStatus, VideoFamilyStatus, VideoModelsStatus } from "../src/agent.js";
+import type { AgentStatus, LorasStatus, VideoFamilyStatus, VideoModelsStatus } from "../src/agent.js";
 import { AgentError } from "../src/agent.js";
 import { Unreachable } from "../src/http.js";
 import { AlreadyActiveError, Registry, type InstanceRecord, type NewRecord } from "../src/registry.js";
@@ -48,6 +48,7 @@ const cfg = {
   profile: "image",
   vastImage: "vastai/comfy:v0.41.0-cuda-12.9-py312",
   vastDiskGb: 50,
+  loraLinkMaxBytes: 2147483648,
   vastMinVramGb: 24,
   vastMaxDph: "0.50",
   vastMinDownloadMbps: 500,
@@ -167,6 +168,12 @@ class FakeAgent implements AgentLike {
   async startVideoModels(): Promise<VideoModelsStatus> {
     this.calls.push("agent.video");
     return this.videoImpl();
+  }
+  lorasAsked: unknown[] = [];
+  async syncLoras(items: unknown): Promise<LorasStatus> {
+    this.calls.push("agent.loras");
+    this.lorasAsked.push(items);
+    return { digest: null, items: [] };
   }
   familyAsked: unknown[] = [];
   async startVideoFamily(family: string, opts: unknown = {}): Promise<VideoFamilyStatus> {
@@ -2339,5 +2346,28 @@ describe("video families at Start and on demand", () => {
     expect(await life.downloadVideoFamily("big", { mode: "text", links: { high: "h", low: "l" } })).toMatchObject({ id: "big", state: "downloading" });
     expect(calls).toContain("agent.videoFamily");
     expect(agent.familyAsked).toEqual([["big", { mode: "text", links: { high: "h", low: "l" } }]]);
+  });
+});
+
+
+describe("extra LoRAs on the instance", () => {
+  it("syncLoras forwards the wanted set to the active instance's agent and needs an instance", async () => {
+    const { life, agent, calls } = setup();
+    await expect(life.syncLoras([])).rejects.toThrow(/no active instance/);
+    await life.start();
+    const items = [{ name: "xl_lora_00000001_high.safetensors", url: "https://huggingface.co/o/r/resolve/main/x.safetensors" }]; // config-lint: ok (test fixture)
+    expect(await life.syncLoras(items)).toEqual({ digest: null, items: [] });
+    expect(calls).toContain("agent.loras");
+    expect(agent.lorasAsked).toEqual([items]);
+  });
+
+  it("passes LORA_LINK_MAX_BYTES to the instance with the link rules while video is on", async () => {
+    const rules = { videoEnabled: true, videoModelLinkHosts: ["huggingface.co"], videoModelLinkRedirectDomains: ["hf.co"], videoModelLinkMaxBytes: 10, loraLinkMaxBytes: 2048 };
+    const on = setup({ cfg: rules });
+    await on.life.start();
+    expect(on.vast.requests[0]!.env).toMatchObject({ LORA_LINK_MAX_BYTES: "2048" });
+    const off = setup();
+    await off.life.start();
+    expect(off.vast.requests[0]!.env).not.toHaveProperty("LORA_LINK_MAX_BYTES");
   });
 });

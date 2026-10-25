@@ -9,6 +9,7 @@ import type {
   InstanceRecord,
   Lifecycle,
   Profile,
+  LoraStore,
 } from "@vast-comfy/core";
 import type { Auth, Identity, Role } from "./auth.js";
 import { registerAuthRoutes, type LoginDeps } from "./auth-routes.js";
@@ -39,7 +40,7 @@ export interface ServerDeps {
   cfg: AppsConfig;
   auth: Pick<Auth, "identify" | "role">;
   lifecycle: Pick<Lifecycle, "view" | "estimate" | "gpuOptions" | "offers" | "parseFilters" | "start" | "destroy" | "destroyUnknown" | "extend" | "console" | "history"> &
-    Partial<Pick<Lifecycle, "downloadVideoModels" | "downloadVideoFamily">>;
+    Partial<Pick<Lifecycle, "downloadVideoModels" | "downloadVideoFamily" | "syncLoras">>;
   /** The active registry record; used to route job polls to the instance that ran them. */
   registry: { active(): Promise<InstanceRecord | null> };
   /** A ComfyUI client for an instance hostname (built from config; never from the request). */
@@ -55,6 +56,8 @@ export interface ServerDeps {
   videoTemplate?: unknown;
   /** The workflows of the enabled video families besides the base section, by file name (each must be there). */
   videoFamilyTemplates?: Readonly<Record<string, unknown>>;
+  /** Extra LoRAs admins add by link (LORA_STORE_PATH); absent turns that management off. */
+  loraStore?: LoraStore;
   /** Reads the Vast account credit in USD (admin page); absent means GET /api/credit answers 404. */
   credit?(): Promise<number>;
   /** Saved images (MinIO); absent means saving and the gallery are off (the routes answer 503). */

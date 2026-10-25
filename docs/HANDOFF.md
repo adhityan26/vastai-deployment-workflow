@@ -162,6 +162,18 @@ may be too short for 12 s; README "Longer clips" says what to raise (e.g. 5400 w
 timeout must stay shorter). UNVERIFIED: quality beyond about 5 s, VRAM for 289/193 frames (try 832x480 first on
 24 GB), time per clip, result size (estimated well under `VIDEO_MAX_BYTES`).
 
+**Extra LoRAs added from the page (branch `feat/lora-management`, 2026-10-26, pushed, NOT merged).** Admins add, edit,
+hide and delete extra LoRAs of a video family by Hugging Face link (Video tool -> Manage LoRAs; `GET/POST /api/loras`,
+`PATCH/DELETE /api/loras/{id}`), stored in `LORA_STORE_PATH` (`/data/extra-loras.json`). Server-chosen ids and file
+names; the model-link rules, .safetensors only; checked on the web and again on the instance; not integrity-pinned
+(sha256 of what arrived reported). The web app syncs the wanted set to a serving instance (agent `POST /loras`), which
+downloads in the background through the video download slot; a job with a LoRA not on the instance is refused
+(`extra_lora_not_ready`). Hidden LoRAs: server-enforced admin only; an admin's state lists them only with
+`x-reveal-hidden: 1` (sent after three quick taps on the Video tool's title); a member's job naming one gets
+`unknown_extra_lora`. Hidden is not secret from anyone with server or instance access. UNVERIFIED: a real download on
+an instance, ComfyUI listing new LoRAs without a restart, stacking with the 4-step LoRAs. Runbook: README "Extra LoRAs
+added from the page".
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)

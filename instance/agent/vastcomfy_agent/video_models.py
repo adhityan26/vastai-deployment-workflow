@@ -97,6 +97,39 @@ class VideoModels:
         self._family_failure: dict[str, str] = {}
         self._done = 0
         self._total = 0
+        # Called (outside the lock) whenever a download ends, so a waiting one (the extra LoRAs) can start.
+        self._idle_hooks: list[Callable[[], None]] = []
+
+    # ---- the one download slot, shared with the extra LoRAs (extra_loras.py) ----
+
+    def try_claim(self, owner: str) -> bool:
+        """Take the single download slot for another downloader; False while any download runs."""
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+            self._running_family = owner
+            self._done = 0
+            self._total = 0
+            return True
+
+    def release(self, owner: str) -> None:
+        with self._lock:
+            if not (self._running and self._running_family == owner):
+                return
+            self._running = False
+            self._running_family = None
+        self._idle()
+
+    def add_idle_hook(self, hook: Callable[[], None]) -> None:
+        self._idle_hooks.append(hook)
+
+    def _idle(self) -> None:
+        for hook in list(self._idle_hooks):
+            try:
+                hook()
+            except Exception:  # a hook must never break a download's end
+                log.exception("idle hook failed")
 
     def _video_profile(self) -> Profile | None:
         """The profile when it enables video, else None (read once; a broken profile counts as no video)."""
@@ -286,6 +319,7 @@ class VideoModels:
             with self._lock:
                 self._running = False
                 self._failure = None if failure is None else _clip(failure)
+            self._idle()
 
     # ---- the families of `video_families:` (the base section keeps the methods above, unchanged) ----
 
@@ -510,3 +544,4 @@ class VideoModels:
                     self._family_failure.pop(family, None)
                 else:
                     self._family_failure[family] = _clip(failure)
+            self._idle()

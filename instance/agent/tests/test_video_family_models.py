@@ -267,3 +267,16 @@ def test_a_link_may_not_name_a_file_the_other_mode_already_links(tmp_path):
     assert err.value.status == 400 and err.value.code == "model_link_name_clash"
     assert pinned == [] and not any(m == "GET" for m, _u in linked)
     assert set(read_family_links(tmp_path / "state", "big")) == {"text.high", "text.low"}
+
+
+def test_the_end_of_a_family_download_calls_the_idle_hooks_and_frees_the_slot(tmp_path):
+    vm, _, _, jobs = make(tmp_path, run_now=False)
+    called = []
+    vm.add_idle_hook(lambda: called.append(vm.busy()))
+    vm.request(family="big")
+    assert called == [] and not vm.try_claim("other")
+    jobs.pop(0)()
+    assert called == [False]
+    assert vm.try_claim("other") and vm.busy()
+    vm.release("other")
+    assert called == [False, False] and not vm.busy()

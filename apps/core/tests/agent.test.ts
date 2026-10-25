@@ -191,3 +191,24 @@ describe("AgentClient video families", () => {
     await expect(odd.client.startVideoFamily("x")).rejects.toThrow(/not a family status/);
   });
 });
+
+describe("AgentClient extra LoRAs", () => {
+  const loras = { digest: "d".repeat(64), items: [{ name: "xl_lora_00000001_high.safetensors", state: "ready", bytes_done: 9, bytes_total: 9, size_bytes: 9, sha256: "a".repeat(64), reason: null }] };
+  it("reads extra_loras from the status and sends the whole wanted set with POST /loras", async () => {
+    const { client, seen } = await fake((s, res) => (s.url === "/loras" ? json(res, 202, loras) : json(res, 200, { ...STATUS, extra_loras: loras })));
+    expect((await client.status()).extra_loras).toEqual(loras);
+    const items = [{ name: "xl_lora_00000001_high.safetensors", url: "https://huggingface.co/o/r/resolve/main/x.safetensors" }]; // config-lint: ok (test fixture)
+    expect(await client.syncLoras(items)).toEqual(loras);
+    expect(seen[1]).toMatchObject({ method: "POST", url: "/loras" });
+    expect(JSON.parse(seen[1]!.body)).toEqual({ loras: items });
+  });
+
+  it("refuses a status whose extra_loras breaks the schema, and keeps the agent's refusal code", async () => {
+    const bad = await fake((_s, res) => json(res, 200, { ...STATUS, extra_loras: { digest: null, items: [{ name: "x", state: "weird", bytes_done: 0, bytes_total: 0 }] } }));
+    await expect(bad.client.status()).rejects.toThrow();
+    const refused = await fake((_s, res) => json(res, 400, { detail: { code: "invalid_lora_name", message: "no" } }));
+    await expect(refused.client.syncLoras([])).rejects.toMatchObject({ status: 400, code: "invalid_lora_name" });
+    const odd = await fake((_s, res) => json(res, 202, ["x"]));
+    await expect(odd.client.syncLoras([])).rejects.toThrow(/not a LoRA status/);
+  });
+});

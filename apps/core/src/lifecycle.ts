@@ -1,5 +1,5 @@
 import { camelCase, type AppsConfig } from "./config.js";
-import type { AgentStatus, VideoFamilyStatus, VideoModelsStatus } from "./agent.js";
+import type { AgentStatus, LorasStatus, VideoFamilyStatus, VideoModelsStatus } from "./agent.js";
 import type { ModelSpec } from "./profile.js";
 import { AlreadyActiveError, type InstanceRecord, type Registry } from "./registry.js";
 import { TailscaleError, type TailscaleErrorCode } from "./tailscale.js";
@@ -198,6 +198,7 @@ export interface AgentLike {
   extend(kind: "idle" | "failsafe", minutes: number): Promise<Record<string, unknown>>;
   startVideoModels?(url?: string): Promise<VideoModelsStatus>;
   startVideoFamily?(family: string, opts?: { mode?: "text" | "image"; links?: Record<string, string> }): Promise<VideoFamilyStatus>;
+  syncLoras?(items: readonly { name: string; url: string }[]): Promise<LorasStatus>;
   destroy(reason: "manual" | "watchdog"): Promise<void>;
 }
 
@@ -656,6 +657,7 @@ export class Lifecycle {
       VIDEO_MODEL_LINK_HOSTS: list("videoModelLinkHosts", "VIDEO_MODEL_LINK_HOSTS"),
       VIDEO_MODEL_LINK_REDIRECT_DOMAINS: list("videoModelLinkRedirectDomains", "VIDEO_MODEL_LINK_REDIRECT_DOMAINS"),
       VIDEO_MODEL_LINK_MAX_BYTES: String(intCfg(this.cfg, "videoModelLinkMaxBytes", "VIDEO_MODEL_LINK_MAX_BYTES", 1)),
+      LORA_LINK_MAX_BYTES: String(intCfg(this.cfg, "loraLinkMaxBytes", "LORA_LINK_MAX_BYTES", 1)),
     };
   }
 
@@ -1126,6 +1128,23 @@ export class Lifecycle {
     if (typeof agent.startVideoFamily !== "function") throw new NoActiveInstanceError();
     try {
       return await agent.startVideoFamily(family, opts);
+    } catch (err) {
+      if (err instanceof Error) err.message = this.scrub(err.message);
+      throw err;
+    }
+  }
+
+  /** Send the wanted set of extra LoRA files to the active instance's agent (admin changes, or the state poll). */
+  async syncLoras(items: readonly { name: string; url: string }[]): Promise<LorasStatus> {
+    const record = await this.deps.registry.active();
+    if (record === null || record.vast_instance_id === null || record.status === "stopping") {
+      throw new NoActiveInstanceError();
+    }
+    this.secrets.add(record.agent_token);
+    const agent = this.deps.agentFor(record);
+    if (typeof agent.syncLoras !== "function") throw new NoActiveInstanceError();
+    try {
+      return await agent.syncLoras(items);
     } catch (err) {
       if (err instanceof Error) err.message = this.scrub(err.message);
       throw err;

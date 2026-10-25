@@ -132,6 +132,14 @@ import {
   familyVideo,
   extraLoraMembers,
   extraLoraNote,
+  TapCounter,
+  REVEAL_HEADER,
+  parseLoraList,
+  loraFormBody,
+  loraStatusText,
+  LORA_LINK_NOTICE,
+  type AddedLora,
+  type LoraList,
   durationLabel,
   EXPERIMENTAL_DURATION_WARNING,
   videoAsEdit,
@@ -315,12 +323,13 @@ export function mountApp(doc: Document, env: Env): App {
 
   // ---- requests ----
 
-  async function call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+  async function call(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<unknown> {
     let res: Response;
+    const headers = { ...(body === undefined ? {} : { "content-type": "application/json" }), ...extraHeaders };
     try {
       res = await env.fetch(path, {
         method,
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        headers: Object.keys(headers).length === 0 ? undefined : headers,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch {
@@ -1340,7 +1349,8 @@ export function mountApp(doc: Document, env: Env): App {
       const none = make("option", "None");
       none.value = "";
       videoLoraSelect.replaceChildren(none, ...loras.map((l) => {
-        const o = make("option", l.title);
+        // An added LoRA not on the instance yet says so (a job with it is refused until it is).
+        const o = make("option", l.status === undefined || l.status === "ready" ? l.title : `${l.title} (${loraStatusText(l.status)})`);
         o.value = l.id;
         return o;
       }));
@@ -1356,6 +1366,227 @@ export function mountApp(doc: Document, env: Env): App {
     videoLoraStrength.value = "";
     if (state) renderForm(state);
   });
+
+  // ---- hidden LoRAs: three quick taps on the tool's title reveal them, for admins, until the page reloads ----
+  let revealHidden = false;
+  const taps = new TapCounter();
+  $("gen-title").addEventListener("click", () => {
+    // Only an admin's page ever sends the reveal header (the server ignores it for members anyway).
+    if (state?.role !== "admin" || mode !== "video" || !taps.tap(env.now())) return;
+    revealHidden = !revealHidden;
+    void refresh();
+  });
+
+  // ---- Manage LoRAs (admins): built only for an admin, inside the Video tool ----
+  let loraManage: HTMLDetailsElement | null = null;
+  let loraEditing: string | null = null;
+  let loraList: LoraList | null = null;
+  let loraAsking = false;
+  const loraInput = (id: string, label: string, type = "text", max = 0): [HTMLLabelElement, HTMLInputElement] => {
+    const l = make("label", label);
+    l.htmlFor = id;
+    const i = make("input");
+    i.id = id;
+    i.type = type;
+    if (max > 0) i.maxLength = max;
+    i.autocomplete = "off";
+    return [l, i];
+  };
+  const loraCheck = (id: string, label: string): [HTMLLabelElement, HTMLInputElement] => {
+    const row = make("label", undefined, "check");
+    const box = make("input");
+    box.type = "checkbox";
+    box.id = id;
+    row.append(box, make("span", ` ${label}`));
+    return [row, box];
+  };
+  function buildLoraManage(): HTMLDetailsElement {
+    const box = make("details", undefined, "lora-manage") as HTMLDetailsElement;
+    box.id = "lora-manage";
+    const summary = make("summary", "Manage LoRAs");
+    const list = make("ul", undefined, "lora-list");
+    list.id = "lora-list";
+    const heading = make("p", "Add a LoRA", "muted");
+    heading.id = "lora-form-title";
+    const [tl, title] = loraInput("lora-title", "Title", "text", 60);
+    const [dl, description] = loraInput("lora-description", "Description (optional)", "text", 400);
+    const fl = make("label", "Video model");
+    fl.htmlFor = "lora-family";
+    const family = make("select");
+    family.id = "lora-family";
+    const [textRow] = loraCheck("lora-mode-text", "Text to video");
+    const [imageRow, imageBox] = loraCheck("lora-mode-image", "Image to video");
+    imageBox.checked = true;
+    const [sl, strength] = loraInput("lora-strength", "Default strength (0 to 1)", "number");
+    strength.min = "0";
+    strength.max = "1";
+    strength.step = "0.05";
+    strength.value = "1";
+    const [hiddenRow] = loraCheck("lora-hidden", "Hidden: admins only");
+    const [trl, trigger] = loraInput("lora-trigger", "Trigger words (optional)", "text", 200);
+    const links = make("div");
+    links.id = "lora-links";
+    const [hl, high] = loraInput("lora-high", "High-noise LoRA link", "url", MODEL_LINK_MAX_CHARS);
+    const [ll, low] = loraInput("lora-low", "Low-noise LoRA link", "url", MODEL_LINK_MAX_CHARS);
+    for (const i of [high, low]) {
+      i.spellcheck = false;
+      i.placeholder = "huggingface.co/<owner>/<repo>/resolve/<revision>/<file>.safetensors";
+    }
+    links.append(hl, high, ll, low, make("p", LORA_LINK_NOTICE, "muted"));
+    const save = make("button", "Add LoRA");
+    save.type = "button";
+    save.id = "lora-save";
+    const cancel = make("button", "Cancel");
+    cancel.type = "button";
+    cancel.id = "lora-cancel";
+    cancel.hidden = true;
+    const error = make("p", undefined, "alert bad");
+    error.id = "lora-error";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    box.append(summary, list, heading, tl, title, dl, description, fl, family, textRow, imageRow, sl, strength, hiddenRow, trl, trigger, links, save, cancel, error);
+    box.addEventListener("toggle", () => {
+      if (box.open) void loadLoras();
+    });
+    save.addEventListener("click", () => void saveLora());
+    cancel.addEventListener("click", () => resetLoraForm());
+    return box;
+  }
+  const loraEl = <T extends HTMLElement = HTMLInputElement>(id: string): T => loraManage!.querySelector<T>(`#${id}`)!;
+  function loraFail(message: string): void {
+    const e = loraEl<HTMLElement>("lora-error");
+    e.textContent = message;
+    e.hidden = false;
+  }
+  function resetLoraForm(): void {
+    loraEditing = null;
+    for (const id of ["lora-title", "lora-description", "lora-trigger", "lora-high", "lora-low"]) loraEl(id).value = "";
+    loraEl("lora-strength").value = "1";
+    loraEl("lora-mode-text").checked = false;
+    loraEl("lora-mode-image").checked = true;
+    loraEl("lora-hidden").checked = false;
+    loraEl<HTMLElement>("lora-links").hidden = false;
+    loraEl<HTMLSelectElement>("lora-family").disabled = false;
+    loraEl<HTMLElement>("lora-form-title").textContent = "Add a LoRA";
+    loraEl<HTMLButtonElement>("lora-save").textContent = "Add LoRA";
+    loraEl<HTMLButtonElement>("lora-cancel").hidden = true;
+    loraEl<HTMLElement>("lora-error").hidden = true;
+  }
+  function editLora(l: AddedLora): void {
+    loraEditing = l.id;
+    loraEl("lora-title").value = l.title;
+    loraEl("lora-description").value = l.description;
+    loraEl("lora-trigger").value = l.trigger_words;
+    loraEl("lora-strength").value = String(l.strength);
+    loraEl("lora-mode-text").checked = l.modes.includes("text");
+    loraEl("lora-mode-image").checked = l.modes.includes("image");
+    loraEl("lora-hidden").checked = l.hidden;
+    // Links and the family are fixed: delete the LoRA and add it again to change them.
+    loraEl<HTMLElement>("lora-links").hidden = true;
+    loraEl<HTMLSelectElement>("lora-family").value = l.family;
+    loraEl<HTMLSelectElement>("lora-family").disabled = true;
+    loraEl<HTMLElement>("lora-form-title").textContent = `Change ${l.title}`;
+    loraEl<HTMLButtonElement>("lora-save").textContent = "Save changes";
+    loraEl<HTMLButtonElement>("lora-cancel").hidden = false;
+  }
+  function renderLoraList(): void {
+    if (loraManage === null) return;
+    const families = loraEl<HTMLSelectElement>("lora-family");
+    const keep = families.value;
+    const titles = new Map((state?.video_families ?? []).map((f) => [f.id, f.title]));
+    families.replaceChildren(...(loraList?.families ?? []).map((id) => {
+      const o = make("option", titles.get(id) ?? id);
+      o.value = id;
+      return o;
+    }));
+    if (loraList?.families.includes(keep)) families.value = keep;
+    const list = loraEl<HTMLElement>("lora-list");
+    list.replaceChildren(...(loraList?.loras ?? []).map((l) => {
+      const li = make("li", undefined, "lora-row");
+      li.append(make("span", l.title, "lora-title"), make("span", ` ${loraStatusText(l.status)}`, "muted"));
+      if (l.hidden) li.append(make("span", " hidden", "badge"));
+      const edit = make("button", "Edit");
+      edit.type = "button";
+      edit.addEventListener("click", () => editLora(l));
+      const toggle = make("button", l.hidden ? "Show to members" : "Hide");
+      toggle.type = "button";
+      toggle.addEventListener("click", () => void changeLora(l.id, { hidden: !l.hidden }));
+      const del = make("button", "Delete", "danger");
+      del.type = "button";
+      del.addEventListener("click", () => void deleteLora(l));
+      li.append(edit, toggle, del);
+      return li;
+    }));
+    if ((loraList?.loras.length ?? 0) === 0) list.replaceChildren(make("li", "No LoRAs added yet.", "muted"));
+  }
+  async function loadLoras(): Promise<void> {
+    if (loraManage === null || !loraManage.open) return;
+    try {
+      loraList = parseLoraList(await call("GET", API.loras));
+      renderLoraList();
+    } catch (err) {
+      if (err instanceof AuthLostError) return;
+      loraFail(err instanceof Error ? err.message : "The LoRA list could not be loaded.");
+    }
+  }
+  async function loraWrite(fn: () => Promise<unknown>): Promise<boolean> {
+    if (loraAsking) return false;
+    loraAsking = true;
+    loraEl<HTMLElement>("lora-error").hidden = true;
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      if (!(err instanceof AuthLostError)) loraFail(err instanceof Error ? err.message : "The change could not be saved.");
+      return false;
+    } finally {
+      loraAsking = false;
+    }
+  }
+  async function saveLora(): Promise<void> {
+    const adding = loraEditing === null;
+    const built = loraFormBody({
+      title: loraEl("lora-title").value, description: loraEl("lora-description").value, family: loraEl<HTMLSelectElement>("lora-family").value,
+      text: loraEl("lora-mode-text").checked, image: loraEl("lora-mode-image").checked, strength: loraEl("lora-strength").value,
+      hidden: loraEl("lora-hidden").checked, trigger_words: loraEl("lora-trigger").value, high: loraEl("lora-high").value, low: loraEl("lora-low").value,
+    }, adding);
+    if ("error" in built) return loraFail(built.error);
+    const id = loraEditing;
+    const ok = await loraWrite(() => (id === null ? call("POST", API.loras, built.body) : call("PATCH", `${API.loras}/${encodeURIComponent(id)}`, built.body)));
+    if (!ok) return;
+    resetLoraForm();
+    await loadLoras();
+    if (active) await refresh();
+  }
+  async function changeLora(id: string, patch: Record<string, unknown>): Promise<void> {
+    if (await loraWrite(() => call("PATCH", `${API.loras}/${encodeURIComponent(id)}`, patch))) {
+      await loadLoras();
+      if (active) await refresh();
+    }
+  }
+  async function deleteLora(l: AddedLora): Promise<void> {
+    const sure = await confirmDialog("Delete this LoRA?", [`${l.title} is removed for everyone; its file leaves the instance once nothing runs.`], "Delete", true);
+    if (!sure) return;
+    if (await loraWrite(() => call("DELETE", `${API.loras}/${encodeURIComponent(l.id)}`, {}))) {
+      if (loraEditing === l.id) resetLoraForm();
+      await loadLoras();
+      if (active) await refresh();
+    }
+  }
+  /** The Manage section: for admins where the server lets them add LoRAs (a family that takes them). */
+  function renderLoraManage(s: ApiState, filming: boolean): void {
+    const offered = s.role === "admin" && (s.video_families ?? []).some((f) => !f.base && f.slots !== null);
+    if (!offered) {
+      if (loraManage !== null) loraManage.hidden = true;
+      return;
+    }
+    if (loraManage === null) {
+      loraManage = buildLoraManage();
+      $("video-box").append(loraManage);
+      resetLoraForm();
+    }
+    loraManage.hidden = !filming;
+  }
 
   /** The video offer as the chosen family sees it (sizes, lengths, model state). */
   function currentVideo(s: ApiState): VideoInfo | null {
@@ -1586,6 +1817,7 @@ export function mountApp(doc: Document, env: Env): App {
     $("video-duration-warning").textContent = longClip ? EXPERIMENTAL_DURATION_WARNING : "";
     $("video-duration-warning").hidden = !longClip;
     renderVideoLora(s, filming);
+    renderLoraManage(s, filming);
     sizeBox.hidden = editing || upscaling || filming;
     promptBox.placeholder = notes
       ? "Optional notes for this style"
@@ -3152,9 +3384,11 @@ export function mountApp(doc: Document, env: Env): App {
   async function refresh(): Promise<void> {
     if (!active) return;
     try {
-      const parsed = parseState(await call("GET", API.state));
+      // After the reveal gesture an admin's state also lists hidden LoRAs (the server ignores this for members).
+      const parsed = parseState(await call("GET", API.state, undefined, revealHidden ? { [REVEAL_HEADER]: "1" } : {}));
       if (parsed === null) throw new ApiError("The server sent a status this page cannot read.");
       state = parsed;
+      if (loraManage?.open === true) void loadLoras();
       fetchedAt = env.now();
       samples = nextSamples(samples, fetchedAt, parsed.state, parsed.download);
       failures = 0;

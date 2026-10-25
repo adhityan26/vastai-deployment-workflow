@@ -17,6 +17,7 @@ from .destroyer import Destroyer
 from .idle import IdleWatcher
 from .model_link import guarded_client
 from .profile import Downloader, free_bytes_of, load_profile
+from .extra_loras import ExtraLoras
 from .video_models import VideoModels
 from .runner import Runner
 from .state import StateStore
@@ -102,6 +103,28 @@ def build(
             connections=cfg.download_connections,
         ),
     )
+    # Extra LoRAs added by link in the web app (only with video on): synced by the web app, downloaded on demand.
+    loras = ExtraLoras(
+        slot=video,
+        load_profile=video._load_profile,
+        comfy=comfy,
+        comfy_dir=Path(cfg.comfy_dir),
+        free_bytes_fn=free_bytes_of,
+        disk_margin_mb=cfg.disk_margin_mb,
+        states=states,
+        state_dir=state_dir,
+        link_hosts=cfg.video_model_link_hosts,
+        link_max_bytes=cfg.lora_link_max_bytes,
+        total_max_bytes=cfg.lora_total_max_bytes,
+        make_link_client=lambda: guarded_client(
+            cfg.video_model_link_hosts, cfg.video_model_link_redirect_domains, cfg.http_timeout_s,
+        ),
+        make_link_downloader=lambda client, link, on_progress: Downloader(
+            hf_base=f"https://{link.host}", token="", client=client, retries=cfg.download_retries,  # config-lint: ok (checked link host)
+            backoff_s=cfg.download_backoff_s, chunk_bytes=cfg.download_chunk_bytes, on_progress=on_progress,
+            connections=cfg.download_connections,
+        ),
+    ) if cfg.video_enabled else None
     runner = Runner(states=states, idle=idle, comfy=comfy, flow=flow, state_dir=state_dir, now=now,
                     destroy_failed_retry_s=cfg.destroy_failed_retry_s, busy=video.busy)
     status = StatusBuilder(
@@ -115,7 +138,9 @@ def build(
         now=now,
         video=video.view,
         video_families=video.families_view,
+        loras=(lambda: None) if loras is None else loras.view,
     )
     workflows = WorkflowStore(Path(cfg.workflows_dir), cfg.workflow_max_bytes)
-    deps = Deps(cfg=cfg, states=states, deadlines=deadlines, status=status, flow=flow, workflows=workflows, video=video)
+    deps = Deps(cfg=cfg, states=states, deadlines=deadlines, status=status, flow=flow, workflows=workflows, video=video,
+                loras=loras)
     return Wired(cfg, states, deadlines, comfy, destroyer, flow, idle, runner, status, workflows, deps)

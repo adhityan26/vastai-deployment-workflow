@@ -301,3 +301,54 @@ def test_status_carries_the_video_families_only_when_there_are_some(tmp_path, ma
 
     builder._video_families = boom
     assert builder.build().video_families is None
+
+
+class FakeLoras:
+    def __init__(self, refuse=None):
+        from vastcomfy_agent.models import LorasStatus, LoraStatus
+
+        self.refuse, self.items = refuse, None
+        self.status = LorasStatus(digest="d" * 64, items=[LoraStatus(name="xl_lora_00000001_high.safetensors", state="downloading",
+                                                                    bytes_done=0, bytes_total=9)])
+
+    def sync(self, items):
+        self.items = items
+        if self.refuse is not None:
+            raise self.refuse
+        return self.status
+
+
+def test_loras_takes_the_whole_set_and_refuses_anything_else(env):
+    from vastcomfy_agent.extra_loras import LorasRefused
+
+    client, deps, _ = env
+    body = {"loras": [{"name": "xl_lora_00000001_high.safetensors", "url": "https://huggingface.co/o/r/resolve/main/x.safetensors"}]}
+    assert client.post("/loras", json=body).status_code == 401
+    assert client.post("/loras", headers=AUTH, json=body).json()["detail"]["code"] == "video_unavailable"
+    deps.loras = FakeLoras()
+    res = client.post("/loras", headers=AUTH, json=body)
+    assert res.status_code == 202 and res.json()["items"][0]["state"] == "downloading"
+    assert deps.loras.items == [("xl_lora_00000001_high.safetensors", "https://huggingface.co/o/r/resolve/main/x.safetensors")]
+    assert client.post("/loras", headers=AUTH, json={"loras": []}).status_code == 202 and deps.loras.items == []
+    for bad in ({}, {"loras": [{"name": "x"}]}, {"loras": [{"name": "x", "url": "u", "path": "/etc"}]}, {"loras": "x"},
+                {"loras": [{"name": "x" * 65, "url": "u"}]}, {"loras": [{"name": "x", "url": "u"}] * 65}):
+        assert client.post("/loras", headers=AUTH, json=bad).status_code == 422, bad
+    deps.loras = FakeLoras(LorasRefused(400, "invalid_lora_name", "no"))
+    res = client.post("/loras", headers=AUTH, json=body)
+    assert res.status_code == 400 and res.json()["detail"] == {"code": "invalid_lora_name", "message": "no"}
+
+
+def test_status_carries_the_extra_loras_and_survives_their_errors(tmp_path, make_cfg):
+    from vastcomfy_agent.models import LorasStatus
+
+    clock = Clock()
+    ok = LorasStatus(digest=None, items=[])
+    builder = StatusBuilder(state_dir=tmp_path / "s", states=StateStore(tmp_path / "s", clock), deadlines=DeadlineStore(tmp_path / "s", clock),
+                            comfy=FakeComfy(), gpu_reader=lambda: None, profile="image", commit="c", now=clock, loras=lambda: ok)
+    assert builder.build().extra_loras == ok
+
+    def boom():
+        raise OSError("disk")
+
+    builder._loras = boom
+    assert builder.build().extra_loras is None

@@ -19,6 +19,7 @@ import {
   TailscaleError,
   UsageHistory,
   loadProfile,
+  LoraStore,
   type AppsConfig,
   type CreateRequest,
   type DestroyOutcome,
@@ -293,6 +294,8 @@ async function harness(
     videoTemplate?: unknown;
     /** undefined: the shipped workflows of the profile's further video families. */
     videoFamilyTemplates?: Record<string, unknown>;
+    /** true: an empty LoRA store in the harness directory; a function: the same, with these ids. */
+    loraStore?: boolean | (() => string);
   } = {},
 ): Promise<Harness> {
   let agentHandler: Handler = (s, res) => {
@@ -382,6 +385,9 @@ async function harness(
     videoMaxBytes: 65536,
     videoViewTimeoutS: 30,
     videoModelLinkHosts: ["huggingface.co"],
+    loraMaxEntries: 20,
+    loraWriteRateLimitPerHour: 30,
+    loraSyncMinIntervalS: 30,
     vastVideoDiskGb: 80,
     bootLogMaxLines: 500,
     bootLogMaxLineChars: 400,
@@ -437,6 +443,14 @@ async function harness(
     upscaleTemplate: opts.profile?.upscale ? upscaleTemplate : null,
     videoTemplate: opts.videoTemplate !== undefined ? opts.videoTemplate : opts.profile?.video ? videoTemplate : null,
     videoFamilyTemplates: opts.videoFamilyTemplates ?? familyTemplates(opts.profile ?? profile),
+    ...(opts.loraStore === undefined || opts.loraStore === false
+      ? {}
+      : {
+          loraStore: new LoraStore(join(dir, "extra-loras.json"), {
+            maxEntries: Number(cfg["loraMaxEntries"]), hosts: ["huggingface.co"], now: () => NOW_S,
+            ...(typeof opts.loraStore === "function" ? { newId: opts.loraStore } : {}),
+          }),
+        }),
     editTemplate: opts.editTemplate === undefined ? editTemplate : opts.editTemplate,
     credit,
     gallery,
@@ -471,7 +485,7 @@ afterEach(async () => {
   }
 });
 
-type Method = "GET" | "POST";
+type Method = "GET" | "POST" | "PATCH" | "DELETE";
 async function call(method: Method, url: string, headers: Record<string, string> = {}, payload?: unknown) {
   return h.app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
 }
@@ -3978,5 +3992,252 @@ describe("video families", () => {
       expect(res.json().error.code).toBe(code);
       expect(h.vast.creates).toBe(0);
     }
+  });
+});
+
+describe("extra LoRAs added by admins", () => {
+  const FAMILY = "wan22_a14b";
+  const familyProfile = () => loadProfile(repo("instance/profiles/image.yaml"), { videoEnabled: true, videoFamilies: [FAMILY] });
+  const LINK = "https://huggingface.co/someone/moves/resolve/main/moves.safetensors"; // config-lint: ok (test fixture)
+  const LINK_LOW = "https://huggingface.co/someone/moves/resolve/main/moves_low.safetensors"; // config-lint: ok (test fixture)
+  const BASE_READY = { state: "ready", boot: true, bytes_done: 50, bytes_total: 50, reason: null };
+  const FAM_READY = { id: FAMILY, state: "ready", boot: false, bytes_done: 9, bytes_total: 9, reason: null, experts: [] };
+  /** The agent: the families ready, and the LoRA files as `files` says (name -> state). */
+  let files: Record<string, string> = {};
+  let digest: string | null = null;
+  let synced: unknown[] = [];
+  const agent: Handler = (s, res) => {
+    if (s.url === "/status") {
+      const items = Object.entries(files).map(([name, state]) => ({ name, state, bytes_done: 1, bytes_total: 1, size_bytes: 1, sha256: state === "ready" ? "a".repeat(64) : null, reason: state === "failed" ? "download failed" : null }));
+      return json(res, 200, agentStatus("ready", { video_models: BASE_READY, video_families: [{ ...BASE_READY, id: "wan22_5b" }, FAM_READY], extra_loras: { digest, items } }));
+    }
+    if (s.url === "/loras") {
+      synced.push(JSON.parse(s.body));
+      return json(res, 202, { digest: null, items: [] });
+    }
+    json(res, 404, {});
+  };
+  const comfyOk: Handler = (s, res) => {
+    if (s.url === "/upload/image") return json(res, 200, { name: /filename="([^"]+)"/.exec(s.body)![1], subfolder: "", type: "input" });
+    if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-lora" });
+    json(res, 404, {});
+  };
+  const lharness = async (opts: Parameters<typeof harness>[0] = {}) => {
+    files = {};
+    digest = null;
+    synced = [];
+    const made = await harness({ profile: familyProfile(), loraStore: true, ...opts });
+    made.setAgent(agent);
+    made.setComfy(comfyOk);
+    return made;
+  };
+  const add = async (over: Record<string, unknown> = {}) =>
+    post("/api/loras", await admin(), { title: "Moves", family: FAMILY, modes: ["image"], high: LINK, ...over });
+  const job = { prompt: "a fox", size: "Landscape", duration: "About 5 s", family: FAMILY, image: REF_A.toString("base64") };
+  const sentPrompt = () => JSON.parse(h.comfySeen.find((x) => x.url === "/prompt")!.body).prompt;
+  const extraIds = (body: { video_families: { extra_loras: { id: string }[] }[] }) => body.video_families[1]!.extra_loras.map((l) => l.id);
+
+  it("admins add a LoRA by link: checked, stored under a generated id, and sent to the instance", async () => {
+    h = await lharness();
+    const res = await add({ description: "jumps", strength: 0.8, trigger_words: "jump" });
+    expect(res.statusCode, res.body).toBe(201);
+    const lora = res.json().lora;
+    expect(lora).toMatchObject({ title: "Moves", description: "jumps", family: FAMILY, modes: ["image"], strength: 0.8, hidden: false, trigger_words: "jump", status: "not_installed" });
+    expect(lora.id).toMatch(/^lora_[0-9a-f]{8}$/);
+    expect(lora.sides.high).toMatchObject({ url: LINK, name: `xl_${lora.id}_high.safetensors` });
+    expect(synced).toEqual([{ loras: [{ name: `xl_${lora.id}_high.safetensors`, url: LINK }] }]);
+    const list = (await call("GET", "/api/loras", await admin())).json();
+    expect(list.loras.map((l: { id: string }) => l.id)).toEqual([lora.id]);
+    expect(list.families).toEqual([FAMILY]);
+    expect(list.max_entries).toBeGreaterThan(0);
+  });
+
+  it("an added LoRA never takes the id of a profile extra LoRA (a job names a LoRA by id)", async () => {
+    const ids = ["calisthenic_moves", "lora_00000001"];
+    h = await lharness({ loraStore: () => ids.shift()! });
+    expect((await add()).json().lora.id).toBe("lora_00000001");
+  });
+
+  it("the LoRA routes are admin only", async () => {
+    h = await lharness();
+    const m = await member();
+    expect((await call("GET", "/api/loras", m)).statusCode).toBe(403);
+    expect((await post("/api/loras", m, { title: "x", family: FAMILY, modes: ["image"], high: LINK })).statusCode).toBe(403);
+    expect((await call("PATCH", "/api/loras/lora_00000000", m, { title: "x" })).statusCode).toBe(403);
+    expect((await call("DELETE", "/api/loras/lora_00000000", m, {})).statusCode).toBe(403);
+  });
+
+  it.each<[string, Record<string, unknown>, number, string]>([
+    ["a gguf LoRA", { high: LINK.replace(".safetensors", ".gguf") }, 400, "model_link_unsupported_type"],
+    ["another host", { high: "https://evil.example/o/r/resolve/main/x.safetensors" }, 400, "model_link_host_not_allowed"], // config-lint: ok (test fixture)
+    ["user info in the link", { high: "https://u@huggingface.co/o/r/resolve/main/x.safetensors" }, 400, "invalid_model_link"], // config-lint: ok (test fixture)
+    ["an IP literal", { high: "https://169.254.169.254/o/r/resolve/main/x.safetensors" }, 400, "invalid_model_link"], // config-lint: ok (test fixture)
+    ["no link", { high: undefined }, 400, "invalid_lora"],
+    ["a family without extra LoRAs", { family: "wan22_5b" }, 400, "invalid_lora"],
+    ["an unknown family", { family: "nope" }, 400, "invalid_lora"],
+    ["a text LoRA (both modes of the family take one)", { modes: ["text", "image"] }, 201, ""],
+    ["a long title", { title: "x".repeat(61) }, 400, "invalid_body"],
+    ["an unknown member", { file: "x.safetensors" }, 400, "invalid_body"],
+    ["a strength above 1", { strength: 2 }, 400, "invalid_body"],
+  ])("POST /api/loras: %s", async (_n, over, status, code) => {
+    h = await lharness();
+    const res = await add(over);
+    expect(res.statusCode, res.body).toBe(status);
+    if (status === 400) {
+      expect(res.json().error.code).toBe(code);
+      expect(synced).toEqual([]);
+      expect((await call("GET", "/api/loras", await admin())).json().loras).toEqual([]);
+    }
+  });
+
+  it("caps the number of LoRAs and rate-limits writes", async () => {
+    h = await lharness({ cfg: { loraMaxEntries: 1 } });
+    expect((await add()).statusCode).toBe(201);
+    const full = await add();
+    expect([full.statusCode, full.json().error.code]).toEqual([409, "lora_limit_reached"]);
+    h = await lharness({ cfg: { loraWriteRateLimitPerHour: 2 } });
+    expect((await add()).statusCode).toBe(201);
+    expect((await add()).statusCode).toBe(201);
+    const limited = await add();
+    expect([limited.statusCode, limited.json().error.code]).toEqual([429, "rate_limited"]);
+  });
+
+  it("PATCH changes the editable fields only; links are immutable", async () => {
+    h = await lharness();
+    const { id } = (await add()).json().lora;
+    const res = await call("PATCH", `/api/loras/${id}`, await admin(), { title: "New", modes: ["image"], strength: 0.4, hidden: true, description: "d", trigger_words: "t" });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().lora).toMatchObject({ title: "New", strength: 0.4, hidden: true, description: "d", trigger_words: "t" });
+    expect((await call("PATCH", `/api/loras/${id}`, await admin(), { high: LINK_LOW })).json().error.code).toBe("invalid_body");
+    expect((await call("PATCH", "/api/loras/lora_ffffffff", await admin(), { title: "x" })).statusCode).toBe(404);
+    expect((await call("PATCH", "/api/loras/..%2Fx", await admin(), { title: "x" })).statusCode).toBe(400);
+  });
+
+  it("DELETE removes the entry and syncs the instance (which deletes the file when ComfyUI is idle)", async () => {
+    h = await lharness();
+    const { id } = (await add()).json().lora;
+    synced = [];
+    expect((await call("DELETE", `/api/loras/${id}`, await admin(), {})).statusCode).toBe(204);
+    expect(synced).toEqual([{ loras: [] }]);
+    expect((await call("GET", "/api/loras", await admin())).json().loras).toEqual([]);
+    expect((await call("DELETE", `/api/loras/${id}`, await admin(), {})).statusCode).toBe(404);
+  });
+
+  it("a public LoRA joins the family's extra LoRAs for everyone, with its state on the instance", async () => {
+    h = await lharness();
+    const { id } = (await add({ low: LINK_LOW })).json().lora;
+    const m = (await call("GET", "/api/state", await member())).json();
+    expect(extraIds(m)).toEqual(["calisthenic_moves", "calisthenic_moves_low", id]);
+    expect(m.video_families[1].extra_loras[2]).toEqual({
+      id, title: "Moves", description: "", modes: ["image"], strength: 1, trigger_words: "", files: null, source: "added", status: "not_installed",
+    });
+    expect(m.video_families[1].extra_loras[0]).toMatchObject({ source: "profile", status: null });
+    files = { [`xl_${id}_high.safetensors`]: "ready", [`xl_${id}_low.safetensors`]: "downloading" };
+    expect((await call("GET", "/api/state", await member())).json().video_families[1].extra_loras[2].status).toBe("downloading");
+    files[`xl_${id}_low.safetensors`] = "ready";
+    expect((await call("GET", "/api/state", await member())).json().video_families[1].extra_loras[2].status).toBe("ready");
+    const a = (await call("GET", "/api/state", await admin())).json();
+    expect(a.video_families[1].extra_loras[2].files).toEqual({ high: `xl_${id}_high.safetensors`, low: `xl_${id}_low.safetensors` });
+  });
+
+  it("a job with an added LoRA uses its stored file names on each branch, once the instance has the files", async () => {
+    h = await lharness();
+    const { id } = (await add({ low: LINK_LOW, strength: 0.7 })).json().lora;
+    const notReady = await post("/api/video", await member(), { ...job, extra_lora: id });
+    expect([notReady.statusCode, notReady.json().error.code]).toEqual([409, "extra_lora_not_ready"]);
+    expect(h.comfySeen).toHaveLength(0);
+    files = { [`xl_${id}_high.safetensors`]: "ready", [`xl_${id}_low.safetensors`]: "failed" };
+    const failed = await post("/api/video", await member(), { ...job, extra_lora: id });
+    expect([failed.statusCode, failed.json().error.code]).toEqual([409, "extra_lora_not_ready"]);
+    files[`xl_${id}_low.safetensors`] = "ready";
+    const res = await post("/api/video", await member(), { ...job, extra_lora: id });
+    expect(res.statusCode, res.body).toBe(202);
+    const p = sentPrompt();
+    expect(p["video_lora_high"].inputs).toEqual({ model: ["3", 0], lora_name: `xl_${id}_high.safetensors`, strength_model: 0.7 });
+    expect(p["video_lora_low"].inputs).toEqual({ model: ["4", 0], lora_name: `xl_${id}_low.safetensors`, strength_model: 0.7 });
+    const text = await post("/api/video", await member(), { ...job, image: undefined, extra_lora: id });
+    expect(text.json().error.code).toBe("extra_lora_mode");
+  });
+
+  describe("hidden LoRAs", () => {
+    const hidden = async () => {
+      const { id } = (await add({ hidden: true, title: "SecretTitle", description: "SecretDescription" })).json().lora;
+      files = { [`xl_${id}_high.safetensors`]: "ready" };
+      return id as string;
+    };
+
+    it("never reach a member: not in the state (even when asking to reveal), not usable, refused like an unknown id", async () => {
+      h = await lharness();
+      const id = await hidden();
+      for (const headers of [await member(), { ...(await member()), "x-reveal-hidden": "1" }]) {
+        const body = (await call("GET", "/api/state", headers)).body;
+        for (const secret of [id, "SecretTitle", "SecretDescription", `xl_${id}`]) expect(body).not.toContain(secret);
+      }
+      const res = await post("/api/video", await member(), { ...job, extra_lora: id });
+      const unknown = await post("/api/video", await member(), { ...job, extra_lora: "lora_ffffffff" });
+      expect([res.statusCode, res.json()]).toEqual([unknown.statusCode, unknown.json()]);
+      expect(res.json().error.code).toBe("unknown_extra_lora");
+      expect(h.comfySeen).toHaveLength(0);
+      expect(h.logs.join("\n")).not.toContain("SecretTitle");
+    });
+
+    it("reach an admin's state only when the page asks to reveal them; an admin's job uses one without asking", async () => {
+      h = await lharness();
+      const id = await hidden();
+      const plain = (await call("GET", "/api/state", await admin())).json();
+      expect(extraIds(plain)).not.toContain(id);
+      expect(JSON.stringify(plain)).not.toContain("SecretTitle");
+      for (const v of ["0", "true", "yes", ""]) {
+        expect(extraIds((await call("GET", "/api/state", { ...(await admin()), "x-reveal-hidden": v })).json()), v).not.toContain(id);
+      }
+      const revealed = (await call("GET", "/api/state", { ...(await admin()), "x-reveal-hidden": "1" })).json();
+      expect(revealed.video_families[1].extra_loras.find((l: { id: string }) => l.id === id)).toMatchObject({ title: "SecretTitle", hidden: true });
+      const res = await post("/api/video", await admin(), { ...job, extra_lora: id });
+      expect(res.statusCode, res.body).toBe(202);
+      expect(sentPrompt()["video_lora_high"].inputs.lora_name).toBe(`xl_${id}_high.safetensors`);
+    });
+
+    it("a hidden LoRA's title never goes into the job's label (the job list an admin may share)", async () => {
+      h = await lharness();
+      const id = await hidden();
+      const res = await post("/api/video", await admin(), { ...job, extra_lora: id });
+      const jobId = res.json().id;
+      expect(JSON.stringify((await call("GET", `/api/generate/${jobId}`, await admin())).json())).not.toContain("SecretTitle");
+      expect(h.logs.join("\n")).not.toContain("SecretTitle");
+      expect(h.logs.join("\n")).not.toContain(id);
+    });
+
+    it("GET /api/loras lists them for admins with the hidden flag", async () => {
+      h = await lharness();
+      const id = await hidden();
+      const list = (await call("GET", "/api/loras", await admin())).json();
+      expect(list.loras).toEqual([expect.objectContaining({ id, hidden: true, status: "ready" })]);
+    });
+  });
+
+  it("the state poll syncs the instance when its set differs, at most once per LORA_SYNC_MIN_INTERVAL_S", async () => {
+    h = await lharness({ cfg: { loraSyncMinIntervalS: 60 } });
+    const { id } = (await add()).json().lora;
+    synced = [];
+    await call("GET", "/api/state", await member());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(synced).toEqual([]); // just synced by the add
+    h.clock.ms += 61_000;
+    await call("GET", "/api/state", await member());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(synced).toEqual([{ loras: [{ name: `xl_${id}_high.safetensors`, url: LINK }] }]);
+    h.clock.ms += 61_000;
+    const { lorasDigest } = await import("@vast-comfy/core");
+    digest = lorasDigest([{ name: `xl_${id}_high.safetensors`, url: LINK }]);
+    synced = [];
+    await call("GET", "/api/state", await member());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(synced).toEqual([]); // the instance has the set
+  });
+
+  it("without a store the LoRA routes answer 404 and nothing changes", async () => {
+    h = await harness({ profile: familyProfile() });
+    expect((await call("GET", "/api/loras", await admin())).json().error.code).toBe("lora_unavailable");
+    expect((await post("/api/loras", await admin(), { title: "x", family: FAMILY, modes: ["image"], high: LINK })).statusCode).toBe(404);
   });
 });
