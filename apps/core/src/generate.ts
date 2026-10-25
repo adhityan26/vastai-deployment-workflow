@@ -305,9 +305,10 @@ export interface VideoRequest {
 /**
  * Validate a video request completely (prompt, seed, size, duration and the optional start image, which is
  * checked like an edit reference), then upload the start image under a name chosen here and submit the filled
- * workflow. Nothing leaves for the instance before every check has passed.
+ * workflow. Nothing leaves for the instance before every check has passed. `template` is the workflow the prompt was
+ * built from (a family mode's own, or the base section's): its SaveVideo node is where the result is read.
  */
-export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ promptId: string; startImage: boolean }> {
+export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ promptId: string; startImage: boolean; template: unknown }> {
   if (deps.family === undefined && deps.profile.video === null) throw new GenerateInputError("video_unavailable", "this profile has no enabled video section");
   const seed = checkPromptAndSeed(deps.cfg, deps.random, { prompt: input.prompt, seed: input.seed });
   if (typeof input.size !== "string") throw new GenerateInputError("unknown_size", "size is not offered for video");
@@ -341,12 +342,12 @@ export async function video(deps: VideoDeps, input: VideoRequest): Promise<{ pro
   // Dry run with a placeholder name: size, duration and workflow mismatches surface before the upload.
   if (extraLora !== undefined) Object.assign(fields, { extraLora });
   buildVideoPrompt(spec, template, { ...fields, ...(image ? { startImage: "check-0.png" } : {}) });
-  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, template, fields), deps.clientId)).promptId, startImage: false };
+  if (image === undefined) return { promptId: (await deps.comfy.submit(buildVideoPrompt(spec, template, fields), deps.clientId)).promptId, startImage: false, template };
   const kind = FILE_TYPES[image.type];
   const token = deps.newName ?? (() => randomBytes(NAME_TOKEN_BYTES).toString("hex"));
   const stored = await deps.comfy.uploadImage(`video-${token()}.${kind.ext}`, image.bytes, kind.contentType);
   const { promptId } = await deps.comfy.submit(buildVideoPrompt(spec, template, { ...fields, startImage: stored.name }), deps.clientId);
-  return { promptId, startImage: true };
+  return { promptId, startImage: true, template };
 }
 
 function clipMessage(text: string): string {

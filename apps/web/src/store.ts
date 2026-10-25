@@ -112,6 +112,11 @@ export interface Job {
   state: JobState;
   /** The job's progress socket and what it saw; null when progress is off or the socket could not be opened. */
   readonly live: LiveProgress | null;
+  /**
+   * The workflow template the job was built from, when it is not the one its kind implies (a video family's own
+   * workflow, whose SaveVideo node id differs from the base section's): its output nodes are read when polling.
+   */
+  readonly template?: unknown;
 }
 
 /** Generate jobs by ComfyUI prompt id, bounded by count and age. */

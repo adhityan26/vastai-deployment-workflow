@@ -174,6 +174,14 @@ downloads in the background through the video download slot; a job with a LoRA n
 an instance, ComfyUI listing new LoRAs without a restart, stacking with the 4-step LoRAs. Runbook: README "Extra LoRAs
 added from the page".
 
+**14B video result fix (branch `fix/video-family-result`, 2026-10-25, pushed, NOT merged).** Live bug: a 14B image-to-video
+job ended "Failed: no images". The poll read the result under the base 5B workflow's `SaveVideo` node (11); the 14B
+workflows save at node 16. A video job now remembers the template it was built from (`template` on the job, set from what
+`video()` used) and the poll reads that template's output nodes; other kinds are unchanged. Checked, no other base-template
+reuse for a family job: the file route `GET /api/video/{id}/{index}` (by kind and the polled file), the gallery refusal (by
+kind), the label (family title), extra-LoRA nodes (the family's spec), progress (family: no sampler filter, so the counter
+likely restarts per sampler; cosmetic, UNVERIFIED).
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)

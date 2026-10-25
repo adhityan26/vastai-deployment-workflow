@@ -296,7 +296,7 @@ describe("video", () => {
 
   it("text to video: submits the filled workflow without an upload", async () => {
     const { deps, seen } = await fake();
-    expect(await video(deps, { ...ok, seed: 42 })).toEqual({ promptId: "p-vid", startImage: false });
+    expect(await video(deps, { ...ok, seed: 42 })).toEqual({ promptId: "p-vid", startImage: false, template: deps.template });
     expect(seen.map((s) => s.url)).toEqual(["/prompt"]);
     const prompt = JSON.parse(seen[0]!.body.toString()).prompt;
     expect(prompt["8"].inputs.seed).toBe(42);
@@ -306,7 +306,7 @@ describe("video", () => {
 
   it("image to video: uploads the one start image under a server-chosen name, then submits", async () => {
     const { deps, seen } = await fake();
-    expect(await video(deps, { ...ok, image: png(64, 64).toString("base64") })).toEqual({ promptId: "p-vid", startImage: true });
+    expect(await video(deps, { ...ok, image: png(64, 64).toString("base64") })).toEqual({ promptId: "p-vid", startImage: true, template: deps.template });
     expect(seen.map((s) => s.url)).toEqual(["/upload/image", "/prompt"]);
     expect(seen[0]!.body.toString("latin1")).toContain('filename="video-tok.png"');
     const prompt = JSON.parse(seen[1]!.body.toString()).prompt;

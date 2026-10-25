@@ -3825,6 +3825,63 @@ describe("video families", () => {
     expect(p["11"].inputs).toMatchObject({ start_image: ["video_start", 0], width: 480, height: 832 });
   });
 
+  describe("the result is read from the family's own output node", () => {
+    const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom\0\0\x02\0isomiso2avc1mp41", "latin1"), Buffer.from("FAMILY-CLIP")]);
+    const CLIP = { filename: "vastcomfy_14b_00001_.mp4", subfolder: "video", type: "output" };
+    /** ComfyUI listing the clip under `node` only (the 14B workflows save at node 16, the base 5B one at 11). */
+    const comfyClip = (node: string, id = "p-vid14"): Handler => (s, res) => {
+      if (s.url === "/upload/image") return json(res, 200, { name: /filename="([^"]+)"/.exec(s.body)![1], subfolder: "", type: "input" });
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: id });
+      if (s.url.startsWith("/history/")) {
+        return json(res, 200, { [id]: { outputs: { [node]: { images: [CLIP], animated: [true] } }, status: { completed: true, status_str: "success" } } });
+      }
+      if (s.url.startsWith("/view")) {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        return res.end(MP4);
+      }
+      json(res, 404, {});
+    };
+
+    for (const [what, extra] of [["text to video", {}], ["image to video", { size: "Portrait", image: REF_A.toString("base64") }]] as const) {
+      it(`${what}: a 14B job is done with the clip of its node 16, and the file is served`, async () => {
+        h = await fharness();
+        h.setComfy(comfyClip("16"));
+        const m = await member();
+        const res = await post("/api/video", m, { ...ok, ...extra });
+        expect(res.statusCode, res.body).toBe(202);
+        const p = sentPrompt();
+        expect(Object.keys(p).filter((k) => p[k].class_type === "SaveVideo")).toEqual(["16"]);
+        const id = res.json().id as string;
+        const poll = (await call("GET", `/api/generate/${id}`, m)).json();
+        expect(poll).toEqual({ status: "done", images: [], videos: [{ index: 0, url: `/api/video/${id}/0` }], seconds: expect.any(Number), queued_seconds: null });
+        const file = await call("GET", `/api/video/${id}/0`, m);
+        expect(file.statusCode).toBe(200);
+        expect(file.rawPayload.equals(MP4)).toBe(true);
+        expect(h.comfySeen.find((x) => x.url.startsWith("/view"))!.url).toContain("filename=vastcomfy_14b_00001_.mp4");
+      });
+    }
+
+    it("a 14B job ignores an output under the base workflow's node id (11), which is not its own", async () => {
+      h = await fharness();
+      h.setComfy(comfyClip("11"));
+      const m = await member();
+      const id = (await post("/api/video", m, ok)).json().id as string;
+      expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "failed", message: "no images" });
+    });
+
+    it("a base-section job still reads node 11 (and not 16)", async () => {
+      h = await fharness();
+      const base = { ...ok, size: "Landscape, faster", duration: "About 3 s", family: "wan22_5b" };
+      h.setComfy(comfyClip("11", "p-base"));
+      const m = await member();
+      const id = (await post("/api/video", m, base)).json().id as string;
+      expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
+      h.setComfy(comfyClip("16", "p-base2"));
+      const id2 = (await post("/api/video", m, base)).json().id as string;
+      expect((await call("GET", `/api/generate/${id2}`, m)).json()).toEqual({ status: "failed", message: "no images" });
+    });
+  });
+
   it("the base family by id, or no family, is the base section as before", async () => {
     h = await fharness();
     for (const body of [{ ...ok, size: "Landscape, faster", duration: "About 3 s", family: "wan22_5b" }, { prompt: "x", size: "Landscape, faster", duration: "About 3 s" }]) {

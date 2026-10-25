@@ -1464,7 +1464,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         started?.live.end();
         return submitFailure(reply, err, "video");
       }
-      const { promptId, startImage } = submitted;
+      const { promptId, startImage, template } = submitted;
       if (!PROMPT_ID.test(promptId)) {
         started?.live.end();
         return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI returned an unusable id");
@@ -1482,6 +1482,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         hostname,
         live: started?.live ?? null,
         kind: "video",
+        // The workflow it was built from: a family's SaveVideo node is not the base section's.
+        template,
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
         label: `Video: ${String(asked.size)}, ${String(asked.duration)}${title}${startImage ? ", from an image" : ""}`.slice(0, JOB_LABEL_KEPT),
       });
@@ -1686,7 +1688,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         job.state = { kind: "failed", message: "the instance that ran this job is gone" };
       } else {
         try {
-          const result = await pollResult(generateDeps(job.hostname, job.kind), job.id);
+          const pollDeps = generateDeps(job.hostname, job.kind);
+          const result = await pollResult(job.template === undefined ? pollDeps : { ...pollDeps, template: job.template }, job.id);
           if (result !== null) {
             // ComfyUI's own execution time; without it, the time this server saw from submit to done.
             const seconds = result.executionSeconds ?? tenthsOfSeconds(Math.max(0, now() - job.createdAt));

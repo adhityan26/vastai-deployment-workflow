@@ -305,11 +305,11 @@ describe("video with a family", () => {
 
   it("text to video uses the text workflow; image to video the image workflow with the uploaded start image", async () => {
     const { deps, seen } = await fake();
-    expect(await video(deps, { prompt: "a fox", size: "Portrait", duration: "About 3 s", seed: 3 })).toEqual({ promptId: "p-14", startImage: false });
+    expect(await video(deps, { prompt: "a fox", size: "Portrait", duration: "About 3 s", seed: 3 })).toEqual({ promptId: "p-14", startImage: false, template: T2V });
     const text = JSON.parse(seen[0]!.body.toString()).prompt;
     expect(text["1"].inputs.unet_name).toBe("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors");
     expect(text["11"].inputs).toMatchObject({ width: 480, height: 832, length: 49 });
-    expect(await video(deps, { prompt: "a fox", size: "Landscape", duration: "About 5 s", image: png().toString("base64") })).toEqual({ promptId: "p-14", startImage: true });
+    expect(await video(deps, { prompt: "a fox", size: "Landscape", duration: "About 5 s", image: png().toString("base64") })).toEqual({ promptId: "p-14", startImage: true, template: I2V });
     const image = JSON.parse(seen[2]!.body.toString()).prompt;
     expect(image["1"].inputs.unet_name).toBe("wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors");
     expect(image[VIDEO_START_NODE].inputs.image).toBe("video-tok.png");

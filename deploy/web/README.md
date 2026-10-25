@@ -773,7 +773,10 @@ the start image (image), then two `KSamplerAdvanced` (high expert steps 0-2 with
 (832x480, 480x832), length (about 3 s or 5 s: 49 or 81 frames), seed, the start image and the model choice; steps,
 cfg, sampler, LoRA strength and shift are the family's (`fixed:` in the profile sets the strength and shift on every
 job; the step split and cfg are in the workflow files). The negative prompt is the same fixed English text as the
-base family's workflow.
+base family's workflow. Its `SaveVideo` is node 16 (the base workflow's is 11): a job remembers the workflow it was
+built from and its result is read from that workflow's output node (before 2026-10-25 a 14B job ended "Failed: no
+images" because the result was looked up under the base workflow's node). Progress on a 14B job counts any node's
+progress (two samplers), so the step counter likely restarts during a clip (UNVERIFIED on a real run).
 
 **Switching it on (owner):**
 
