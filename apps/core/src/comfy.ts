@@ -164,6 +164,24 @@ export class ComfyClient {
     );
   }
 
+  /** Drop a prompt that is still waiting in ComfyUI's queue (POST /queue {"delete": [id]}); a no-op for one that runs. */
+  async deleteQueued(promptId: string): Promise<void> {
+    if (!PROMPT_ID.test(promptId)) throw new ComfyError(0, "promptId has an invalid format");
+    const reply = await this.call("POST", "/queue", { delete: [promptId] });
+    if (reply.status !== 200) this.fail("queue delete", reply);
+  }
+
+  /**
+   * Interrupt the running prompt (POST /interrupt). The body names the prompt: a ComfyUI that reads `prompt_id`
+   * interrupts only when that prompt is the one running; an older one ignores the body and interrupts whatever runs,
+   * so callers check the queue first (see cancelPrompt).
+   */
+  async interrupt(promptId: string): Promise<void> {
+    if (!PROMPT_ID.test(promptId)) throw new ComfyError(0, "promptId has an invalid format");
+    const reply = await this.call("POST", "/interrupt", { prompt_id: promptId });
+    if (reply.status !== 200) this.fail("interrupt", reply);
+  }
+
   async queue(): Promise<{ running: unknown[]; pending: unknown[] }> {
     const reply = await this.call("GET", "/queue");
     if (reply.status !== 200) this.fail("queue", reply);

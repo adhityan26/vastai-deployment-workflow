@@ -163,6 +163,7 @@ ul { padding: 0; margin: 0; list-style: none; }
 .chain { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .chain button { min-height: 44px; }
 .job progress { margin: 4px 0; }
+.job button.stop { margin: 6px 0; }
 .live-preview { margin: 8px 0 0; max-width: min(100%, 16rem); }
 .live-preview img { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--bg); }
 .live-preview figcaption { margin-top: 4px; }

@@ -1829,6 +1829,33 @@ describe("video", () => {
     expect(q(".job-wait")!.textContent).toContain("several minutes");
   });
 
+  it("Stop on a running video asks first; Keep it leaves it running, Stop video stops it", async () => {
+    await mount({ menu, video }, {
+      "POST /api/video": { status: 202, body: { id: "v-1" } },
+      "GET /api/generate/v-1": { body: { status: "pending", progress: { step: 3, max: 20 }, preview_seq: 0 } },
+      "POST /api/generate/v-1/cancel": { body: { status: "cancelled" } },
+    });
+    chooseTool("video");
+    q<HTMLTextAreaElement>("#prompt")!.value = "it moves";
+    await submit();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(false);
+    expect(q("#modal-title")!.textContent).toBe("Stop this video?");
+    q<HTMLButtonElement>("#modal-cancel")!.click();
+    await flush();
+    expect(posts("/api/generate/v-1/cancel")).toHaveLength(0);
+    expect(q(".job button.stop")).not.toBeNull();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    q<HTMLButtonElement>("#modal-ok")!.click();
+    await flush();
+    expect(posts("/api/generate/v-1/cancel")).toEqual([expect.objectContaining({ body: {} })]);
+    expect(q(".job .job-stopped")!.textContent).toBe("Stopped");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+    expect(q<HTMLTextAreaElement>("#prompt")!.value).toBe("it moves");
+  });
+
   it("needs a prompt, and shows the api refusal and frees the form", async () => {
     await mount({ menu, video }, { "POST /api/video": { status: 400, body: { error: { code: "unknown_duration", message: "duration is not offered for video" } } } });
     chooseTool("video");
@@ -2889,5 +2916,151 @@ describe("extra LoRAs: hidden ones and Manage LoRAs", () => {
       await flush();
       expect(calls.filter((c) => c.method === "DELETE")).toEqual([expect.objectContaining({ path: "/api/loras/lora_0000abcd", body: {} })]);
     });
+  });
+});
+
+describe("Stop a running job", () => {
+  const submitGen = async (prompt = "a red fox") => {
+    q<HTMLTextAreaElement>("#prompt")!.value = prompt;
+    q<HTMLFormElement>("#gen-form")!.requestSubmit();
+    await flush();
+  };
+  const pending = { body: { status: "pending", progress: null, preview_seq: 0 } };
+
+  it("a pending image job has a Stop button; it stops without asking, shows Stopped (not an error) and frees the form", async () => {
+    await mount({}, { "POST /api/generate": { status: 202, body: { id: "g-1" } }, "GET /api/generate/g-1": pending, "POST /api/generate/g-1/cancel": { body: { status: "cancelled" } } });
+    await submitGen();
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+    const stop = q<HTMLButtonElement>(".job button.stop")!;
+    expect(stop.textContent).toBe("Stop");
+    stop.click();
+    await flush();
+    expect(q("#modal")!.hidden).toBe(true);
+    expect(posts("/api/generate/g-1/cancel")).toEqual([expect.objectContaining({ body: {} })]);
+    expect(q(".job .job-stopped")!.textContent).toBe("Stopped");
+    expect(q(".job .alert")).toBeNull();
+    expect(q(".job button.stop")).toBeNull();
+    expect(q(".job")!.textContent).not.toContain("Generating");
+    // The prompt and the settings stay as they were, and the form takes a new job.
+    expect(q<HTMLTextAreaElement>("#prompt")!.value).toBe("a red fox");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+    expect(q<HTMLButtonElement>("#btn-generate")!.textContent).toBe("Generate");
+  });
+
+  it("a job the server reports as cancelled (stopped elsewhere) shows Stopped too", async () => {
+    await mount({}, { "POST /api/generate": { status: 202, body: { id: "g-1" } }, "GET /api/generate/g-1": { body: { status: "cancelled" } } });
+    await submitGen();
+    await flush();
+    expect(q(".job .job-stopped")!.textContent).toBe("Stopped");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("a job that finished before the stop arrived (409 job_finished) keeps going to its result", async () => {
+    let done = false;
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": () => (done ? { body: { status: "done", images: [{ index: 0, url: "/api/image/g-1/0" }], seconds: 3, queued_seconds: null } } : pending),
+      "POST /api/generate/g-1/cancel": () => {
+        done = true;
+        return { status: 409, body: { error: { code: "job_finished", message: "the job has already finished" } } };
+      },
+    });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    expect(q(".job .job-stopped")).toBeNull();
+    expect(q(".job .grid img")).not.toBeNull();
+  });
+
+  it("a failed stop (ComfyUI unreachable) says so on the card and the job stays running with its Stop button", async () => {
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": pending,
+      "POST /api/generate/g-1/cancel": { status: 424, body: { error: { code: "comfy_unavailable", message: "ComfyUI could not be reached" } } },
+    });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    expect(q(".job .stop-error")!.textContent).toContain("Could not stop it");
+    expect(q<HTMLButtonElement>(".job button.stop")!.disabled).toBe(false);
+    expect(q(".job .job-stopped")).toBeNull();
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(true);
+  });
+
+  it("a poll answer that arrives after the stop (the interrupted prompt failed) does not replace Stopped", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": { gate, body: { status: "failed", message: "interrupted" } },
+      "POST /api/generate/g-1/cancel": { body: { status: "cancelled" } },
+    });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    expect(q(".job .job-stopped")).not.toBeNull();
+    release();
+    await flush();
+    expect(q(".job .job-stopped")!.textContent).toBe("Stopped");
+    expect(q(".job .alert")).toBeNull();
+  });
+
+  it("a failure the poll reports while the Stop runs (the interrupt) is not shown: the job ends Stopped", async () => {
+    let releasePoll: () => void = () => undefined;
+    let releaseStop: () => void = () => undefined;
+    const pollGate = new Promise<void>((r) => (releasePoll = r));
+    const stopGate = new Promise<void>((r) => (releaseStop = r));
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": { gate: pollGate, body: { status: "failed", message: "Interrupted" } },
+      "POST /api/generate/g-1/cancel": { gate: stopGate, body: { status: "cancelled" } },
+    });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    releasePoll();
+    await flush();
+    expect(q(".job .alert")).toBeNull();
+    releaseStop();
+    await flush();
+    expect(q(".job .job-stopped")!.textContent).toBe("Stopped");
+    expect(q(".job .alert")).toBeNull();
+  });
+
+  it("a failure held while a Stop ran is shown when the Stop itself fails", async () => {
+    let releasePoll: () => void = () => undefined;
+    let releaseStop: () => void = () => undefined;
+    const pollGate = new Promise<void>((r) => (releasePoll = r));
+    const stopGate = new Promise<void>((r) => (releaseStop = r));
+    await mount({}, {
+      "POST /api/generate": { status: 202, body: { id: "g-1" } },
+      "GET /api/generate/g-1": { gate: pollGate, body: { status: "failed", message: "out of memory" } },
+      "POST /api/generate/g-1/cancel": { gate: stopGate, status: 424, body: { error: { code: "comfy_unavailable", message: "ComfyUI could not be reached" } } },
+    });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    releasePoll();
+    await flush();
+    releaseStop();
+    await flush();
+    expect(q(".job .alert")!.textContent).toBe("Failed: out of memory");
+    expect(q<HTMLButtonElement>("#btn-generate")!.disabled).toBe(false);
+  });
+
+  it("the Stop button is disabled while its request runs (no double stop)", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    await mount({}, { "POST /api/generate": { status: 202, body: { id: "g-1" } }, "GET /api/generate/g-1": pending, "POST /api/generate/g-1/cancel": { gate, body: { status: "cancelled" } } });
+    await submitGen();
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    await flush();
+    expect(q<HTMLButtonElement>(".job button.stop")!.disabled).toBe(true);
+    expect(q<HTMLButtonElement>(".job button.stop")!.textContent).toBe("Stopping…");
+    q<HTMLButtonElement>(".job button.stop")!.click();
+    release();
+    await flush();
+    expect(posts("/api/generate/g-1/cancel")).toHaveLength(1);
+    expect(q(".job .job-stopped")).not.toBeNull();
   });
 });

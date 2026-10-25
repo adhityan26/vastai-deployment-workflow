@@ -3246,6 +3246,21 @@ describe("live progress and previews", () => {
     expect(h.comfyWs.peers).toHaveLength(0);
   });
 
+  it("stopping a job closes its progress socket at once", async () => {
+    h = await harness({ cfg: PROGRESS_CFG });
+    const jobs = comfyJobs(new Set());
+    h.setComfy((s, res) => {
+      if (s.url === "/queue" && s.method === "GET") return json(res, 200, { queue_running: [], queue_pending: [] });
+      jobs.handler(s, res);
+    });
+    const peerP = h.comfyWs.nextPeer();
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    const peer = await peerP;
+    expect((await post("/api/generate/p-1/cancel", m, {})).json()).toEqual({ status: "cancelled" });
+    await until(() => peer.frames().some((f) => f.op === 0x8));
+  });
+
   it("destroying the instance closes the open sockets", async () => {
     h = await harness({ cfg: PROGRESS_CFG });
     h.setComfy(comfyJobs(new Set()).handler);
@@ -3850,6 +3865,27 @@ describe("video families", () => {
     }
   });
 
+  it("a running 14B video job can be stopped: its prompt is interrupted and the job reads as cancelled", async () => {
+    h = await fharness();
+    const interrupted: unknown[] = [];
+    h.setComfy((s, res) => {
+      if (s.url === "/queue" && s.method === "GET") return json(res, 200, { queue_running: [[0, "p-vid14", {}, {}, []]], queue_pending: [] });
+      if (s.url === "/interrupt") {
+        interrupted.push(JSON.parse(s.body));
+        res.writeHead(200);
+        return res.end();
+      }
+      if (s.url.startsWith("/history/")) return json(res, 200, {});
+      comfyOk(s, res);
+    });
+    const m = await member();
+    const id = (await post("/api/video", m, ok)).json().id as string;
+    expect((await post(`/api/generate/${id}/cancel`, m, {})).json()).toEqual({ status: "cancelled" });
+    expect(interrupted).toEqual([{ prompt_id: "p-vid14" }]);
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "cancelled" });
+    expect((await call("GET", `/api/video/${id}/0`, m)).statusCode).toBe(404);
+  });
+
   it("the base family by id, or no family, is the base section as before", async () => {
     h = await fharness();
     for (const body of [{ ...ok, size: "Landscape, faster", duration: "About 3 s", family: "wan22_5b" }, { prompt: "x", size: "Landscape, faster", duration: "About 3 s" }]) {
@@ -4264,5 +4300,238 @@ describe("extra LoRAs added by admins", () => {
     h = await harness({ profile: familyProfile() });
     expect((await call("GET", "/api/loras", await admin())).json().error.code).toBe("lora_unavailable");
     expect((await post("/api/loras", await admin(), { title: "x", family: FAMILY, modes: ["image"], high: LINK })).statusCode).toBe(404);
+  });
+});
+
+describe("stop a job (POST /api/generate/{id}/cancel)", () => {
+  /**
+   * A ComfyUI with a queue: `running` and `pending` prompt ids, a history per id (absent: not finished), and what was
+   * deleted or interrupted. A delete removes the id from pending; an interrupt names the prompt in its body.
+   */
+  function comfyQueue(start: { running?: string[]; pending?: string[]; history?: Record<string, unknown> } = {}) {
+    const q = { running: [...(start.running ?? [])], pending: [...(start.pending ?? [])], history: { ...(start.history ?? {}) }, deleted: [] as string[], interrupted: [] as unknown[] };
+    let n = 0;
+    const handler: Handler = (s, res) => {
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: `p-${++n}` });
+      if (s.url === "/queue" && s.method === "GET") {
+        const item = (id: string, i: number) => [i, id, {}, {}, []];
+        return json(res, 200, { queue_running: q.running.map(item), queue_pending: q.pending.map(item) });
+      }
+      if (s.url === "/queue" && s.method === "POST") {
+        const ids = (JSON.parse(s.body) as { delete: string[] }).delete;
+        q.deleted.push(...ids);
+        q.pending = q.pending.filter((id) => !ids.includes(id));
+        return json(res, 200, {});
+      }
+      if (s.url === "/interrupt") {
+        q.interrupted.push(JSON.parse(s.body));
+        res.writeHead(200);
+        return res.end();
+      }
+      if (s.url.startsWith("/history/")) {
+        const id = decodeURIComponent(s.url.slice("/history/".length));
+        return json(res, 200, id in q.history ? { [id]: q.history[id] } : {});
+      }
+      json(res, 404, {});
+    };
+    return { q, handler };
+  }
+  const cancel = (id: string, headers: Record<string, string>, body: unknown = {}) => post(`/api/generate/${id}/cancel`, headers, body);
+  const DONE = { outputs: { "10": { images: [{ filename: "a.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } };
+
+  it("a queued job is deleted from ComfyUI's queue, nothing is interrupted, and it reads as cancelled", async () => {
+    const c = comfyQueue({ running: ["someone-else"] });
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.pending.push(id);
+    const res = await cancel(id, m);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ status: "cancelled" });
+    expect(c.q.deleted).toEqual([id]);
+    expect(c.q.interrupted).toEqual([]);
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "cancelled" });
+  });
+
+  it("the running job is interrupted by its id, only after the queue showed it is this job", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.running.push(id);
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    expect(c.q.interrupted).toEqual([{ prompt_id: id }]);
+    const urls = h.comfySeen.map((x) => `${x.method} ${x.url}`);
+    expect(urls.indexOf("GET /queue")).toBeLessThan(urls.indexOf("POST /interrupt"));
+    // The interrupted prompt's history (an error) never turns it into a failure, and nothing of it is served.
+    c.q.history[id] = { outputs: {}, status: { status_str: "error", messages: [["execution_interrupted", {}]] } };
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "cancelled" });
+    expect((await call("GET", `/api/image/${id}/0`, m)).statusCode).toBe(404);
+  });
+
+  it("never interrupts another job that is running", async () => {
+    const c = comfyQueue({ running: ["someone-else"] });
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    // Neither running nor queued nor finished: nothing runs for it any more.
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    expect(c.q.interrupted).toEqual([]);
+    expect(c.q.deleted).toEqual([]);
+  });
+
+  it("a job that just finished is not cancelled: 409 job_finished, and its result is still served", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.history[id] = DONE;
+    const res = await cancel(id, m);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("job_finished");
+    expect(c.q.interrupted).toEqual([]);
+    expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("done");
+    expect((await cancel(id, m)).statusCode).toBe(409);
+  });
+
+  it("is idempotent: cancelling a cancelled job answers 200 again without calling ComfyUI", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    expect((await cancel(id, m)).statusCode).toBe(200);
+    const seen = h.comfySeen.length;
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    expect(h.comfySeen.length).toBe(seen);
+  });
+
+  it("a failed job cannot be cancelled (409 job_finished)", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.history[id] = { outputs: {}, status: { status_str: "error", messages: [] } };
+    expect((await call("GET", `/api/generate/${id}`, m)).json().status).toBe("failed");
+    expect((await cancel(id, m)).json().error.code).toBe("job_finished");
+  });
+
+  it("someone else's job is 404 for a member (nothing reaches ComfyUI); an admin may stop it", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const id = (await post("/api/generate", await member("ayu"), okGen)).json().id as string;
+    c.q.running.push(id);
+    const seen = h.comfySeen.length;
+    const res = await cancel(id, await member("budi"));
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("not_found");
+    expect(h.comfySeen.length).toBe(seen);
+    expect((await cancel("nope", await member("budi"))).statusCode).toBe(404);
+    expect((await cancel(id, await admin())).json()).toEqual({ status: "cancelled" });
+    expect(c.q.interrupted).toEqual([{ prompt_id: id }]);
+  });
+
+  it("the instance is gone: the job is cancelled without calling ComfyUI", async () => {
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    await h.registry.update(HOST, { status: "gone" });
+    const seen = h.comfySeen.length;
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    expect(h.comfySeen.length).toBe(seen);
+  });
+
+  it("ComfyUI unreachable: 424 comfy_unavailable and the job stays pending", async () => {
+    h.setComfy((s, res) => {
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-1" });
+      if (s.url.startsWith("/history/")) return json(res, 200, {});
+      res.destroy();
+    });
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    const res = await cancel("p-1", m);
+    expect(res.statusCode).toBe(424);
+    expect(res.json()).toEqual({ error: { code: "comfy_unavailable", message: "ComfyUI could not be reached" } });
+    expect((await call("GET", "/api/generate/p-1", m)).json().status).toBe("pending");
+  });
+
+  it("a ComfyUI error answer is 424 too, the job unchanged", async () => {
+    h.setComfy((s, res) => {
+      if (s.url === "/prompt") return json(res, 200, { prompt_id: "p-1" });
+      if (s.url.startsWith("/history/")) return json(res, 200, {});
+      json(res, 500, { error: "boom" });
+    });
+    const m = await member();
+    await post("/api/generate", m, okGen);
+    expect((await cancel("p-1", m)).json().error.code).toBe("comfy_unavailable");
+    expect((await call("GET", "/api/generate/p-1", m)).json().status).toBe("pending");
+  });
+
+  it("a poll in flight while the job is cancelled does not overwrite the cancel", async () => {
+    let releaseHistory: (() => void) | null = null;
+    const c = comfyQueue();
+    h.setComfy((s, res) => {
+      if (s.url.startsWith("/history/")) {
+        // The poll's history read waits until the cancel is through, then reports the interrupted prompt.
+        releaseHistory = () => json(res, 200, { [s.url.slice("/history/".length)]: { outputs: {}, status: { status_str: "error", messages: [] } } });
+        return;
+      }
+      c.handler(s, res);
+    });
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.running.push(id);
+    const polling = call("GET", `/api/generate/${id}`, m);
+    for (let i = 0; i < 50 && releaseHistory === null; i++) await new Promise((r) => setTimeout(r, 10));
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    releaseHistory!();
+    expect((await polling).json()).toEqual({ status: "cancelled" });
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "cancelled" });
+  });
+
+  it("a poll that sees the interrupted prompt fail before the stop answers still ends as cancelled", async () => {
+    const c = comfyQueue();
+    h.setComfy((s, res) => {
+      if (s.url === "/interrupt") {
+        // ComfyUI records the interrupted prompt as an error; a poll reads it before the stop request returns.
+        const id = (JSON.parse(s.body) as { prompt_id: string }).prompt_id;
+        c.q.history[id] = { outputs: {}, status: { status_str: "error", messages: [] } };
+        c.q.running = [];
+        void call("GET", `/api/generate/${id}`, polledBy!).then((r) => (polled = r.json()));
+        setTimeout(() => c.handler(s, res), 50);
+        return;
+      }
+      c.handler(s, res);
+    });
+    let polled: unknown = null;
+    const m = await member();
+    const polledBy: Record<string, string> | null = m;
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    c.q.running.push(id);
+    expect((await cancel(id, m)).json()).toEqual({ status: "cancelled" });
+    expect(polled).toEqual({ status: "failed", message: "generation failed" });
+    expect((await call("GET", `/api/generate/${id}`, m)).json()).toEqual({ status: "cancelled" });
+  });
+
+  it("takes an empty body only, and rate limits cancels per member", async () => {
+    h = await harness({ cfg: { webGenerateRateLimitPerHour: 2 } });
+    const c = comfyQueue();
+    h.setComfy(c.handler);
+    const m = await member();
+    const id = (await post("/api/generate", m, okGen)).json().id as string;
+    expect((await cancel(id, m, { force: true })).statusCode).toBe(400);
+    expect((await cancel(id, m)).statusCode).toBe(200);
+    expect((await cancel(id, m)).statusCode).toBe(200);
+    const third = await cancel(id, m);
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error.code).toBe("rate_limited");
+  });
+
+  it("is in the OpenAPI contract with the cancelled job state", () => {
+    const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
+    const op = doc.paths["/api/generate/{id}/cancel"].post;
+    expect(Object.keys(op.responses).sort()).toEqual(["200", "400", "401", "403", "404", "409", "413", "415", "424", "429"]);
+    const states = doc.components.schemas.Job.oneOf.map((s: { properties: { status: { const: string } } }) => s.properties.status.const);
+    expect(states).toEqual(["pending", "done", "failed", "cancelled"]);
   });
 });

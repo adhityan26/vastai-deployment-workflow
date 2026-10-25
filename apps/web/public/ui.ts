@@ -243,8 +243,13 @@ interface HistoryEntry {
   previewSeq: number;
   /** Object URL of the newest live preview; revoked when replaced and when the job ends. */
   previewUrl: string | null;
-  status: "pending" | "done" | "failed";
+  status: "pending" | "done" | "failed" | "cancelled";
   message: string;
+  /** While a Stop request runs (the button is disabled), and why the last one failed ("" when it did not). */
+  stopping: boolean;
+  stopError: string;
+  /** A "failed" poll answer arrived while a Stop ran (the interrupt makes ComfyUI record an error): held until it answers. */
+  heldFailure: string | null;
   images: string[];
   /** The server's index of each image in `images` (what Save sends). */
   indexes: number[];
@@ -2595,7 +2600,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   const historyBox = $("history");
   function addEntry(id: string, kind: JobKind, prompt: string, label: string): HistoryEntry {
-    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, submittedAt: env.now(), progress: null, previewSeq: 0, previewUrl: null, status: "pending", message: "", images: [], indexes: [], videos: [], videoSrc: [], videoErrors: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
+    const entry: HistoryEntry = { id, kind, prompt, label, seconds: null, submittedAt: env.now(), progress: null, previewSeq: 0, previewUrl: null, status: "pending", message: "", stopping: false, stopError: "", heldFailure: null, images: [], indexes: [], videos: [], videoSrc: [], videoErrors: [], saves: [], saveMessages: [], node: make("article", undefined, "job") };
     history.unshift(entry);
     historyBox.prepend(entry.node);
     $("hist-empty").hidden = true;
@@ -2663,6 +2668,17 @@ export function mountApp(doc: Document, env: Env): App {
       }
       kids.push(make("p", elapsedText(env.now() - e.submittedAt), "muted job-elapsed"));
       if (e.kind === "video") kids.push(make("p", VIDEO_WAIT_TEXT, "muted job-wait"));
+      // Stop: a video (minutes of work) asks first; an image job is cheap to start again.
+      const stop = make("button", e.stopping ? "Stopping…" : "Stop", "stop");
+      stop.type = "button";
+      stop.disabled = e.stopping;
+      stop.addEventListener("click", () => void stopJob(e));
+      kids.push(stop);
+      if (e.stopError !== "") {
+        const note = make("p", `Could not stop it: ${e.stopError}`, "alert bad stop-error");
+        note.setAttribute("role", "alert");
+        kids.push(note);
+      }
       if (e.previewUrl !== null) {
         const fig = make("figure", undefined, "live-preview");
         const img = make("img");
@@ -2671,6 +2687,10 @@ export function mountApp(doc: Document, env: Env): App {
         fig.append(img, make("figcaption", "Live preview (rough)", "muted"));
         kids.push(fig);
       }
+    } else if (e.status === "cancelled") {
+      const p = make("p", "Stopped", "muted job-stopped");
+      p.setAttribute("role", "status");
+      kids.push(p);
     } else if (e.status === "failed") {
       kids.push(make("p", `Failed: ${e.message}`, "alert bad"));
       kids[kids.length - 1]!.setAttribute("role", "alert");
@@ -2801,7 +2821,8 @@ export function mountApp(doc: Document, env: Env): App {
     e.progress = null;
   }
 
-  function finishEntry(e: HistoryEntry, status: "done" | "failed", message = ""): void {
+  function finishEntry(e: HistoryEntry, status: "done" | "failed" | "cancelled", message = ""): void {
+    if (e.status !== "pending") return; // a stopped job's last poll, or a poll answer after a stop
     e.status = status;
     e.message = message;
     dropPreview(e);
@@ -2985,8 +3006,43 @@ export function mountApp(doc: Document, env: Env): App {
     }
   }
 
+  /**
+   * Stop a running job (POST /api/generate/{id}/cancel): a video asks first. The job then shows "Stopped"; the prompt
+   * and settings stay as they are and the form takes a new job. A job that finished meanwhile (409 job_finished) is
+   * polled at once for its result; any other failure is shown on the card and the job keeps running.
+   */
+  async function stopJob(e: HistoryEntry): Promise<void> {
+    if (e.status !== "pending" || e.stopping) return;
+    if (e.kind === "video") {
+      const ok = await confirmDialog("Stop this video?", ["The work done so far is discarded; you can change the prompt and start it again."], "Stop video", true);
+      if (!ok || e.status !== "pending" || e.stopping) return;
+    }
+    e.stopping = true;
+    e.stopError = "";
+    renderEntry(e);
+    try {
+      await call("POST", `${API.generate}/${encodeURIComponent(e.id)}/cancel`, {});
+      e.stopping = false;
+      finishEntry(e, "cancelled");
+    } catch (err) {
+      e.stopping = false;
+      if (err instanceof AuthLostError) return;
+      if (err instanceof ApiError && err.code === "job_finished") {
+        renderEntry(e);
+        return void pollJob(e, 0);
+      }
+      e.stopError = err instanceof Error ? err.message : "the server did not answer.";
+      renderEntry(e);
+    } finally {
+      // A failure that arrived while the Stop ran: shown now unless the job ended otherwise.
+      const held = e.heldFailure;
+      e.heldFailure = null;
+      if (held !== null) finishEntry(e, "failed", held);
+    }
+  }
+
   async function pollJob(e: HistoryEntry, errors: number): Promise<void> {
-    if (stopped || !active) return;
+    if (stopped || !active || e.status !== "pending") return;
     try {
       const askedAt = env.now();
       const res = await call("GET", `${API.generate}/${e.id}`);
@@ -3009,8 +3065,12 @@ export function mountApp(doc: Document, env: Env): App {
         return finishEntry(e, "done");
       }
       if (r["status"] === "failed") {
-        return finishEntry(e, "failed", typeof r["message"] === "string" ? r["message"] : "Generation failed.");
+        const message = typeof r["message"] === "string" ? r["message"] : "Generation failed.";
+        // While a Stop runs the failure is most likely its interrupt: the Stop's answer decides.
+        if (e.stopping) return void (e.heldFailure = message);
+        return finishEntry(e, "failed", message);
       }
+      if (r["status"] === "cancelled") return finishEntry(e, "cancelled");
       // Still running: the step counter, a new preview only when the server has one, and a faster pace.
       e.progress = parseJobProgress(r["progress"]);
       const seq = parsePreviewSeq(r["preview_seq"]);

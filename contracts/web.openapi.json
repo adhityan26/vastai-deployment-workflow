@@ -295,6 +295,19 @@
               }
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "cancelled",
+                "description": "Stopped by its owner or an admin (POST /api/generate/{id}/cancel); not a failure, no result"
+              }
+            },
+            "additionalProperties": false
           }
         ]
       },
@@ -4936,6 +4949,152 @@
           },
           "424": {
             "description": "ComfyUI unreachable, poll again (code comfy_unavailable); history over WEB_JSON_MAX_BYTES fails the job (code upstream_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/generate/{id}/cancel": {
+      "post": {
+        "operationId": "cancelJob",
+        "summary": "Stop a job (owner or admin, like reading it); any kind (generate, edit, upscale, video)",
+        "description": "A waiting prompt is deleted from ComfyUI's queue (POST /queue {delete}); the running prompt is interrupted (POST /interrupt with its prompt_id) only after ComfyUI's queue showed that it IS this job's prompt, never while another job runs. The job then reads as status cancelled: terminal, not a failure, nothing of it is served. ComfyUI's interrupt stops the node running on the instance at that moment; jobs queued behind it keep running. Rate limited per identity (as many per hour as WEB_GENERATE_RATE_LIMIT_PER_HOUR, counted apart from generating).",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The job is cancelled (also when it already was: idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "const": "cancelled"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed id, or a body that is not an empty JSON object (codes invalid_body, invalid_json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid session cookie (code unauthenticated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role does not allow this route (code forbidden), or a cross-site request (code csrf)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or not yours (code not_found); nothing reaches ComfyUI",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job is done or failed, also when it finished just before the stop reached ComfyUI (code job_finished)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body larger than WEB_BODY_LIMIT_BYTES (code body_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (code unsupported_media_type)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "424": {
+            "description": "ComfyUI could not be reached or answered with an error (code comfy_unavailable), or sent an oversized answer (code upstream_too_large); the job is unchanged, try again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many stop requests this hour (code rate_limited)",
             "content": {
               "application/json": {
                 "schema": {

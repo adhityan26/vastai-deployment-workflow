@@ -1031,6 +1031,40 @@ supervisord runs ComfyUI as root. Boot writes a new `/workspace/.env` with mode 
 ran as another user it could not read the file and would start without previews. Check once on the first live boot
 (SSH into the instance): `ps aux | grep main.py` must show `--preview-method latent2rgb` (or the configured method).
 
+## Stop generating
+
+A running or waiting job's card has a **Stop** button (every kind: generate, edit, upscale, video). An image job stops
+at once; a video job asks first ("Stop this video?", the work so far is discarded). The card then says "Stopped"
+(not an error); the prompt and every setting stay as they were and the form takes a new job right away. The page
+still allows one job at a time: Generate stays disabled while a job runs ("You can submit another when it finishes"),
+and Stop is the way to free it early (unchanged on purpose: queuing several 20-minute 14B videos would block the
+instance for everyone).
+
+`POST /api/generate/{id}/cancel` (empty JSON body; owner or admin, like reading the job; someone else's job is 404;
+rate limited per identity at `WEB_GENERATE_RATE_LIMIT_PER_HOUR`, counted apart from generating):
+
+- the prompt is still waiting in ComfyUI's queue: `POST /queue {"delete": [id]}`, then the queue is read again (it may
+  have started in between, then it is interrupted);
+- it is the running prompt: `POST /interrupt {"prompt_id": id}`, sent only after `GET /queue` showed that the running
+  prompt IS this job's. While another job runs, nothing is interrupted;
+- neither (it finished just before): `409 job_finished`, and the next poll shows the result. A job with no history
+  and nothing in the queue (lost), or whose instance is gone, is simply marked cancelled.
+
+ComfyUI records an interrupted prompt as an error: a poll that reads it before the stop answers fails the job for a
+moment, and the stop then still turns it into `cancelled` (the page holds a failure that arrives while its Stop runs and
+shows it only if the Stop itself fails). The job then reads `{"status": "cancelled"}` (terminal, not a failure; a late poll answer cannot overwrite it; its
+progress socket is closed; nothing of it is served, so partial outputs are discarded). A cancelled job answers 200
+again (idempotent); a done or failed one 409 `job_finished`. ComfyUI unreachable or an error answer: 424
+`comfy_unavailable`, the job unchanged (try again). No job failure is counted anywhere (the usage history counts
+instance sessions, not jobs), so a stop is no failure there either.
+
+ComfyUI's interrupt stops the node running on the instance at that moment; the jobs queued behind the stopped one
+keep running. UNVERIFIED on the owner's ComfyUI (in `vastai/comfy:v0.41.0`): that `/interrupt` reads `prompt_id`
+(newer ComfyUI versions only interrupt when it names the running prompt; an older one ignores the body and interrupts
+whatever runs, so a prompt that finished between the queue read and the interrupt could cost the NEXT job its run, a
+window of one request), that `/queue {"delete"}` removes a waiting prompt, and how long an interrupted 14B sampler
+takes to stop (ComfyUI checks for an interrupt between steps).
+
 ## Negative prompt, guidance and style defaults (Advanced)
 
 The form has a collapsible "Advanced" section with a negative prompt and a guidance (cfg) slider. Both are optional

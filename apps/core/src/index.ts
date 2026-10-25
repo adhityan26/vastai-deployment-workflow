@@ -3,6 +3,7 @@
 export * from "./config.js";
 export * from "./agent.js";
 export * from "./comfy.js";
+export * from "./cancel.js";
 export * from "./console.js";
 export * from "./gallery.js";
 export * from "./generate.js";

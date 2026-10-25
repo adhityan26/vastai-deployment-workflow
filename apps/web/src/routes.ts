@@ -50,6 +50,7 @@ import {
   labelHostname,
   menuItems,
   pollResult,
+  cancelPrompt,
   referenceLimits,
   tenthsOfSeconds,
   tuningSupport,
@@ -71,7 +72,7 @@ import {
   type UsageItem,
   type VideoModelsStatus,
 } from "@vast-comfy/core";
-import { CreditCache, JobStore, LiveProgress, RateLimiter, type Job, type JobKind } from "./store.js";
+import { CreditCache, JobStore, LiveProgress, RateLimiter, type Job, type JobKind, type JobState } from "./store.js";
 import { sendError } from "./reply.js";
 import type { ServerDeps } from "./server.js";
 
@@ -548,6 +549,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     HOUR_MS,
     now,
   );
+  // Stop requests: as many per hour as generate requests, counted apart (stopping never uses up generating).
+  const cancelLimiter = new RateLimiter(intCfg(cfg, "webGenerateRateLimitPerHour", "WEB_GENERATE_RATE_LIMIT_PER_HOUR"), HOUR_MS, now);
   const jobs = new JobStore(
     intCfg(cfg, "webJobCacheMax", "WEB_JOB_CACHE_MAX"),
     intCfg(cfg, "webJobTtlS", "WEB_JOB_TTL_S") * 1000,
@@ -838,6 +841,10 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     if (job === null || req.identity === null) return null;
     return job.owner === req.identity.subject || req.role === "admin" ? job : null;
   };
+
+  /** The answer to a cancel of a job that is no longer pending: 200 when it is cancelled, else 409 job_finished. */
+  const finishedAnswer = (reply: FastifyReply, job: Job) =>
+    job.state.kind === "cancelled" ? { status: "cancelled" as const } : sendError(reply, 409, "job_finished", "the job has already finished");
 
   /** True when the job's instance is still the active one. */
   const sameInstance = async (job: Job): Promise<boolean> => {
@@ -1683,30 +1690,34 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     const job = ownJob(req, id);
     if (job === null) return sendError(reply, 404, "not_found", "no such job");
     if (job.state.kind === "pending") {
+      // Every await below may overlap a cancel of this job: a state is only ever set on a job that is still pending.
+      const settle = (next: JobState): void => {
+        if (job.state.kind === "pending") job.state = next;
+      };
       if (now() - job.createdAt >= timeoutOf(job.kind)) {
-        job.state = { kind: "failed", message: "generation timed out" };
+        settle({ kind: "failed", message: "generation timed out" });
       } else if (!(await sameInstance(job))) {
-        job.state = { kind: "failed", message: "the instance that ran this job is gone" };
+        settle({ kind: "failed", message: "the instance that ran this job is gone" });
       } else {
         try {
           const result = await pollResult(generateDeps(job.hostname, job.kind, job.template), job.id);
-          if (result !== null) {
+          if (result !== null && job.state.kind === "pending") {
             // ComfyUI's own execution time; without it, the time this server saw from submit to done.
             const seconds = result.executionSeconds ?? tenthsOfSeconds(Math.max(0, now() - job.createdAt));
             const startedAt = job.live?.startedAt ?? null;
             const queuedSeconds = startedAt === null ? null : tenthsOfSeconds(Math.max(0, startedAt - job.createdAt));
-            job.state = { kind: "done", images: result.images, seconds, queuedSeconds };
+            settle({ kind: "done", images: result.images, seconds, queuedSeconds });
             log("info", `job done: kind=${job.kind} seconds=${seconds}`);
           }
         } catch (err) {
           if (err instanceof GenerateFailed) {
-            job.state = { kind: "failed", message: scrubber(deps, [job.hostname])(err.message) };
+            settle({ kind: "failed", message: scrubber(deps, [job.hostname])(err.message) });
           } else if (err instanceof ResponseTooLarge) {
             // A hostile or broken instance: stop polling it for this job.
             log("warn", "generate poll: oversized history response");
-            job.state = { kind: "failed", message: "the instance sent an oversized response" };
+            settle({ kind: "failed", message: "the instance sent an oversized response" });
             return tooLarge(reply);
-          } else {
+          } else if (job.state.kind === "pending") {
             // Unreachable or ComfyError: transient from the browser's view; it may poll again.
             log("warn", `generate poll failed: ${(err as Error).name}`);
             return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI could not be reached");
@@ -1729,8 +1740,50 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
       };
     }
     if (state.kind === "failed") return { status: "failed", message: state.message };
+    if (state.kind === "cancelled") return { status: "cancelled" };
     const live = job.live;
     return { status: "pending", progress: live?.step ?? null, preview_seq: live?.previewSeq ?? 0 };
+  });
+
+  // Stop a job (owner or admin, like reading it): a waiting prompt is deleted from ComfyUI's queue, the running one is
+  // interrupted only after the queue showed it is this job's prompt (never someone else's). The job becomes
+  // "cancelled" (terminal, not a failure; nothing of it is served). Idempotent for a cancelled job; 409 job_finished
+  // for one that is done or failed (also when it finished just before the cancel reached ComfyUI). On a ComfyUI
+  // error the job is unchanged (424). ComfyUI's interrupt stops the node running on the instance at that moment; the
+  // jobs queued behind it keep running.
+  app.post("/api/generate/:id/cancel", { ...member, schema: { params: ID_PARAMS, body: EMPTY_BODY } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = ownJob(req, id);
+    if (job === null) return sendError(reply, 404, "not_found", "no such job");
+    if (!cancelLimiter.take(req.identity!.subject)) return sendError(reply, 429, "rate_limited", "too many stop requests this hour");
+    if (job.state.kind !== "pending") return finishedAnswer(reply, job);
+    const stop = (): { status: "cancelled" } => {
+      job.state = { kind: "cancelled" };
+      job.live?.end();
+      log("info", `job cancelled: kind=${job.kind}`);
+      return { status: "cancelled" };
+    };
+    // Its instance is gone: nothing runs for it any more.
+    if (!(await sameInstance(job))) return job.state.kind === "pending" ? stop() : finishedAnswer(reply, job);
+    const comfy = deps.comfyFor(job.hostname);
+    let outcome: Awaited<ReturnType<typeof cancelPrompt>>;
+    try {
+      outcome = await cancelPrompt(comfy, job.id);
+      // Neither running nor waiting: finished just before the cancel (its history says so), or lost (no history).
+      if (outcome === "not_queued" && (await comfy.history(job.id)) !== null) {
+        return (job.state as JobState).kind === "cancelled" ? { status: "cancelled" } : sendError(reply, 409, "job_finished", "the job has already finished");
+      }
+    } catch (err) {
+      if (err instanceof ResponseTooLarge) return tooLarge(reply);
+      if (!(err instanceof ComfyError) && !(err instanceof Unreachable)) throw err;
+      log("warn", `job cancel failed: ${errorName(err)}`);
+      return sendError(reply, UPSTREAM_FAILED, "comfy_unavailable", "ComfyUI could not be reached");
+    }
+    // A poll may have settled it meanwhile: cancelled by another request, done (409), or failed BECAUSE of this
+    // interrupt (ComfyUI records an interrupted prompt as an error), which is a stop, not a failure.
+    const settled = job.state as JobState;
+    if (settled.kind === "pending" || (settled.kind === "failed" && outcome === "interrupted")) return stop();
+    return finishedAnswer(reply, job);
   });
 
   // The newest live preview of a pending job (owner or admin, like the job). The type is the one its

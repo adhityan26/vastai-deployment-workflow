@@ -39,7 +39,9 @@ export type JobState =
       /** Seconds the job waited before ComfyUI started it, when known (from the progress socket). */
       queuedSeconds: number | null;
     }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string }
+  /** Stopped by its owner or an admin (POST /api/generate/{id}/cancel): terminal, not a failure; nothing of it is served. */
+  | { kind: "cancelled" };
 
 /** The part of a progress socket a job needs. */
 export interface LiveSocket {

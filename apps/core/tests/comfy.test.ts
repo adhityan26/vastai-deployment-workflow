@@ -99,6 +99,32 @@ describe("ComfyClient", () => {
     expect(await client.queue()).toEqual({ running: [1], pending: [] });
   });
 
+  it("deleteQueued asks ComfyUI to drop exactly that pending prompt", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 200, {}));
+    await client.deleteQueued("p-1");
+    expect(seen).toEqual([{ method: "POST", url: "/queue", body: JSON.stringify({ delete: ["p-1"] }) }]);
+  });
+
+  it("interrupt names the prompt (a ComfyUI that knows prompt_id stops only that one)", async () => {
+    const { client, seen } = await fake((_s, res) => {
+      res.writeHead(200);
+      res.end();
+    });
+    await client.interrupt("p-2");
+    expect(seen).toEqual([{ method: "POST", url: "/interrupt", body: JSON.stringify({ prompt_id: "p-2" }) }]);
+  });
+
+  it("deleteQueued and interrupt refuse a malformed id without a request, and report HTTP errors", async () => {
+    const { client, seen } = await fake((_s, res) => json(res, 500, { error: "boom" }));
+    for (const bad of ["", "../x", "a b"]) {
+      await expect(client.deleteQueued(bad)).rejects.toBeInstanceOf(ComfyError);
+      await expect(client.interrupt(bad)).rejects.toBeInstanceOf(ComfyError);
+    }
+    expect(seen).toHaveLength(0);
+    await expect(client.deleteQueued("p")).rejects.toMatchObject({ name: "ComfyError", status: 500 });
+    await expect(client.interrupt("p")).rejects.toMatchObject({ name: "ComfyError", status: 500 });
+  });
+
   it("HTTP error -> ComfyError with status", async () => {
     const { client } = await fake((_s, res) => json(res, 400, { error: "bad prompt" }));
     const err = (await client.submit({}).catch((e: unknown) => e)) as ComfyError;

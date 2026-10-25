@@ -174,6 +174,15 @@ downloads in the background through the video download slot; a job with a LoRA n
 an instance, ComfyUI listing new LoRAs without a restart, stacking with the 4-step LoRAs. Runbook: README "Extra LoRAs
 added from the page".
 
+**Stop generating (branch `feat/stop-generating`, 2026-10-25, pushed, NOT merged).** A Stop button on every running job's
+card (a confirm for video only); `POST /api/generate/{id}/cancel` (owner or admin, empty body, rate limited like
+generating): a waiting prompt is deleted from ComfyUI's queue, the running one interrupted with its `prompt_id` only
+after `GET /queue` showed it is this job's; never while another job runs. New terminal job state `cancelled` (page:
+"Stopped", form free, prompt kept); 409 `job_finished` when it finished first; 424 with the job unchanged when ComfyUI
+cannot be reached. Generate stays one job at a time (Stop frees it). UNVERIFIED live: `/interrupt` honouring `prompt_id`
+and `/queue {"delete"}` on the image's ComfyUI (vastai/comfy v0.41.0); how fast a 14B sampler stops. Runbook: README
+"Stop generating".
+
 ## Next work, in order
 
 ### Task A: finish the sidebar tool menu (branch `feat/tool-menu`)
