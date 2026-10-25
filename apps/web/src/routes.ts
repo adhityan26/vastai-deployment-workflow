@@ -746,10 +746,11 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
     items: menuItemsOn,
   };
 
-  const generateDeps = (hostname: string, kind: JobKind = "generate"): GenerateDeps => ({
+  const generateDeps = (hostname: string, kind: JobKind = "generate", own?: unknown): GenerateDeps => ({
     comfy: deps.comfyFor(hostname),
     profile: deps.profile,
-    template: kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : kind === "video" ? videoTemplate : deps.template,
+    // A job that was submitted with its own workflow (a video family other than the base one) is read with that one.
+    template: own !== undefined && own !== null ? own : kind === "edit" ? editTemplate : kind === "upscale" ? upscaleTemplate : kind === "video" ? videoTemplate : deps.template,
     cfg,
   });
   const upscaleDeps = (hostname: string, limits: UpscaleLimits): UpscaleDeps => ({
@@ -1482,6 +1483,8 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         hostname,
         live: started?.live ?? null,
         kind: "video",
+        // The workflow that was submitted: a non-base family saves its clip on another node than the base one.
+        template: chosen === null ? undefined : startImage ? chosen.templates.image : chosen.templates.text,
         prompt: String(asked.prompt).slice(0, JOB_PROMPT_KEPT),
         label: `Video: ${String(asked.size)}, ${String(asked.duration)}${title}${startImage ? ", from an image" : ""}`.slice(0, JOB_LABEL_KEPT),
       });
@@ -1686,7 +1689,7 @@ export function registerApiRoutes(app: FastifyInstance, deps: ServerDeps): void 
         job.state = { kind: "failed", message: "the instance that ran this job is gone" };
       } else {
         try {
-          const result = await pollResult(generateDeps(job.hostname, job.kind), job.id);
+          const result = await pollResult(generateDeps(job.hostname, job.kind, job.template), job.id);
           if (result !== null) {
             // ComfyUI's own execution time; without it, the time this server saw from submit to done.
             const seconds = result.executionSeconds ?? tenthsOfSeconds(Math.max(0, now() - job.createdAt));

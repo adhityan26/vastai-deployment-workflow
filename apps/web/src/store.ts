@@ -112,6 +112,12 @@ export interface Job {
   state: JobState;
   /** The job's progress socket and what it saw; null when progress is off or the socket could not be opened. */
   readonly live: LiveProgress | null;
+  /**
+   * The workflow this job was submitted with, when it is not the one its kind normally uses (a video family other than
+   * the base one has its own workflow and its own SaveVideo node id). Polling reads the result from the nodes of THIS
+   * template; internal only, never sent to a client.
+   */
+  readonly template?: unknown;
 }
 
 /** Generate jobs by ComfyUI prompt id, bounded by count and age. */
@@ -136,7 +142,7 @@ export class JobStore {
   }
 
   add(
-    job: Omit<Job, "createdAt" | "state" | "kind" | "prompt" | "label" | "live"> & { kind?: JobKind; prompt?: string; label?: string; live?: LiveProgress | null },
+    job: Omit<Job, "createdAt" | "state" | "kind" | "prompt" | "label" | "live" | "template"> & { kind?: JobKind; prompt?: string; label?: string; live?: LiveProgress | null; template?: unknown },
   ): Job {
     this.purge();
     // Map iteration is insertion order: forget the oldest jobs first.

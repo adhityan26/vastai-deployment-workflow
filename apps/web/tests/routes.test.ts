@@ -3825,6 +3825,31 @@ describe("video families", () => {
     expect(p["11"].inputs).toMatchObject({ start_image: ["video_start", 0], width: 480, height: 832 });
   });
 
+  it("a finished clip of the 14B family is read from ITS SaveVideo node (it is not 'no images')", async () => {
+    // Live 2026-10-25: the 14B workflow saves its clip on node 16, the base family's on another node; the poll
+    // used the base family's workflow and reported "Failed: no images" for a clip that had been made.
+    h = await fharness();
+    const withHistory: Handler = (s, res) => {
+      if (s.url.startsWith("/history/")) {
+        return json(res, 200, {
+          "p-vid14": {
+            outputs: { "16": { images: [{ filename: "vastcomfy_00001_.mp4", subfolder: "video", type: "output" }], animated: [true] } },
+            status: { completed: true, status_str: "success" },
+          },
+        });
+      }
+      return comfyOk(s, res);
+    };
+    h.setComfy(withHistory);
+    for (const body of [ok, { ...ok, size: "Portrait", image: REF_A.toString("base64") }]) {
+      const sub = await post("/api/video", await member(), body);
+      expect(sub.statusCode, sub.body).toBe(202);
+      const poll = await call("GET", `/api/generate/${sub.json().id}`, await member());
+      expect(poll.json().status, poll.body).toBe("done");
+      expect(poll.json().videos).toHaveLength(1); // a clip is listed under `videos`, never under `images`
+    }
+  });
+
   it("the base family by id, or no family, is the base section as before", async () => {
     h = await fharness();
     for (const body of [{ ...ok, size: "Landscape, faster", duration: "About 3 s", family: "wan22_5b" }, { prompt: "x", size: "Landscape, faster", duration: "About 3 s" }]) {
