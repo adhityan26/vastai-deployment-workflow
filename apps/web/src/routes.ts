@@ -145,18 +145,31 @@ export function startFailText(reason: StartFailReason, detail: StartFailDetail |
 // Plain text per fixed code of a start that failed after Start returned (GET /api/state start_failure).
 const SLOW_NETWORK_TEXT = "The rented machine's network is too slow";
 const RETRY_ELSEWHERE = "It was released; try Start again, a different machine is chosen.";
+const TOO_LONG_TEXT = "The model download would not finish before the boot time limit";
 const START_FAILURE_MESSAGES: Record<StartFailureCode, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
   slow_boot: `The rented machine did not finish starting up in time. ${RETRY_ELSEWHERE}`,
   slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  boot_too_long: `${TOO_LONG_TEXT}. ${RETRY_ELSEWHERE}`,
   boot_failed: "The rented machine's boot failed and it removed itself; try Start again.",
 };
 
-/** The fixed text of a start failure; slow_download names the measured speed (a number only) when known. */
-export function startFailureMessage(code: StartFailureCode, measuredMbS: number | null): string {
-  if (code === "slow_download" && measuredMbS !== null && Number.isFinite(measuredMbS)) {
-    return `${SLOW_NETWORK_TEXT} (about ${measuredMbS} MB/s to the model host). ${RETRY_ELSEWHERE}`;
+/**
+ * The fixed text of a start failure. slow_download and boot_too_long name the measured speed and the limit in
+ * minutes when known (numbers only): "too slow" is a speed under what the download limit allows; "too long" is a
+ * download fast enough for that limit that would still end after the boot limit.
+ */
+export function startFailureMessage(code: StartFailureCode, measuredMbS: number | null, limitMin: number | null = null): string {
+  const speed = measuredMbS !== null && Number.isFinite(measuredMbS) ? measuredMbS : null;
+  const limit = limitMin !== null && Number.isSafeInteger(limitMin) && limitMin > 0 ? limitMin : null;
+  if (code === "slow_download" && speed !== null) {
+    const more = limit === null ? "" : `; the download would take more than ${limit} minutes`;
+    return `${SLOW_NETWORK_TEXT} (about ${speed} MB/s to the model host${more}). ${RETRY_ELSEWHERE}`;
+  }
+  if (code === "boot_too_long" && (speed !== null || limit !== null)) {
+    const parts = [...(speed === null ? [] : [`about ${speed} MB/s`]), ...(limit === null ? [] : [`limit ${limit} minutes`])];
+    return `${TOO_LONG_TEXT} (${parts.join(", ")}). ${RETRY_ELSEWHERE}`;
   }
   return START_FAILURE_MESSAGES[code];
 }
@@ -338,9 +351,10 @@ function publicView(view: StatusView, isAdmin: boolean, scrub: (t: string) => st
     start_failure: view.start_failure
       ? {
           code: view.start_failure.code,
-          message: startFailureMessage(view.start_failure.code, view.start_failure.measured_mb_s),
+          message: startFailureMessage(view.start_failure.code, view.start_failure.measured_mb_s, view.start_failure.limit_min),
           server: publicServer(view.start_failure.server, isAdmin, scrub),
           measured_mb_s: view.start_failure.measured_mb_s,
+          limit_min: view.start_failure.limit_min,
         }
       : null,
     server: publicServer(view.server, isAdmin, scrub),

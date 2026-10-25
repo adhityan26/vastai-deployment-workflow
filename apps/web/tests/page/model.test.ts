@@ -274,6 +274,19 @@ describe("form helpers", () => {
       `${slow} (about 2.8 MB/s to the model host). ${retry}`,
     );
     expect(startFailureText({ code: "slow_download", message: "", measured_mb_s: null })).toBe(`${slow}. ${retry}`);
+    // The server's texts, word for word (apps/web/src/routes.ts startFailureMessage).
+    expect(startFailureText({ code: "slow_download", message: "", measured_mb_s: 10, limit_min: 60 })).toBe(
+      `${slow} (about 10 MB/s to the model host; the download would take more than 60 minutes). ${retry}`,
+    );
+    expect(startFailureText({ code: "boot_too_long", message: "", measured_mb_s: 71.6, limit_min: 25 })).toBe(
+      `The model download would not finish before the boot time limit (about 71.6 MB/s, limit 25 minutes). ${retry}`,
+    );
+    expect(startFailureText({ code: "boot_too_long", message: "", measured_mb_s: null, limit_min: null })).toBe(
+      `The model download would not finish before the boot time limit. ${retry}`,
+    );
+    expect(parseState({ ...base, start_failure: { code: "boot_too_long", message: "m", measured_mb_s: 5, limit_min: 65 } })!.start_failure)
+      .toMatchObject({ measured_mb_s: 5, limit_min: 65 });
+    expect(parseState({ ...base, start_failure: { code: "boot_too_long", message: "m", limit_min: 1.5 } })!.start_failure!.limit_min).toBeNull();
     expect(startFailureText({ code: "slow_boot", message: "", measured_mb_s: 2.8 })).toBe(
       `The rented machine did not finish starting up in time. ${retry}`,
     );
@@ -288,7 +301,7 @@ describe("form helpers", () => {
 
   it("parses a start failure and drops a broken one", () => {
     expect(parseState({ ...base })!.start_failure).toBeNull();
-    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m", server: null, measured_mb_s: null });
+    expect(parseState({ ...base, start_failure: { code: "start_stuck", message: "m" } })!.start_failure).toEqual({ code: "start_stuck", message: "m", server: null, measured_mb_s: null, limit_min: null });
     expect(parseState({ ...base, start_failure: { code: 5 } })!.start_failure).toBeNull();
     expect(parseState({ ...base, start_failure: "start_stuck" })!.start_failure).toBeNull();
   });

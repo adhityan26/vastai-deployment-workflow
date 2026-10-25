@@ -15,6 +15,8 @@ export interface InstanceRecord {
   tailnet_hostname: string;
   status: InstanceStatus;
   unreachable_since?: number | null;
+  /** Minutes added to the boot limits for the video files this boot downloads (absent: none). */
+  boot_extra_min?: number;
 }
 
 export type NewRecord = Omit<InstanceRecord, "status" | "vast_instance_id"> &

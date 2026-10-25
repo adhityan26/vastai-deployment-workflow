@@ -44,6 +44,21 @@ def test_registry_schema_is_valid_and_accepts_a_sample_record():
         raise AssertionError("schema accepted a broken record")
 
 
+def test_registry_schema_takes_the_boot_extra_minutes_of_a_video_boot():
+    schema = json.loads((CONTRACTS / "instance-registry.schema.json").read_text())
+    record = {
+        "vast_instance_id": 123, "created_at": 1_700_000_000, "profile": "image", "agent_token": "x" * 32,
+        "tailnet_hostname": "vast-ab12", "status": "booting",
+    }
+    jsonschema.validate({**record, "boot_extra_min": 40}, schema)
+    for bad in (0, -1, 1.5, "40", None):
+        try:
+            jsonschema.validate({**record, "boot_extra_min": bad}, schema)
+        except jsonschema.ValidationError:
+            continue
+        raise AssertionError(f"schema accepted boot_extra_min {bad!r}")
+
+
 def test_registry_null_vast_id_only_while_creating():
     schema = json.loads((CONTRACTS / "instance-registry.schema.json").read_text())
     record = {

@@ -177,7 +177,7 @@ export interface ApiState {
   failed: { reason: string | null } | null;
   destroy_failed: { error: string } | null;
   /** The newest start failed after Start returned (fixed code plus the server's plain text). */
-  start_failure: { code: string; message: string; server: ServerView | null; measured_mb_s: number | null } | null;
+  start_failure: { code: string; message: string; server: ServerView | null; measured_mb_s: number | null; limit_min: number | null } | null;
   /** Where the active instance's server is. */
   server: ServerView | null;
   dph: number | null;
@@ -525,6 +525,7 @@ export function parseState(json: unknown): ApiState | null {
             message: typeof sf["message"] === "string" ? sf["message"] : "",
             server: parseServer(sf["server"]),
             measured_mb_s: measuredMbS(sf["measured_mb_s"]),
+            limit_min: limitMin(sf["limit_min"]),
           }
         : null,
     server: parseServer(json["server"]),
@@ -1802,23 +1803,36 @@ const END_REASON_TEXT: Record<string, string> = {
 // Page text per start failure code; an unknown code shows the server's message.
 const SLOW_NETWORK_TEXT = "The rented machine's network is too slow";
 const RETRY_ELSEWHERE = "It was released; try Start again, a different machine is chosen.";
+const TOO_LONG_TEXT = "The model download would not finish before the boot time limit";
 const START_FAILURE_TEXT: Record<string, string> = {
   start_stuck: "The rented machine did not start. It was released; try Start again.",
   boot_stopped: "The rented machine stopped while it was starting. It was released; try Start again.",
   slow_boot: `The rented machine did not finish starting up in time. ${RETRY_ELSEWHERE}`,
   slow_download: `${SLOW_NETWORK_TEXT}. ${RETRY_ELSEWHERE}`,
+  boot_too_long: `${TOO_LONG_TEXT}. ${RETRY_ELSEWHERE}`,
   boot_failed: "The rented machine's boot failed and it removed itself; try Start again.",
 };
+
+/** A limit in whole minutes from the server, else null. */
+function limitMin(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= 100_000 ? v : null;
+}
 
 /** A measured speed in MB/s from the server: a finite number 0..100000, else null. */
 function measuredMbS(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100_000 ? Math.round(v * 10) / 10 : null;
 }
 
-export function startFailureText(f: { code: string; message: string; measured_mb_s?: number | null }): string {
+export function startFailureText(f: { code: string; message: string; measured_mb_s?: number | null; limit_min?: number | null }): string {
   const mbS = f.measured_mb_s ?? null;
+  const limit = f.limit_min ?? null;
   if (f.code === "slow_download" && mbS !== null) {
-    return `${SLOW_NETWORK_TEXT} (about ${mbS} MB/s to the model host). ${RETRY_ELSEWHERE}`;
+    const more = limit === null ? "" : `; the download would take more than ${limit} minutes`;
+    return `${SLOW_NETWORK_TEXT} (about ${mbS} MB/s to the model host${more}). ${RETRY_ELSEWHERE}`;
+  }
+  if (f.code === "boot_too_long" && (mbS !== null || limit !== null)) {
+    const parts = [...(mbS === null ? [] : [`about ${mbS} MB/s`]), ...(limit === null ? [] : [`limit ${limit} minutes`])];
+    return `${TOO_LONG_TEXT} (${parts.join(", ")}). ${RETRY_ELSEWHERE}`;
   }
   return START_FAILURE_TEXT[f.code] ?? (f.message !== "" ? f.message : "The start failed; try Start again.");
 }

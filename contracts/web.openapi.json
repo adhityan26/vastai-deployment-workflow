@@ -469,12 +469,13 @@
               "object",
               "null"
             ],
-            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code, its fixed plain text (slow_download names the measured speed, a number only), where the server was and the measured speed.",
+            "description": "The newest start failed after Start returned (it is cleared by the next Start). A fixed code, its fixed plain text (slow_download and boot_too_long name the measured speed and the limit in minutes, numbers only), where the server was and the measured speed.",
             "required": [
               "code",
               "message",
               "server",
-              "measured_mb_s"
+              "measured_mb_s",
+              "limit_min"
             ],
             "properties": {
               "code": {
@@ -502,7 +503,15 @@
                 ],
                 "minimum": 0,
                 "maximum": 100000,
-                "description": "slow_download: the measured model download speed in MB/s (one decimal), when known; null otherwise"
+                "description": "slow_download, boot_too_long: the measured model download speed in MB/s (one decimal), when known; null otherwise"
+              },
+              "limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "description": "slow_download: the download limit in minutes (BOOT_MAX_DOWNLOAD_ETA_MIN plus a video boot's extra); boot_too_long: the boot time limit in minutes; null otherwise or when unknown (the instance's own slow_network release)"
               }
             }
           },
@@ -2020,9 +2029,10 @@
           "boot_stopped",
           "slow_boot",
           "slow_download",
+          "boot_too_long",
           "boot_failed"
         ],
-        "description": "Fixed code of a start that failed after POST /api/start returned. Every release below needs two consecutive reconciles at least a minute apart (a failed Vast or agent read is no sample) and only ever judges a record that is still booting (never one that reached ready). start_stuck: the container never started (last_started null; exited/stopped, created with a stopped intent or state, or a stopped intent without status) once the instance was older than VAST_START_STUCK_MIN (an image still loading, a running container whose agent is not up yet and 'created' with a running intent are never stuck). boot_stopped: it had started and then stopped during the boot; the machine is not avoided. slow_boot: Vast reports it running but its agent has never answered for BOOT_AGENT_GRACE_MIN, counted from the first reconcile that saw it running (the machine did not finish starting up in time). slow_download: the model download, at the average speed seen over at least MODEL_ETA_MIN_OBSERVE_S, would still take more than BOOT_MAX_DOWNLOAD_ETA_MIN, or would end after BOOT_TIMEOUT_MIN; also shown when the instance's own early network probe gave up (container log marker '[boot] FAILED: slow_network'). boot_failed: the instance disappeared during its boot without the web asking (it gave up by itself); its machine is avoided only when nothing says why or the failure was its own (slow_network, disk_insufficient). The web released or noted it (usage reason boot_failed); for start_stuck, slow_boot and slow_download the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN when its machine id is known."
+        "description": "Fixed code of a start that failed after POST /api/start returned. Every release below needs two consecutive reconciles at least a minute apart (a failed Vast or agent read is no sample) and only ever judges a record that is still booting (never one that reached ready). start_stuck: the container never started (last_started null; exited/stopped, created with a stopped intent or state, or a stopped intent without status) once the instance was older than VAST_START_STUCK_MIN (an image still loading, a running container whose agent is not up yet and 'created' with a running intent are never stuck). boot_stopped: it had started and then stopped during the boot; the machine is not avoided. slow_boot: Vast reports it running but its agent has never answered for BOOT_AGENT_GRACE_MIN, counted from the first reconcile that saw it running (the machine did not finish starting up in time). slow_download: the model download, at the average speed seen over at least MODEL_ETA_MIN_OBSERVE_S, would still take more than BOOT_MAX_DOWNLOAD_ETA_MIN, or would end after BOOT_TIMEOUT_MIN; also shown when the instance's own early network probe gave up (container log marker '[boot] FAILED: slow_network'). boot_failed: the instance disappeared during its boot without the web asking (it gave up by itself); its machine is avoided only when nothing says why or the failure was its own (slow_network, disk_insufficient). The web released or noted it (usage reason boot_failed); for start_stuck, slow_boot and slow_download the next Starts avoid that machine for VAST_BAD_MACHINE_TTL_MIN when its machine id is known. boot_too_long: the model download, at the average speed seen, would fit the download limit but end after the boot time limit (BOOT_TIMEOUT_MIN, plus for a boot with video files the minutes those take at BOOT_MIN_DOWNLOAD_MB_S, capped by BOOT_TIMEOUT_MAX_MIN); the machine is avoided like for slow_download, whose download limit BOOT_MAX_DOWNLOAD_ETA_MIN grows by the same minutes."
       },
       "ServerInfo": {
         "type": "object",

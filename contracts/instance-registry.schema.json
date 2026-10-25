@@ -13,7 +13,8 @@
     "agent_token": {"type": "string", "minLength": 16},
     "tailnet_hostname": {"type": "string"},
     "status": {"enum": ["creating", "booting", "ready", "stopping", "gone", "anomaly"]},
-    "unreachable_since": {"type": ["integer", "null"]}
+    "unreachable_since": {"type": ["integer", "null"]},
+    "boot_extra_min": {"type": "integer", "minimum": 1, "maximum": 100000, "description": "Minutes added to BOOT_TIMEOUT_MIN and BOOT_MAX_DOWNLOAD_ETA_MIN for the video files this boot downloads (at BOOT_MIN_DOWNLOAD_MB_S; the timeout capped by BOOT_TIMEOUT_MAX_MIN). Absent for an image-only boot and for records written before it existed"}
   },
   "if": {"properties": {"status": {"enum": ["booting", "ready", "stopping", "anomaly"]}}},
   "then": {"properties": {"vast_instance_id": {"type": "integer"}}}

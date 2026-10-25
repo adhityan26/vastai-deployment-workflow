@@ -327,7 +327,7 @@ export interface StatusView {
   /** GPU model of the active instance: Vast's row, else the offer chosen at start. */
   gpu_name: string | null;
   /** The newest start failed after Start returned (e.g. it was released as stuck); cleared by the next Start. */
-  start_failure: { code: StartFailureCode; server: ServerInfo | null; measured_mb_s: number | null } | null;
+  start_failure: { code: StartFailureCode; server: ServerInfo | null; measured_mb_s: number | null; limit_min: number | null } | null;
   /** Where the active instance's server is: Vast's row, else the offer chosen at start (per field). */
   server: ServerInfo | null;
   download: DownloadView | null;
@@ -634,6 +634,40 @@ export class Lifecycle {
     return Math.max(video, disk + Math.ceil(bytes / BYTES_PER_GB));
   }
 
+  /**
+   * The bytes a boot downloads beyond the image-only set: the files of the chosen video families (a shared file
+   * once), or of the base video section when none is named; 0 for an image-only boot.
+   */
+  private videoBootBytes(choice: StartFilters): number {
+    if (choice.videoModels !== true) return 0;
+    const families = choice.videoFamilies ?? [];
+    const names = new Set(families.length === 0 ? (this.deps.videoModelFiles ?? []) : families.flatMap((id) => this.deps.videoFamilyFiles?.[id] ?? []));
+    return (this.deps.profileModels ?? []).filter((m) => names.has(baseName(m.file))).reduce((sum, m) => sum + m.size_bytes, 0);
+  }
+
+  /** The minutes those extra bytes take at BOOT_MIN_DOWNLOAD_MB_S (kept on the record: boot_extra_min). */
+  private bootExtraMin(choice: StartFilters): number {
+    const bytes = this.videoBootBytes(choice);
+    if (bytes === 0) return 0;
+    const floor = intCfg(this.cfg, "bootMinDownloadMbS", "BOOT_MIN_DOWNLOAD_MB_S", 1) * BYTES_PER_MB;
+    return Math.ceil(bytes / floor / SECONDS_PER_MINUTE);
+  }
+
+  /**
+   * The boot limits of a record: BOOT_TIMEOUT_MIN and BOOT_MAX_DOWNLOAD_ETA_MIN plus the record's extra minutes,
+   * the timeout capped by BOOT_TIMEOUT_MAX_MIN (a larger BOOT_TIMEOUT_MIN is kept as it is). A record without them
+   * (an image-only boot, or one written before they existed) keeps the configured values exactly.
+   */
+  private bootLimits(record: InstanceRecord): { timeoutMin: number; etaMin: number } {
+    const base = intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1);
+    const eta = intCfg(this.cfg, "bootMaxDownloadEtaMin", "BOOT_MAX_DOWNLOAD_ETA_MIN", 1);
+    const extra = record.boot_extra_min ?? 0;
+    if (extra <= 0) return { timeoutMin: base, etaMin: eta };
+    const cap = intCfg(this.cfg, "bootTimeoutMaxMin", "BOOT_TIMEOUT_MAX_MIN", 1);
+    const applied = Math.max(0, Math.min(extra, cap - base));
+    return { timeoutMin: base + applied, etaMin: eta + applied };
+  }
+
   /** VIDEO_FAMILIES of this web app for the instance (nothing when it lists none). */
   private familiesEnv(): Record<string, string> {
     const v = this.cfg["videoFamilies"];
@@ -857,12 +891,20 @@ export class Lifecycle {
     const token = this.deps.newToken();
     this.secrets.add(token);
     const profile = strCfg(this.cfg, "profile", "PROFILE");
+    // A boot that downloads video files gets more time for them (kept on the record, so a web restart keeps it).
+    let extraMin: number;
+    try {
+      extraMin = this.bootExtraMin(choice);
+    } catch (err) {
+      throw new StartError(this.scrub(`start failed before create: ${message(err)}`), false, "config_invalid");
+    }
     // Write-ahead: throws AlreadyActiveError when an instance is already active.
     const record = await registry.begin({
       created_at: this.now(),
       profile,
       agent_token: token,
       tailnet_hostname: hostname,
+      ...(extraMin > 0 ? { boot_extra_min: extraMin } : {}),
     });
     // A new Start clears the console of the previous instance.
     this.withConsole((buf) => buf.reset(hostname));
@@ -1172,6 +1214,7 @@ export class Lifecycle {
               NO_SERVER,
             ),
             measured_mb_s: stuck.measured_mb_s ?? null,
+            limit_min: stuck.limit_min ?? null,
           };
     let instances: VastInstance[] | null = null;
     let vastError: string | null = null;
@@ -1603,7 +1646,7 @@ export class Lifecycle {
     }
     const now = this.now();
     const grace = intCfg(this.cfg, "reconcileGraceMin", "RECONCILE_GRACE_MIN", 1) * SECONDS_PER_MINUTE;
-    const bootTimeout = intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1) * SECONDS_PER_MINUTE;
+    intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1); // checked here; each record's limit: bootLimits
     const stuckLimit = intCfg(this.cfg, "vastStartStuckMin", "VAST_START_STUCK_MIN", 1) * SECONDS_PER_MINUTE;
     const unreachableLimit = intCfg(this.cfg, "unreachableDestroyMin", "UNREACHABLE_DESTROY_MIN", 1) * SECONDS_PER_MINUTE;
     const hardCap = intCfg(this.cfg, "startHardCapHours", "START_HARD_CAP_HOURS", 1) * SECONDS_PER_HOUR;
@@ -1757,8 +1800,8 @@ export class Lifecycle {
     else if (now - startedAt >= hardCap) reason = "hard_cap";
     else if (stuckHeld !== null) reason = stuckHeld;
     else if (silentHeld) reason = "slow_boot";
-    else if (slowDownload !== null) reason = "slow_download";
-    else if (record.status !== "ready" && now - record.created_at >= bootTimeout) reason = "boot_timeout";
+    else if (slowDownload !== null) reason = slowDownload.code;
+    else if (record.status !== "ready" && now - record.created_at >= this.bootLimits(record).timeoutMin * SECONDS_PER_MINUTE) reason = "boot_timeout";
     else if (
       agent === null &&
       inst.actual_status === "running" &&
@@ -1770,7 +1813,7 @@ export class Lifecycle {
     if (reason === null) return report;
     if (reason === "start_stuck" || reason === "boot_stopped") this.noteStuck(record, inst, now, reason);
     else if (reason === "slow_boot") this.noteStuck(record, inst, now, "slow_boot");
-    else if (reason === "slow_download") this.noteStuck(record, inst, now, "slow_download", slowDownload);
+    else if (slowDownload !== null && reason === slowDownload.code) this.noteStuck(record, inst, now, slowDownload.code, slowDownload.mbS, slowDownload.limitMin);
     try {
       const result = await this.destroyRecord(record, id, "watchdog", WATCHDOG_STOPS[reason] ?? null);
       this.endConsole(hostname, reason as ConsoleEndReason);
@@ -1831,7 +1874,11 @@ export class Lifecycle {
    * A failed agent read is not a sample; a good sample resets the slow run; fewer bytes than at the
    * previous sample (a file restarted) start a new window.
    */
-  private sampleDownload(record: InstanceRecord, agent: AgentStatus | null, now: number): number | null {
+  private sampleDownload(
+    record: InstanceRecord,
+    agent: AgentStatus | null,
+    now: number,
+  ): { code: "slow_download" | "boot_too_long"; mbS: number; limitMin: number } | null {
     const hostname = record.tailnet_hostname;
     const id = record.vast_instance_id;
     if (agent === null) return null;
@@ -1843,8 +1890,9 @@ export class Lifecycle {
     const dl = overallDownload(agent.state ?? "", agent.progress, this.bootModels(agent));
     if (dl === null) return reset();
     const observeS = intCfg(this.cfg, "modelEtaMinObserveS", "MODEL_ETA_MIN_OBSERVE_S", 1);
-    const maxEtaS = intCfg(this.cfg, "bootMaxDownloadEtaMin", "BOOT_MAX_DOWNLOAD_ETA_MIN", 1) * SECONDS_PER_MINUTE;
-    const bootTimeoutS = intCfg(this.cfg, "bootTimeoutMin", "BOOT_TIMEOUT_MIN", 1) * SECONDS_PER_MINUTE;
+    const limits = this.bootLimits(record);
+    const maxEtaS = limits.etaMin * SECONDS_PER_MINUTE;
+    const bootTimeoutS = limits.timeoutMin * SECONDS_PER_MINUTE;
     const seen = this.downloadSeen;
     if (seen === null || seen.hostname !== hostname || seen.id !== id || dl.bytes_done < seen.lastBytes) {
       this.downloadSeen = { hostname, id, firstAt: now, firstBytes: dl.bytes_done, lastBytes: dl.bytes_done, slowSince: null, count: 0 };
@@ -1866,7 +1914,9 @@ export class Lifecycle {
     const next = { ...seen, lastBytes: dl.bytes_done, slowSince: seen.slowSince ?? now, count: seen.count + 1 };
     this.downloadSeen = next;
     if (next.count < STUCK_CONFIRMATIONS || now - next.slowSince < STUCK_DWELL_S) return null;
-    return measuredMbS(rate / BYTES_PER_MB) ?? 0;
+    // Too slow for the download limit, or fast enough for it but too late for the boot limit: two different stories.
+    const mbS = measuredMbS(rate / BYTES_PER_MB) ?? 0;
+    return eta > maxEtaS ? { code: "slow_download", mbS, limitMin: limits.etaMin } : { code: "boot_too_long", mbS, limitMin: limits.timeoutMin };
   }
 
   /**
@@ -1923,12 +1973,12 @@ export class Lifecycle {
    * VAST_BAD_MACHINE_TTL_MIN. A container that started and then stopped (boot_stopped) does not blame
    * the machine. Called inside reconcile (exclusive): the record is the active one, never a newer Start's.
    */
-  private noteStuck(record: InstanceRecord, inst: VastInstance, now: number, code: StuckCode, measured: number | null = null): void {
+  private noteStuck(record: InstanceRecord, inst: VastInstance, now: number, code: StuckCode, measured: number | null = null, limitMin: number | null = null): void {
     const hostname = record.tailnet_hostname;
     const offerServer = this.startedGpu?.hostname === hostname ? this.startedGpu.server : NO_SERVER;
     const server = mergeServer(serverInfo(inst), offerServer) ?? NO_SERVER;
     const status = inst.actual_status !== null && STATUS_WORD.test(inst.actual_status) ? inst.actual_status : "unknown";
-    this.recordStuck(record, inst.id, status, server, now, code, measured);
+    this.recordStuck(record, inst.id, status, server, now, code, measured, true, limitMin);
   }
 
   private recordStuck(
@@ -1940,6 +1990,7 @@ export class Lifecycle {
     code: StuckCode,
     measured: number | null,
     blame = true,
+    limitMin: number | null = null,
   ): void {
     const avoid = blame && BAD_MACHINE_CODES.has(code) ? server.machine_id : null;
     const entry: StuckStart = {
@@ -1949,7 +2000,8 @@ export class Lifecycle {
       machine_id: avoid,
       location: server.location,
       down_mbps: server.down_mbps,
-      measured_mb_s: code === "slow_download" ? measured : null,
+      measured_mb_s: code === "slow_download" || code === "boot_too_long" ? measured : null,
+      limit_min: code === "slow_download" || code === "boot_too_long" ? limitMin : null,
     };
     this.memoryStuck.push(entry);
     this.memoryStuck.splice(0, Math.max(0, this.memoryStuck.length - STUCK_MEMORY_MAX));
@@ -1983,6 +2035,10 @@ export class Lifecycle {
           ? `lifecycle: slow network: instance ${inst} on machine ${machine} gave up during its boot (${speed}); ${avoiding}`
           : `lifecycle: slow download: instance ${inst} on machine ${machine} downloads the models at ${speed}; ` +
             `releasing it and ${avoiding}`;
+        break;
+      case "boot_too_long":
+        text = `lifecycle: boot too long: instance ${inst} on machine ${machine} downloads the models at ${speed}, which ` +
+          `would end after the boot limit of ${limitMin ?? "?"} min; releasing it and ${avoiding}`;
         break;
       default:
         text = `lifecycle: boot failed: instance ${inst} on machine ${machine} disappeared during its boot; ${avoiding}`;

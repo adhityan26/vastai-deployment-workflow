@@ -486,6 +486,22 @@ describe("UsageHistory stuck starts (kept next to the sessions, tolerant loader)
     expect(list[0]!.hostname).toBe("vast-4");
   });
 
+  it("keeps a boot_too_long or slow_download limit in minutes, writes it only when known, and refuses a bad one", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "usage-stuck-limit-")), "usage.json");
+    const h = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    h.noteStuck(rec({ hostname: "vast-1", code: "boot_too_long", measured_mb_s: 22, limit_min: 65 }) as never);
+    h.noteStuck(rec({ hostname: "vast-2", code: "slow_boot", limit_min: null }) as never);
+    h.noteStuck(rec({ hostname: "vast-3", code: "slow_download", measured_mb_s: 1, limit_min: 1.5 }) as never);
+    const raw = JSON.parse(readFileSync(path, "utf8")).stuck;
+    expect(raw[0]).toMatchObject({ code: "boot_too_long", measured_mb_s: 22, limit_min: 65 });
+    expect(raw[1]).not.toHaveProperty("limit_min"); // an older web still loads it
+    expect(raw[2]).not.toHaveProperty("limit_min");
+    const again = new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries)));
+    expect(again.stuckStarts().map((r) => r.limit_min ?? null)).toEqual([65, null, null]);
+    writeFileSync(path, JSON.stringify({ version: 1, entries: [], stuck: [rec({ code: "boot_too_long", measured_mb_s: 1, limit_min: -5 })] }));
+    expect(new UsageHistory(LIMITS, new UsageStore(path, usageFileCap(LIMITS.maxEntries))).stuckStarts()).toEqual([]);
+  });
+
   it("drops a bad stuck record and keeps the good ones and the sessions", () => {
     const path = join(mkdtempSync(join(tmpdir(), "usage-stuck-bad-")), "usage.json");
     const session = {

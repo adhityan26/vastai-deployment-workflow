@@ -64,6 +64,8 @@ const cfg = {
   bootAgentGraceMin: 10,
   modelEtaMinObserveS: 120,
   bootMaxDownloadEtaMin: 20,
+  bootMinDownloadMbS: 25,
+  bootTimeoutMaxMin: 120,
   netProbeBytes: 25165824,
   netProbeMinMbps: 20,
   downloadConnections: 4,
@@ -1378,6 +1380,7 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
       code: "start_stuck",
       server: { location: "Quebec, CA", down_mbps: 860, up_mbps: null, reliability: null, machine_id: BAD },
       measured_mb_s: null,
+      limit_min: null,
     });
     const line = logs.find((l) => l.includes("start stuck"));
     expect(line).toContain("instance 900");
@@ -1570,6 +1573,7 @@ describe("Lifecycle stuck start (VAST_START_STUCK_MIN)", () => {
       code: "start_stuck",
       server: { location: "Quebec, CA", down_mbps: 860, up_mbps: null, reliability: null, machine_id: BAD },
       measured_mb_s: null,
+      limit_min: null,
     });
     await life2.start();
     expect(s.vast.createdOffers).toEqual([11, 12]);
@@ -1849,7 +1853,7 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       s.downloading(2.8 * MB * 180);
       expect(reasons(await s.at(T0 + 6 * MIN))).toEqual(["slow_download"]); // slow 2, a minute later
       const view = await s.life.view();
-      expect(view.start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 2.8 });
+      expect(view.start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 2.8, limit_min: 20 });
       expect(view.start_failure?.server).toMatchObject({ machine_id: BAD, location: "Lithuania, LT", down_mbps: 888 });
       expect((await s.life.estimate()).offer_id).toBe(12);
       const line = s.logs.find((l) => l.includes("slow download"));
@@ -1950,7 +1954,7 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       }
     });
 
-    it("a download that would end after BOOT_TIMEOUT_MIN is released early even with an ETA under the limit", async () => {
+    it("a download that would end after BOOT_TIMEOUT_MIN is released early even with an ETA under the limit (boot_too_long)", async () => {
       const s = slowSetup();
       await s.life.start();
       s.downloading(0);
@@ -1959,8 +1963,10 @@ describe("Lifecycle slow boot release (slow_boot, slow_download) and boots that 
       // ETA about 17.8 min (< 20), but 8 + 17.8 + the rest of the boot is past 25.
       expect(reasons(await s.at(T0 + 8 * MIN))).toEqual([]);
       s.downloading(12.6 * MB * 180);
-      expect(reasons(await s.at(T0 + 9 * MIN))).toEqual(["slow_download"]);
-      expect((await s.life.view()).start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 12.6 });
+      expect(reasons(await s.at(T0 + 9 * MIN))).toEqual(["boot_too_long"]);
+      // Not "too slow": fast enough for the download limit, too late for the boot limit (25 min, image-only).
+      expect((await s.life.view()).start_failure).toMatchObject({ code: "boot_too_long", measured_mb_s: 12.6, limit_min: 25 });
+      expect((await s.life.estimate()).offer_id).toBe(12); // its machine is avoided like a slow one
     });
 
     it("no model list (no profile) never judges the download", async () => {
@@ -2369,5 +2375,158 @@ describe("extra LoRAs on the instance", () => {
     const off = setup();
     await off.life.start();
     expect(off.vast.requests[0]!.env).not.toHaveProperty("LORA_LINK_MAX_BYTES");
+  });
+});
+
+describe("boot limits scale with what the boot downloads", () => {
+  const MIN = 60;
+  const MB = 1_000_000;
+  const GB = 1000 * MB;
+  // 15 GB of image files; a video family of 60 GB (its own files) and the base video section of 18 GB.
+  const models: ModelSpec[] = [
+    { file: "img.gguf", size_bytes: 15 * GB },
+    { file: "v5.safetensors", size_bytes: 18 * GB },
+    { file: "h.safetensors", size_bytes: 30 * GB },
+    { file: "l.safetensors", size_bytes: 30 * GB },
+  ];
+  const familyFiles = { small: ["v5.safetensors"], big: ["h.safetensors", "l.safetensors"] };
+  const runningRow = { actual_status: "running", cur_state: "running", intended_status: "running", last_started: T0 + 60 };
+  const cfgVideo = { vastVideoDiskGb: 80, bootMinDownloadMbS: 25, bootTimeoutMaxMin: 120 };
+  function boot(cfgOver: Record<string, unknown> = {}) {
+    const s = setup({ models, videoFiles: familyFiles.small, familyFiles, cfg: { ...cfgVideo, ...cfgOver } });
+    s.agent.statusImpl = async () => {
+      throw new Unreachable("agent not reachable");
+    };
+    const at = async (t: number) => {
+      if (s.vast.instances[0] !== undefined) Object.assign(s.vast.instances[0], runningRow);
+      s.time.now = t;
+      return s.life.reconcile();
+    };
+    /** The agent of a boot that downloads the image files and the big family, at `bytes` overall. */
+    const downloading = (bytes: number) => {
+      const order = models.filter((m) => m.file !== "v5.safetensors");
+      let before = 0;
+      for (const m of order) {
+        if (bytes < before + m.size_bytes || m === order.at(-1)) {
+          const done = Math.min(bytes - before, m.size_bytes);
+          const fam = (id: string, b: boolean) => ({ id, state: "not_installed" as const, boot: b, bytes_done: 0, bytes_total: 1 });
+          s.agent.statusImpl = async () =>
+            status("downloading", {
+              progress: { phase: "models", file: m.file, bytes_done: done, bytes_total: m.size_bytes },
+              video_models: { state: "not_installed", boot: false, bytes_done: 0, bytes_total: 1 },
+              video_families: [fam("small", false), fam("big", true)],
+            });
+          return;
+        }
+        before += m.size_bytes;
+      }
+    };
+    return { ...s, at, downloading };
+  }
+  const reasons = (r: { destroyed: { reason: string }[] }) => r.destroyed.map((d) => d.reason);
+
+  it("an image-only boot keeps today's limits exactly: no extra on the record, released at BOOT_TIMEOUT_MIN", async () => {
+    const s = boot();
+    await s.life.start();
+    expect(await s.registry.active()).not.toHaveProperty("boot_extra_min");
+    expect(reasons(await s.at(T0 + 25 * MIN - 1))).toEqual([]);
+    expect(reasons(await s.at(T0 + 25 * MIN))).toEqual(["boot_timeout"]);
+  });
+
+  it("a boot with a video family gets the minutes its extra bytes need at BOOT_MIN_DOWNLOAD_MB_S", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    // 60 GB at 25 MB/s = 40 min.
+    expect(await s.registry.active()).toMatchObject({ boot_extra_min: 40 });
+    expect(reasons(await s.at(T0 + 64 * MIN))).toEqual([]);
+    expect(reasons(await s.at(T0 + 65 * MIN))).toEqual(["boot_timeout"]);
+  });
+
+  it("the base video section alone counts its own files (18 GB: 12 min)", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true });
+    expect(await s.registry.active()).toMatchObject({ boot_extra_min: 12 });
+    const odd = boot({ bootMinDownloadMbS: 7 }); // 18 GB at 7 MB/s = 42.9 min: rounded up
+    await odd.life.start(undefined, null, { videoModels: true });
+    expect(await odd.registry.active()).toMatchObject({ boot_extra_min: 43 });
+  });
+
+  it("is capped by BOOT_TIMEOUT_MAX_MIN, and the owner's larger BOOT_TIMEOUT_MIN just raises the base", async () => {
+    const capped = boot({ bootMinDownloadMbS: 1 }); // 60 GB at 1 MB/s = 1000 min, capped
+    await capped.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    expect(reasons(await capped.at(T0 + 119 * MIN))).toEqual([]);
+    expect(reasons(await capped.at(T0 + 120 * MIN))).toEqual(["boot_timeout"]);
+    const owner = boot({ bootTimeoutMin: 60 });
+    await owner.life.start();
+    expect(reasons(await owner.at(T0 + 59 * MIN))).toEqual([]);
+    expect(reasons(await owner.at(T0 + 60 * MIN))).toEqual(["boot_timeout"]); // image-only: the base alone
+    const ownerVideo = boot({ bootTimeoutMin: 60 });
+    await ownerVideo.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    expect(reasons(await ownerVideo.at(T0 + 99 * MIN))).toEqual([]);
+    expect(reasons(await ownerVideo.at(T0 + 100 * MIN))).toEqual(["boot_timeout"]); // 60 + 40
+    const above = boot({ bootTimeoutMin: 150 }); // a base above the cap is kept as is
+    await above.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    expect(reasons(await above.at(T0 + 149 * MIN))).toEqual([]);
+    expect(reasons(await above.at(T0 + 150 * MIN))).toEqual(["boot_timeout"]);
+  });
+
+  it("the limit comes from the record (it survives a web restart), and an old record without it keeps today's", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    await s.registry.update(HOST, { boot_extra_min: 5 });
+    expect(reasons(await s.at(T0 + 29 * MIN))).toEqual([]);
+    expect(reasons(await s.at(T0 + 30 * MIN))).toEqual(["boot_timeout"]);
+  });
+
+  it("the live case: 85 GB at 71.6 MB/s is never released (it would have been at 25 min before)", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    let bytes = 0;
+    s.downloading(bytes);
+    await s.at(T0 + 3 * MIN);
+    for (let m = 4; m <= 23; m++) {
+      bytes += 71.6 * MB * 60;
+      s.downloading(bytes);
+      expect(reasons(await s.at(T0 + m * MIN)), `${m} min`).toEqual([]);
+    }
+  });
+
+  it("BOOT_MAX_DOWNLOAD_ETA_MIN gets the same extra: 75 GB left at 30 MB/s (about 42 min) is fine with 40 more minutes", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    let bytes = 0;
+    s.downloading(bytes);
+    await s.at(T0 + 2 * MIN);
+    for (let m = 3; m <= 8; m++) {
+      bytes += 30 * MB * 60;
+      s.downloading(bytes);
+      expect(reasons(await s.at(T0 + m * MIN)), `${m} min`).toEqual([]);
+    }
+  });
+
+  it("a speed under what the scaled ETA allows is released as slow_download with the speed and the ETA limit", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    s.downloading(0);
+    await s.at(T0 + 3 * MIN);
+    s.downloading(10 * MB * 120);
+    expect(reasons(await s.at(T0 + 5 * MIN))).toEqual([]); // slow 1: 75 GB at 10 MB/s is about 125 min > 60
+    s.downloading(10 * MB * 180);
+    expect(reasons(await s.at(T0 + 6 * MIN))).toEqual(["slow_download"]);
+    expect((await s.life.view()).start_failure).toMatchObject({ code: "slow_download", measured_mb_s: 10, limit_min: 60 });
+  });
+
+  it("a download that would end after the (scaled) boot limit is released as boot_too_long, not as a slow network", async () => {
+    const s = boot();
+    await s.life.start(undefined, null, { videoModels: true, videoFamilies: ["big"] });
+    s.downloading(0);
+    await s.at(T0 + 15 * MIN); // a late agent
+    // 22 MB/s: 75 GB take about 57 min (under the 60 min ETA limit), but 17 + 57 + 2 > 65.
+    s.downloading(22 * MB * 120);
+    expect(reasons(await s.at(T0 + 17 * MIN))).toEqual([]);
+    s.downloading(22 * MB * 180);
+    expect(reasons(await s.at(T0 + 18 * MIN))).toEqual(["boot_too_long"]);
+    expect((await s.life.view()).start_failure).toMatchObject({ code: "boot_too_long", measured_mb_s: 22, limit_min: 65 });
+    expect(s.logs.find((l) => l.includes("boot too long"))).toContain("about 22 MB/s");
   });
 });

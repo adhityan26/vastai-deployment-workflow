@@ -353,6 +353,8 @@ async function harness(
     bootAgentGraceMin: 10,
     modelEtaMinObserveS: 120,
     bootMaxDownloadEtaMin: 20,
+    bootMinDownloadMbS: 25,
+    bootTimeoutMaxMin: 120,
     netProbeBytes: 25165824,
     netProbeMinMbps: 20,
     downloadConnections: 4,
@@ -708,12 +710,13 @@ describe("GET /api/state", () => {
         message: "The rented machine did not start. It was released; try Start again.",
         server: expected,
         measured_mb_s: null,
+        limit_min: null,
       });
     }
     expect((await call("GET", "/api/state", await member())).body).not.toContain("45608");
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     expect(doc.components.schemas.State.required).toContain("start_failure");
-    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_failed"]);
+    expect(doc.components.schemas.StartFailureCode.enum).toEqual(["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_too_long", "boot_failed"]);
   });
 
   it("words slow_download with the measured speed (a number only)", async () => {
@@ -731,8 +734,23 @@ describe("GET /api/state", () => {
     expect(schemaText).not.toContain("BOOT_AGENT_GRACE_MIN old");
     const doc = JSON.parse(readFileSync(OPENAPI, "utf8"));
     const sf = doc.components.schemas.State.properties.start_failure;
-    expect(sf.required).toEqual(["code", "message", "server", "measured_mb_s"]);
+    expect(sf.required).toEqual(["code", "message", "server", "measured_mb_s", "limit_min"]);
     expect(sf.properties.measured_mb_s.type).toEqual(["number", "null"]);
+    expect(sf.properties.limit_min.type).toEqual(["integer", "null"]);
+  });
+
+  it("tells a too slow download from one that would not finish in the boot time limit (numbers only)", async () => {
+    const { startFailureMessage } = await import("../src/routes.js");
+    const retry = "It was released; try Start again, a different machine is chosen.";
+    expect(startFailureMessage("slow_download", 10, 60)).toBe(
+      `The rented machine's network is too slow (about 10 MB/s to the model host; the download would take more than 60 minutes). ${retry}`,
+    );
+    expect(startFailureMessage("boot_too_long", 71.6, 25)).toBe(
+      `The model download would not finish before the boot time limit (about 71.6 MB/s, limit 25 minutes). ${retry}`,
+    );
+    expect(startFailureMessage("boot_too_long", null, 25)).toBe(`The model download would not finish before the boot time limit (limit 25 minutes). ${retry}`);
+    expect(startFailureMessage("boot_too_long", null, null)).toBe(`The model download would not finish before the boot time limit. ${retry}`);
+    expect(startFailureMessage("boot_too_long", 5, 1.5)).toBe(`The model download would not finish before the boot time limit (about 5 MB/s). ${retry}`);
   });
 
   it("shows where the server is: location and speeds for everyone, the machine id for admins only", async () => {

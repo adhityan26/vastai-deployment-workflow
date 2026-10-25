@@ -330,11 +330,24 @@ the region.
    averages the overall bytes (across the profile files) since the first sample of a window; once the
    window is `MODEL_ETA_MIN_OBSERVE_S` (default 120) long, a remaining time above
    `BOOT_MAX_DOWNLOAD_ETA_MIN` (default 20) at that speed is slow. For 15 GB that is below about
-   12.5 MB/s at the start; 55 MB/s gives an ETA of about 5 min, 2.8 MB/s about 90 min. Also slow: a
-   download that at that speed would end (plus 2 min for the rest of the boot) after
-   `BOOT_TIMEOUT_MIN`. Without it a band of about 12.5-15 MB/s (or a late start) was doomed: under the
-   ETA limit, yet the boot timeout released it later without blaming the machine. A healthy 18-20 MB/s
-   download that starts on time is not released. The agent's status carries bytes only, so the web
+   12.5 MB/s at the start; 55 MB/s gives an ETA of about 5 min, 2.8 MB/s about 90 min. A download
+   under the ETA limit that at that speed would still end (plus 2 min for the rest of the boot) after
+   the boot limit is released as **`boot_too_long`** (its own code and text, the machine is blamed too).
+   Without that rule a band of about 12.5-15 MB/s (or a late start) was doomed: under the ETA limit,
+   yet the boot timeout released it later without blaming the machine. A healthy 18-20 MB/s download
+   that starts on time is not released.
+
+   **Limits scale with what the boot downloads.** An image-only boot uses `BOOT_TIMEOUT_MIN` (25) and
+   `BOOT_MAX_DOWNLOAD_ETA_MIN` (20) exactly as before. A boot with the video models adds
+   `ceil(video bytes / BOOT_MIN_DOWNLOAD_MB_S (25) MB/s / 60)` minutes to both (the pinned sizes of the
+   chosen families' files, or of the base video section when none is named): 60 GB adds 40 min (boot
+   limit 65, ETA limit 60), the base section alone about 12 min. The boot limit never grows past
+   `BOOT_TIMEOUT_MAX_MIN` (120); a `BOOT_TIMEOUT_MIN` above that cap is kept as it is. The extra is
+   computed at Start and stored on the instance record (`boot_extra_min`, absent = 0 for older
+   records), so a web restart keeps it. Why: a 14B boot at about 71.6 MB/s was released as
+   `slow_download` 5 minutes before it would have finished, because the fixed 25/20 min limits were
+   sized for the 15 GB image set. A raised `BOOT_TIMEOUT_MIN` / `BOOT_MAX_DOWNLOAD_ETA_MIN` in `.env`
+   (e.g. 60) stays valid: it only raises the base the extra is added to. The agent's status carries bytes only, so the web
    computes the rate itself (the page does the same for its own speed and ETA). Fewer bytes than at
    the previous sample (a retry restarted a file) start a new window.
 4. **A boot that vanished (web, `boot_failed`).** An instance that disappears while it is still
@@ -361,14 +374,27 @@ Rules 2 and 3 use the stuck-start discipline: two consecutive reconciles whose f
 least a minute apart (and, for rule 2, `BOOT_AGENT_GRACE_MIN` apart), keyed by hostname and instance id;
 any good sample starts the run over, a failed Vast list or agent read is no sample, and a web restart
 only delays (the sightings live in memory). A record that reached ready is never judged. The release
-uses the normal destroy path: usage reason "Boot failed", console end reason `slow_boot` or
-`slow_download`, a `lifecycle: slow boot|slow download` warning with the instance and machine ids
-(never a hostname), and `start_failure` in `GET /api/state`; the page says "The rented machine's network
-is too slow (about N MB/s to the model host). It was released; try Start again, a different machine is
-chosen." for `slow_download` (N, a number only, when known) and "The rented machine did not finish
-starting up in time. It was released; try Start again, a different machine is chosen." for
-`slow_boot`. The unreachable rule (`UNREACHABLE_DESTROY_MIN`, 15) still covers an agent that answered
-once and then went silent.
+uses the normal destroy path: usage reason "Boot failed", console end reason `slow_boot`,
+`slow_download` or `boot_too_long`, a `lifecycle: slow boot|slow download|boot too long` warning with
+the instance and machine ids (never a hostname), and `start_failure` in `GET /api/state` (with
+`measured_mb_s` and `limit_min`, numbers only, null when unknown). The unreachable rule
+(`UNREACHABLE_DESTROY_MIN`, 15) still covers an agent that answered once and then went silent.
+
+What each start failure message on the page means (N = measured MB/s, M = the limit in minutes; each
+part only when known):
+
+| code | Page text | Meaning |
+| --- | --- | --- |
+| `slow_download` | "The rented machine's network is too slow (about N MB/s to the model host; the download would take more than M minutes). It was released; try Start again, a different machine is chosen." | At that speed the rest of the download would take longer than the ETA limit (M = `BOOT_MAX_DOWNLOAD_ETA_MIN` plus the boot's extra). The machine is avoided. |
+| `boot_too_long` | "The model download would not finish before the boot time limit (about N MB/s, limit M minutes). It was released; try Start again, a different machine is chosen." | Fast enough for the ETA limit, but the download plus the rest of the boot would end after the boot limit (M = `BOOT_TIMEOUT_MIN` plus the extra, capped). The machine is avoided. |
+| `slow_boot` | "The rented machine did not finish starting up in time. It was released; try Start again, a different machine is chosen." | The agent never answered (rule 2). |
+| `start_stuck` | "The rented machine did not start. It was released; try Start again." | The container never started. |
+| `boot_stopped` | "The rented machine stopped while it was starting. It was released; try Start again." | Vast reported it stopped during the boot. |
+| `boot_failed` | "The rented machine's boot failed and it removed itself; try Start again." | Rule 4. |
+
+The early network probe's `slow_network` keeps its own text (shown as `slow_download` with its speed,
+without a limit). Rollback: an older web drops `boot_too_long` entries from the usage file's stuck-start
+list when it reads them (unknown shape), so that machine is no longer avoided; nothing else breaks.
 
 5. **Faster downloads.** The agent fetches each model file over `DOWNLOAD_CONNECTIONS` (default 4,
    max 16; 1 = the old single stream) parallel byte ranges when the server answers HEAD with
@@ -379,7 +405,9 @@ once and then went silent.
 
 Tuning: raise `NET_PROBE_MIN_MBPS` or lower `BOOT_MAX_DOWNLOAD_ETA_MIN` to be stricter (more releases,
 fewer slow boots); keep `BOOT_MAX_DOWNLOAD_ETA_MIN` plus the rest of a boot (about 3 min) below
-`BOOT_TIMEOUT_MIN` (the doomed-download rule then releases it in time). Measuring on a live instance:
+`BOOT_TIMEOUT_MIN` (the doomed-download rule then releases it in time). Lower `BOOT_MIN_DOWNLOAD_MB_S`
+to give video boots more time (more minutes per GB), raise `BOOT_TIMEOUT_MAX_MIN` to let the largest
+boots run longer. Measuring on a live instance:
 `curl -sS -L -o /dev/null -r 0-25165823 -w '%{speed_download}\n' <resolve URL> --next -sS -L -o /dev/null
 -r 25165824-50331647 -w '%{speed_download}\n' <resolve URL>` (the second number is what the probe uses).
 
@@ -674,8 +702,9 @@ only where the server offers video; unticked by default; the last choice is reme
   `VAST_DISK_GB` and `VAST_VIDEO_DISK_GB`), the Start body carries `video_models: true`, the instance gets
   `INCLUDE_VIDEO_MODELS=true` and downloads the video files at boot like every other model (pinned size, ranged
   download, disk check) and also requires the section's `node_classes` before ready. The boot takes longer
-  (about 18 GB more): on a slow host the slow-download guard may release the machine; raise
-  `BOOT_MAX_DOWNLOAD_ETA_MIN` if that happens too often.
+  (about 18 GB more); the boot and ETA limits grow with the video bytes (see "Slow boots", limits scale
+  with what the boot downloads). On a slow host the slow-download guard may still release the machine;
+  lower `BOOT_MIN_DOWNLOAD_MB_S` if that happens too often.
 
 **On demand** (changed your mind after the start): in the Video tool an admin sees "This instance was started without
 the video models" and a **Download video models (about N GB, several minutes)** button (`POST /api/video-models`,

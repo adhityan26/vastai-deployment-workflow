@@ -99,10 +99,10 @@ export interface UsageEntry {
  * the agent never answered (slow_boot), the model download was too slow (slow_download), or the
  * instance disappeared during its boot without the web asking (boot_failed).
  */
-export const STUCK_CODES = ["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_failed"] as const;
+export const STUCK_CODES = ["start_stuck", "boot_stopped", "slow_boot", "slow_download", "boot_too_long", "boot_failed"] as const;
 export type StuckCode = (typeof STUCK_CODES)[number];
 /** Codes whose machine is avoided for VAST_BAD_MACHINE_TTL_MIN (boot_stopped does not blame the machine). */
-export const BAD_MACHINE_CODES: ReadonlySet<StuckCode> = new Set(["start_stuck", "slow_boot", "slow_download", "boot_failed"]);
+export const BAD_MACHINE_CODES: ReadonlySet<StuckCode> = new Set(["start_stuck", "slow_boot", "slow_download", "boot_too_long", "boot_failed"]);
 /** Largest download speed (MB/s) a stuck record keeps; anything above is not a measurement. */
 export const MAX_MEASURED_MB_S = 100_000;
 
@@ -125,13 +125,25 @@ export interface StuckStart {
   machine_id: number | null;
   location: string | null;
   down_mbps: number | null;
-  /** slow_download: the model download speed the web measured (MB/s, one decimal); else null. */
+  /** slow_download, boot_too_long: the model download speed the web measured (MB/s, one decimal); else null. */
   measured_mb_s: number | null;
+  /** slow_download: the download limit in minutes; boot_too_long: the boot limit in minutes; else null (or absent). */
+  limit_min?: number | null;
 }
 
 const STUCK_BASE_KEYS = ["hostname", "code", "at", "machine_id", "location", "down_mbps"];
 // Records written before measured_mb_s existed have only the base keys; both shapes load.
-const STUCK_KEYS = [STUCK_BASE_KEYS.sort().join(","), [...STUCK_BASE_KEYS, "measured_mb_s"].sort().join(",")];
+// Then limit_min was added: three shapes load.
+const STUCK_KEYS = [
+  STUCK_BASE_KEYS.sort().join(","),
+  [...STUCK_BASE_KEYS, "measured_mb_s"].sort().join(","),
+  [...STUCK_BASE_KEYS, "measured_mb_s", "limit_min"].sort().join(","),
+];
+const LIMIT_MAX_MIN = 100_000;
+/** A limit in whole minutes fit to keep and show; else null. */
+export function limitMin(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0 && raw <= LIMIT_MAX_MIN ? raw : null;
+}
 
 function validStuck(v: unknown): v is StuckStart {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
@@ -139,8 +151,10 @@ function validStuck(v: unknown): v is StuckStart {
   if (!STUCK_KEYS.includes(Object.keys(r).sort().join(","))) return false;
   const machine = r["machine_id"];
   const measured = r["measured_mb_s"] ?? null;
+  const limit = r["limit_min"] ?? null;
   return (
     (measured === null || measuredMbS(measured) === measured) &&
+    (limit === null || limitMin(limit) === limit) &&
     typeof r["hostname"] === "string" && HOSTNAME.test(r["hostname"]) &&
     (STUCK_CODES as readonly unknown[]).includes(r["code"]) &&
     typeof r["at"] === "number" && Number.isSafeInteger(r["at"]) &&
@@ -569,12 +583,15 @@ export class UsageHistory {
   /** A start the web released because its container did not run (see StuckStart). */
   noteStuck(record: StuckStart): void {
     this.all();
+    const { limit_min: _limit, ...rest } = record;
     const clean: StuckStart = {
-      ...record,
+      ...rest,
       at: Math.floor(record.at),
       location: serverLocation(record.location),
       down_mbps: mbps(record.down_mbps),
       measured_mb_s: measuredMbS(record.measured_mb_s),
+      // Written only when known: an older web loads every record without it.
+      ...(limitMin(record.limit_min) === null ? {} : { limit_min: limitMin(record.limit_min) }),
     };
     if (!validStuck(clean)) return;
     this.stuck.push(clean);

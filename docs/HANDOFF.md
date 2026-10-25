@@ -29,7 +29,7 @@ OFF on `master` and ON in `feat/tool-menu` (commit 035d4f2) so the owner can tes
 three generate ones pre-fill cfg 3.0 + a negative prompt, UNVERIFIED on this model.
 
 **Slow boots (what the guards do; details in `deploy/web/README.md`, "Slow boots"):** web releases a booting instance as `slow_boot`
-(agent silent 10 min after the container ran) or `slow_download` (ETA over 20 min or past the boot timeout), plus the start-stuck rule
+(agent silent 10 min after the container ran) or `slow_download` (ETA over 20 min) / `boot_too_long` (would end past the boot timeout); both limits grow for video boots, plus the start-stuck rule
 (container never started). Released machines go on a bad list for 60 min, but only for failures that are the machine's fault.
 The instance runs a first-step network probe (`net_probe`, 48 MiB of the largest pinned file, timing the second half, below 6 MB/s twice
 = exit 14 + self-destroy; skipped on restarts or when models exist) and downloads each model over 4 parallel byte ranges.
@@ -173,6 +173,17 @@ downloads in the background through the video download slot; a job with a LoRA n
 `unknown_extra_lora`. Hidden is not secret from anyone with server or instance access. UNVERIFIED: a real download on
 an instance, ComfyUI listing new LoRAs without a restart, stacking with the 4-step LoRAs. Runbook: README "Extra LoRAs
 added from the page".
+
+**Boot limits scale with the download (branch `fix/boot-timeout-scaling`, 2026-10-25, pushed, NOT merged).** After a live
+14B boot was released as `slow_download` at about 71.6 MB/s 5 minutes before it would have finished: a video boot adds
+`ceil(video bytes / BOOT_MIN_DOWNLOAD_MB_S (25) / 60)` minutes to `BOOT_TIMEOUT_MIN` and to `BOOT_MAX_DOWNLOAD_ETA_MIN`
+(the boot limit capped at `BOOT_TIMEOUT_MAX_MIN`, 120; a base above the cap is kept). Computed at Start from the chosen
+families' pinned sizes and stored on the registry record as `boot_extra_min` (absent = 0). Image-only boots keep exactly
+25/20. New start failure code `boot_too_long` ("The model download would not finish before the boot time limit") for the
+doomed-download rule, separate from `slow_download` ("too slow"); both carry `measured_mb_s` and `limit_min`. Both avoid
+the machine. The owner's `BOOT_TIMEOUT_MIN=60` workaround stays valid (it raises the base). UNVERIFIED live: the 25 MB/s
+floor is a guess; a `VIDEO_MODEL_URL` override of a different size is not counted (pinned sizes only). Runbook: README
+"Slow boots".
 
 ## Next work, in order
 
