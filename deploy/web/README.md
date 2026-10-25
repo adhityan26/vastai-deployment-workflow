@@ -638,7 +638,7 @@ a saved image). One model does both, through native ComfyUI nodes only (no custo
 lengths of the profile (`video.sizes`, multiples of 32; `video.durations`, frames 4n+1 at `video.fps`) and an
 optional seed; there is no quality preset, negative prompt or guidance (the workflow keeps its own). The job runs
 like any other (same rate limit, same step counter over the websocket, previews if ComfyUI sends any) and the result
-is shown in `<video controls playsinline>` with a Download link.
+is shown in `<video controls loop playsinline>` (it repeats until paused; it does not start by itself) with a Download link.
 
 **It is OFF until `VIDEO_ENABLED=true` in `.env`** (a configuration key of the web app; the profile has no switch).
 Its three model files (about 18 GB) are pinned in `models:` of `instance/profiles/image.yaml` (the owner ran

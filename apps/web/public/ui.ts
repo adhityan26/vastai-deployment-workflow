@@ -2717,7 +2717,7 @@ export function mountApp(doc: Document, env: Env): App {
 
   /**
    * A video job's results: each file is fetched once (so it plays from a blob URL without range requests, also on
-   * phones) and shown in a <video controls playsinline> with a Download link. Videos are not saved to the gallery.
+   * phones) and shown in a looping <video controls playsinline> with a Download link. Videos are not saved to the gallery.
    */
   function videoResults(e: HistoryEntry): HTMLElement {
     const grid = make("div", undefined, "grid");
@@ -2728,6 +2728,8 @@ export function mountApp(doc: Document, env: Env): App {
       if (src !== null) {
         const player = make("video");
         player.controls = true;
+        // Repeat until the user pauses it (the controls stay).
+        player.loop = true;
         player.playsInline = true;
         player.setAttribute("playsinline", "");
         player.preload = "metadata";
