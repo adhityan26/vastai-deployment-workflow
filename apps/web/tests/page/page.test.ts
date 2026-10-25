@@ -1798,6 +1798,8 @@ describe("video", () => {
     expect(player).not.toBeNull();
     expect(player.controls).toBe(true);
     expect(player.hasAttribute("playsinline")).toBe(true);
+    // The clip repeats until the user pauses it.
+    expect(player.loop).toBe(true);
     expect(player.getAttribute("src")).toBe("blob:fake-video");
     const dl = q<HTMLAnchorElement>(".job a.dl")!;
     expect(dl.getAttribute("href")).toBe("blob:fake-video");
